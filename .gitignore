@@ -19,3 +19,6 @@ application-secret.yml
 
 # 本地模型权重、LoRA 适配器、训练任务与样本（体积大 / 含个人写作样本），绝不入库
 python-service/models/
+
+# 本机选定的 Python 解释器路径（由「Python 环境」页检测通过后写入，start.bat 读取）
+python-service/.python-env

@@ -60,11 +60,19 @@ ping -n 4 127.0.0.1 >nul
 
 rem ==================== 启动 AI 服务 ====================
 rem 小说提取调用「模型配置」中启用的模型（默认 DeepSeek，Key 在 backendpplication-secret.yml）
-if exist "%ROOT%python-service\.venv\Scripts\python.exe" (
-    echo [2/3] 启动 AI 服务  uvicorn app.main:app  -^>  http://localhost:8021
-    start "文件管理-AI服务" /D "%ROOT%python-service" cmd /k ".venv\Scripts\python -m uvicorn app.main:app --port 8021"
+rem Python 解释器：优先用「Python 环境」页检测通过并保存的路径（python-service\.python-env），否则用项目 venv
+set "PYEXE="
+if exist "%ROOT%python-service\.python-env" set /p PYEXE=<"%ROOT%python-service\.python-env"
+if defined PYEXE if not exist "%PYEXE%" (
+    echo [提示] 已保存的 Python 不存在：%PYEXE%，改用项目 venv
+    set "PYEXE="
+)
+if not defined PYEXE if exist "%ROOT%python-service\.venv\Scripts\python.exe" set "PYEXE=%ROOT%python-service\.venv\Scripts\python.exe"
+if defined PYEXE (
+    echo [2/3] 启动 AI 服务  %PYEXE%  -^>  http://localhost:8021
+    start "文件管理-AI服务" /D "%ROOT%python-service" cmd /k ""%PYEXE%" -m uvicorn app.main:app --port 8021"
 ) else (
-    echo [2/3] 跳过 AI 服务：未找到 python-service\.venv，请先按 CLAUDE.md 创建虚拟环境
+    echo [2/3] 跳过 AI 服务：未配置 Python。请启动后在「Python 环境」页面选择并检测
 )
 
 rem ==================== 启动前端 ====================

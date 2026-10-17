@@ -50,7 +50,7 @@ nan_novel/
 │       ├── router/     # Lazy-loaded routes
 │       ├── views/file/ # upload.vue, manage.vue
 │       ├── views/novel/ # create.vue (novel setting selector), extract.vue (extraction tasks & results)
-│       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型: models / fine-tuning / adapters / inference)
+│       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型), pyenv.vue (Python 环境 selection & check)
 │       ├── components/novel-options/ # schema-driven option UI (OptionField, ChoiceWidget, …)
 │       ├── novel-options/ # field-type registry, schema helpers, editor context
 │       └── mock/        # local placeholder data (until the DB exists)
@@ -134,6 +134,21 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 - CORS is GET/POST only, so update/delete endpoints use POST.
 - JSON endpoints use `common/ResultResponses.handle(...)` to map `BizException` → HTTP status + `Result.error`.
 - JDK 17 on Chinese Windows defaults to GBK: always pass an explicit charset when converting bytes ↔ String (and `spring.sql.init.encoding: UTF-8`).
+
+### Python environment API (`PythonEnvController`)
+
+Detection runs **in Java**: `PythonEnvService` executes the selected `python.exe` with the stdlib-only probe `src/main/resources/python/env_probe.py` (version, arch, venv/conda, `torch.cuda` + GPU/VRAM, and status of every line in `python-service/requirements.txt` / `requirements-local.txt`). The backend therefore never depends on the Python being checked.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/python-env/discover` | `system` (PATH `python`, Store `WindowsApps` stub flagged/skipped), `conda` (`conda env list --json`), `venv` (default `python-service/.venv`), `anyUsable`, `miniconda` guide links (official + Tsinghua), `current` |
+| `GET  /api/python-env/conda/envs?condaPath=` | Conda envs; `condaPath` = install dir or `conda.exe`; blank → `CONDA_EXE` → PATH → common dirs |
+| `GET  /api/python-env/browse?path=` | Server-side file browser for the "浏览" button (dirs + `python*.exe`; blank = drive roots) |
+| `POST /api/python-env/check {envType: SYSTEM\|CONDA\|VENV\|CUSTOM, pythonPath, condaRoot?, condaEnv?}` | Run the probe (≤150 s). `level` OK / WARN / ERROR + `problems[{level,title,detail,fix}]`. ERROR = invalid path, Store stub, Python < `python-env.min-version` (3.10), 32-bit, or missing **service** deps. WARN = torch/CUDA/local deps missing. OK/WARN → saved as the active row in `python_env` and written to `python-service/.python-env` |
+| `GET  /api/python-env/current` | Active config + `lastResult`, `exists` |
+
+- `python-service/.python-env` (git-ignored): one line, the interpreter path, written in the **native charset (GBK)** so `start.bat`'s `set /p` reads Chinese paths correctly; re-synced from the DB on every backend start. `start.bat` uses it for the AI service, falling back to `python-service/.venv`.
+- Project root is auto-detected (works when started from `backend/` or the repo root); override with `python-env.project-root`.
 
 ### File storage rules
 
@@ -241,7 +256,7 @@ Local-only for now; remote inference/training must plug into the existing extens
 
 - Prerequisites: **JDK 17** (the project does not compile on JDK 8), Maven, Node.js, and a running MySQL with schema `test10000`.
 - `start.bat` launches the services with one click. It contains **machine-specific hardcoded tool paths** (`JAVA17_HOME`, `MAVEN_BIN`, `NODE_DIR` under `D:\workplace\...`) — edit them to match the current machine; do not "fix" them for everyone.
-- `start.bat` also starts the AI service if `python-service/.venv` exists. To use the local Qwen llama.cpp server instead of DeepSeek, start it (see the `qwen` skill) and add a config with base URL `http://127.0.0.1:8001/v1`, concurrency 1.
+- `start.bat` also starts the AI service with the interpreter saved on the **Python 环境** page (`python-service/.python-env`), else `python-service/.venv`. To use the local Qwen llama.cpp server instead of DeepSeek, start it (see the `qwen` skill) and add a config with base URL `http://127.0.0.1:8001/v1`, concurrency 1.
 - Ports:
 
   | Service | Daily (user) | Testing (agents) |

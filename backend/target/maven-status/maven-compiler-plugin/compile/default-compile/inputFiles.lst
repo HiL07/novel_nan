@@ -1,9 +1,12 @@
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\PythonEnvService.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\common\Result.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\common\BizException.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\config\WebConfig.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\PythonEnv.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\common\ResultResponses.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\NovelExtractService.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\NovelExtractController.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\PythonEnvController.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\NovelExtract.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\FileController.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\FileInfo.java
@@ -15,4 +18,5 @@ C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\s
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\AiModelConfigMapper.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\AiServiceClient.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\FileService.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\PythonEnvMapper.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\AiModelConfigController.java

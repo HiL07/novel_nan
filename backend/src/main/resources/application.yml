@@ -13,7 +13,7 @@ spring:
   sql:
     init:
       mode: always                              # 每次启动执行建表脚本（CREATE TABLE IF NOT EXISTS）
-      schema-locations: classpath:sql/novel_extract.sql,classpath:sql/ai_model_config.sql
+      schema-locations: classpath:sql/novel_extract.sql,classpath:sql/ai_model_config.sql,classpath:sql/python_env.sql
       encoding: UTF-8                           # Windows 下 JDK 17 默认 GBK，脚本按 UTF-8 读取
   servlet:
     multipart:
@@ -45,3 +45,8 @@ ai:
     base-url: https://api.deepseek.com
     model: deepseek-chat
     api-key: ${DEEPSEEK_API_KEY:}
+
+# Python 环境检测（由 Java 执行所选 python.exe，后端不依赖该 Python）
+python-env:
+  project-root:            # 留空自动识别（从 backend/ 或项目根启动均可）
+  min-version: "3.10"

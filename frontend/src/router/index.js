@@ -33,6 +33,12 @@ const routes = [
     meta: { title: '模型配置', icon: 'Cpu' }
   },
   {
+    path: '/ai/pyenv',
+    name: 'aiPyEnv',
+    component: () => import('@/views/ai/pyenv.vue'),
+    meta: { title: 'Python 环境', icon: 'SetUp' }
+  },
+  {
     path: '/ai/local',
     name: 'aiLocal',
     component: () => import('@/views/ai/local.vue'),
