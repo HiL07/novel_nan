@@ -41,7 +41,7 @@ nan_novel/
 │   │   ├── service/    # Business logic
 │   │   └── FileApplication.java
 │   ├── src/main/resources/application.yml
-│   ├── src/main/resources/sql/   # Table DDL, run at startup by spring.sql.init
+│   ├── src/main/resources/sql/   # init.sql (full DB: create test10000 + all tables, import directly) + per-table DDL run at startup by spring.sql.init
 │   └── upload/         # Runtime file storage root (yyyy/MM/dd/<uuid>.<ext>)
 ├── frontend/           # Vue 3 + Vite SPA
 │   └── src/
@@ -156,6 +156,7 @@ Detection runs **in Java**: `PythonEnvService` executes the selected `python.exe
 - Stored filename = **UUID without dashes** + lowercased extension; date-partitioned as `yyyy/MM/dd/`.
 - DB stores only the **relative** `storage_path`; always resolve against the configured root and normalize paths (path-traversal safe).
 - Upload limit: 50 MB per file / per request (see `application.yml`).
+- **Database setup**: `mysql -u root -p < backend/src/main/resources/sql/init.sql` creates `test10000` and every table (idempotent, no data/secrets). Startup also auto-creates missing tables from the per-table scripts (`file.sql`, `novel_extract.sql`, `ai_model_config.sql`, `python_env.sql`). **When adding or changing a table, update both its per-table script and `init.sql`.**
 - `file` table (schema `test10000`) columns, derived from `FileInfo`: `id` (auto increment), `file_name`, `storage_path`, `file_size`, `content_type`, `file_ext`, `create_time`.
 
 ### Configuration & CORS
