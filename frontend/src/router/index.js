@@ -21,6 +21,12 @@ const routes = [
     meta: { title: '小说创作', icon: 'EditPen' }
   },
   {
+    // 工作区详情（不在侧边栏显示）
+    path: '/novel/workspace/:id',
+    name: 'novelWorkspace',
+    component: () => import('@/views/novel/workspace.vue')
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),

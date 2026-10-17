@@ -22,3 +22,6 @@ python-service/models/
 
 # 本机选定的 Python 解释器路径（由「Python 环境」页检测通过后写入，start.bat 读取）
 python-service/.python-env
+
+# 小说生成工作区（生成的正文、章节摘要），绝不入库
+python-service/novels/

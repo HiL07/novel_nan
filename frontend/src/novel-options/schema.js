@@ -31,28 +31,38 @@ export function newGroupItem(field) {
   return { _id: uid('item'), ...initValues(field.fields || []) }
 }
 
-function isEmpty(field, value) {
+/** 数字 / 滑块始终有值（默认值），只有用户动过才算「已确认」；记录在容器的 __touched 上 */
+const NEEDS_TOUCH = ['number', 'slider']
+
+export function markTouched(container, field) {
+  if (!container.__touched) container.__touched = {}
+  container.__touched[field.key] = true
+}
+
+function isEmpty(field, value, container) {
   if (value == null) return true
+  if (NEEDS_TOUCH.includes(field.type)) return !container?.__touched?.[field.key]
   if (isChoice(field)) return !value.selected?.length
   if (Array.isArray(value)) return value.length === 0
   if (typeof value === 'string') return value.trim() === ''
   return false
 }
 
-/** 字段是否已填写（用于分类计数） */
-export function isFilled(field, value) {
-  return !isEmpty(field, value)
+/** 字段是否已填写 / 确认（用于分类计数）；container 为该字段所在的取值容器 */
+export function isFilled(field, container) {
+  return !isEmpty(field, container?.[field.key], container)
 }
 
 /**
- * 把「字段定义 + 取值」整理成与界面无关的设定结构（之后可直接拼进生成小说的 prompt / 存库）：
- * [{ key, label, value, display, children: [...] }]，未填写的字段会被省略。
+ * 把「字段定义 + 取值」整理成与界面无关的设定结构（小说生成的约束来源 / 存库）：
+ * [{ key, label, type, value, display, children: [...] }]，未填写 / 未确认的字段会被省略。
+ * type 为字段类型；选择项的细分选项容器为 type="option"；分组中的每一项为 type="groupItem"（带 name）。
  */
 export function summarizeFields(fields, container) {
   const out = []
   for (const field of fields) {
     const value = container?.[field.key]
-    if (isEmpty(field, value)) continue
+    if (isEmpty(field, value, container)) continue
 
     if (isChoice(field)) {
       const picked = value.selected
@@ -62,11 +72,12 @@ export function summarizeFields(fields, container) {
       for (const opt of picked) {
         if (!opt.children?.length) continue
         const sub = summarizeFields(opt.children, value.sub?.[opt.value])
-        if (sub.length) children.push({ key: opt.value, label: opt.label, value: null, display: '', children: sub })
+        if (sub.length) children.push({ key: opt.value, label: opt.label, type: 'option', value: null, display: '', children: sub })
       }
       out.push({
         key: field.key,
         label: field.label,
+        type: field.type,
         value: picked.map((o) => o.label),
         display: picked.map((o) => o.label).join('、'),
         children
@@ -79,6 +90,8 @@ export function summarizeFields(fields, container) {
           return {
             key: item._id,
             label: `${field.itemLabel || '项'} ${i + 1}${nameItem ? `：${nameItem.value}` : ''}`,
+            type: 'groupItem',
+            name: nameItem ? nameItem.value : '',
             value: null,
             display: '',
             children: sub
@@ -86,12 +99,12 @@ export function summarizeFields(fields, container) {
         })
         .filter((it) => it.children.length)
       if (items.length) {
-        out.push({ key: field.key, label: field.label, value: null, display: `${items.length} 个`, children: items })
+        out.push({ key: field.key, label: field.label, type: 'group', value: null, display: `${items.length} 个`, children: items })
       }
     } else if (field.type === 'tags') {
-      out.push({ key: field.key, label: field.label, value: [...value], display: value.join('、'), children: [] })
+      out.push({ key: field.key, label: field.label, type: 'tags', value: [...value], display: value.join('、'), children: [] })
     } else {
-      out.push({ key: field.key, label: field.label, value, display: String(value), children: [] })
+      out.push({ key: field.key, label: field.label, type: field.type, value, display: String(value), children: [] })
     }
   }
   return out

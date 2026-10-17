@@ -1,0 +1,48 @@
+# =====================================================================
+# .dockerignore / Docker 构建上下文忽略清单（English below）
+#
+# 说明 / NOTE:
+# Docker 只从「构建上下文根目录」读取 .dockerignore，不支持自定义路径。
+# Docker reads .dockerignore ONLY from the build-context root; a custom
+# location is not supported. 本项目的镜像构建上下文是仓库根目录，因此
+# 本文件必须放在根目录（docker/ 之外唯一的 Docker 部署文件）。
+# The build context is the repository root, so this file must live at
+# the root (the only Docker-deploy file outside the docker/ folder).
+# =====================================================================
+
+# ---- 依赖与构建缓存 / Dependencies & build caches ----
+**/node_modules/
+frontend/dist/
+backend/target/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.venv/
+**/venv/
+
+# ---- 运行时数据（绝不进镜像）/ Runtime data (must never enter images) ----
+backend/upload/
+python-service/models/
+docker/data/
+
+# ---- 密钥与本机私密配置 / Secrets & machine-private config ----
+**/.env
+**/application-secret.yml
+**/.python-env
+
+# ---- 版本控制与 IDE / VCS & IDE files ----
+.git/
+.gitignore
+.vscode/
+.idea/
+**/*.iml
+
+# ---- 文档与打包产物 / Docs & archives ----
+**/*.md
+!docker/**/*.md
+start.zip
+**/*.log
+
+# ---- Docker 自身（避免递归上下文）/ Docker files (avoid recursive context) ----
+docker/data/

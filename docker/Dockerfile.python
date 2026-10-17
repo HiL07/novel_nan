@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# =====================================================================
+# Dockerfile for the Python AI service (FastAPI) / Python AI 服务镜像
+# python-service: text extraction / analysis + async job API
+#                小说文本提取、分析与异步任务接口
+#
+# Build context = repository root / 构建上下文 = 仓库根目录
+# Build / 构建:
+#   docker build -f docker/Dockerfile.python -t nan-novel-python .
+#
+# NOTE / 说明:
+#   This slim image installs requirements.txt ONLY (no torch/CUDA).
+#   本精简镜像只安装 requirements.txt（不含 torch/CUDA）。
+#   Extraction + remote LLM features work; local inference / QLoRA
+#   training report "deps not ready" in the UI (app handles it).
+#   文本提取与远程大模型功能可用；本机推理 / QLoRA 训练在页面上会提示
+#   「依赖未安装」（程序本身对缺依赖有容错）。
+#   For GPU training use Dockerfile.python-gpu + compose.gpu.yaml.
+#   GPU 训练请改用 Dockerfile.python-gpu + compose.gpu.yaml。
+# =====================================================================
+
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Where base models / LoRA adapters / jobs are persisted.
+    # 基础模型 / LoRA 适配器 / 任务的持久化目录。
+    LOCAL_MODELS_DIR=/data/models
+
+# Install the lightweight service dependencies first (better caching).
+# 先安装轻量服务依赖（利用构建缓存）。
+COPY python-service/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Application package (only the app/ tree is needed at runtime).
+# 应用代码（运行时只需要 app/ 目录）。
+COPY python-service/app ./app
+
+# Persistent model directory owned by the non-root user.
+# 持久化模型目录，归属非 root 用户。
+RUN mkdir -p /data/models \
+    && groupadd --system pyapp && useradd --system --gid pyapp --uid 10002 pyapp \
+    && chown -R pyapp:pyapp /data/models
+USER pyapp
+
+# Uvicorn serves the FastAPI app on 8021 (same port as local development).
+# Uvicorn 在 8021 端口提供 FastAPI 服务（与本地开发端口一致）。
+EXPOSE 8021
+
+# HTTP health check against the service's own health endpoint.
+# 针对服务自身健康接口的 HTTP 健康检查。
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8021/api/health', timeout=5).status==200 else 1)" || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8021"]

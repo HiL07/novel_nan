@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+# =====================================================================
+# Dockerfile for the Spring Boot backend (file management base framework)
+# Spring Boot 后端镜像（文件管理基础框架）
+#
+# Build context = repository root / 构建上下文 = 仓库根目录
+# Build / 构建:
+#   docker build -f docker/Dockerfile.backend -t nan-novel-backend .
+#
+# Stage 1: Maven build (JDK 17) / 第一阶段：Maven 构建（JDK 17）
+# Stage 2: JRE runtime, slim / 第二阶段：精简 JRE 运行时
+# =====================================================================
+
+# ---------- Stage 1: build / 构建阶段 ----------
+FROM maven:3.9-eclipse-temurin-17 AS build
+WORKDIR /build
+
+# First copy only the POM and pre-download dependencies for better layer caching.
+# 先只复制 pom.xml 预下载依赖，提升 Docker 层缓存命中率。
+COPY backend/pom.xml ./pom.xml
+RUN mvn -B -q dependency:go-offline
+
+# Then copy the source and package without tests.
+# 再复制源码并打包（跳过测试）。
+COPY backend/src ./src
+RUN mvn -B -q clean package -DskipTests
+
+# ---------- Stage 2: runtime / 运行阶段 ----------
+FROM eclipse-temurin:17-jre-jammy AS runtime
+WORKDIR /app
+
+# Persistent upload directory; a Docker volume is mounted here by compose.
+# 上传文件持久化目录，compose 会把数据卷挂载到这里。
+RUN mkdir -p /data/upload \
+    && groupadd --system app && useradd --system --gid app --uid 10001 app \
+    && chown -R app:app /data/upload
+
+# The fat jar (file-manager-*.jar) produced by Spring Boot Maven plugin.
+# Spring Boot Maven 插件生成的 fat jar。
+COPY --from=build /build/target/file-manager-*.jar /app/app.jar
+RUN chown app:app /app/app.jar
+
+USER app
+
+# The service listens on 8022 in application.yml (overridable by SERVER_PORT).
+# 服务端口见 application.yml（默认 8022，可用 SERVER_PORT 覆盖）。
+EXPOSE 8022
+
+# TCP health check: the connector starts only after the Spring context (incl.
+# DB connection and SQL init) is ready; startup failure kills the container.
+# TCP 健康检查：Tomcat 仅在 Spring 容器（含数据库连接与建表脚本）就绪后才监听；
+# 启动失败会直接导致容器退出。
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=5 \
+  CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/8022' || exit 1
+
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

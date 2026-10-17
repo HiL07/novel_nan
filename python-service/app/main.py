@@ -5,6 +5,7 @@ POST /api/extract/jobs        提交任务 → jobId（立即返回，后台执�
 GET  /api/extract/jobs/{id}   查询状态 queued/running/succeeded/failed + 进度 + 结果
 GET  /api/health              本服务健康状态
 /api/local/**                 本地模型：登记 / 下载、推理、LoRA/QLoRA 风格微调（见 app/local/router.py）
+/api/gen/**                   小说生成：工作区、分层上下文、分段生成章节（见 app/generation/router.py）
 
 模型配置（含 API Key）由 Java 后端随请求传入，本服务不落盘、不回显密钥；
 任务状态只保存在内存中，结果的持久化由 Java 后端负责（系统唯一数据源）。
@@ -24,6 +25,8 @@ from pydantic import BaseModel, Field
 from . import config, extractor, llm_client
 from .llm_client import ModelConfig
 from .local import jobs as local_jobs
+from .generation import defaults as gen_defaults
+from .generation.router import router as gen_router
 from .local.router import LocalError, local_error_handler, router as local_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
@@ -40,7 +43,9 @@ app.add_middleware(
 )
 app.add_exception_handler(LocalError, local_error_handler)
 app.include_router(local_router)
+app.include_router(gen_router)
 local_jobs.recover()
+gen_defaults.check_on_startup()
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 

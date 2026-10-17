@@ -49,14 +49,16 @@ nan_novel/
 │       ├── layout/     # App shell: Sidebar + AppMain
 │       ├── router/     # Lazy-loaded routes
 │       ├── views/file/ # upload.vue, manage.vue
-│       ├── views/novel/ # create.vue (novel setting selector), extract.vue (extraction tasks & results)
+│       ├── views/novel/ # create.vue (workspace list), workspace.vue (设定 + 写作), extract.vue (extraction tasks & results)
 │       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型), pyenv.vue (Python 环境 selection & check)
-│       ├── components/novel-options/ # schema-driven option UI (OptionField, ChoiceWidget, …)
+│       ├── components/novel-options/ # schema-driven option UI (SettingsEditor, OptionField, ChoiceWidget, …)
 │       ├── novel-options/ # field-type registry, schema helpers, editor context
 │       └── mock/        # local placeholder data (until the DB exists)
 ├── python-service/     # FastAPI AI service
 │   ├── app/            # main.py, extractor, llm_client, text_loader (extraction)
 │   ├── app/local/      # local models: settings, hardware, registry, inference, training, download, jobs, worker, router
+│   ├── app/generation/ # novel generation: backends, spec, context, prompts, chapter, store, defaults, router
+│   ├── novels/         # git-ignored: novel workspaces (JSON), see app/generation/store.py
 │   ├── models/         # git-ignored: base/<id>/model.json (+weights if downloaded), adapters/<id>/, jobs/<id>/
 │   ├── scripts/local_e2e.py  # end-to-end smoke test over HTTP
 │   ├── requirements.txt       # extraction service (no torch)
@@ -185,13 +187,19 @@ npm run preview
 - Routes are lazy-loaded (`() => import(...)`) with `meta.title` / `meta.icon` consumed by the sidebar; register new pages in `src/router/index.js`.
 - Element Plus and all its icons are registered globally in `main.js`.
 
-### Novel setting selector (`/novel/create`) — options only, no persistence yet
+### Novel settings editor (`SettingsEditor.vue`, used inside each workspace)
 
 - **Schema-driven**: everything renders from data — `categories[] → fields[] → options[] → children(fields[])`, nestable to any depth. Field types live in `src/novel-options/fieldTypes.js` (`single`, `multi`, `text`, `textarea`, `number`, `slider`, `tags`, `group`); to add a type, register it there and map it in `OptionField.vue`.
 - **Data source**: `src/api/novelOptions.js#getOptionSchema()` currently returns `src/mock/novelOptionSchema.js` (built-in categories 世界观/角色/情节推进/文风, `elementTemplates` such as 怪物/势力/种族/地点/物品/功法, `genericSuggestions`). When the DB exists, switch only this function to a backend call returning the same shape.
 - **Values**: `{ [categoryKey]: { [fieldKey]: value } }`; choice value `{ selected: string[], sub: { [optionValue]: childValues } }`, group value `[{ _id, ...childValues }]`.
 - **Extensibility (编辑模式)**: users can add custom options inline, add fields to any category / group / option (from suggestions or self-defined), and create custom elements (e.g. 怪物) from a template or blank. User-created items carry `custom: true` and `uid()` keys.
-- **Output**: `buildSpec()` + `specToJson()` (`src/novel-options/schema.js`) give a label-keyed JSON of the chosen settings (for generation prompts); the "完整配置" export is `{ categories, values }` (for later DB storage). Nothing is saved yet — refresh loses state.
+- **Confirmed vs default**: `number` / `slider` fields always hold a value, so they count only after the user changes them (`markTouched` → `container.__touched[fieldKey]`); untouched defaults never reach `buildSpec()` and therefore never become generation constraints.
+- **Output**: `buildSpec()` → `[{key,label,type,value,display,children}]` (`type: 'option'` for sub-option containers, `'groupItem'` + `name` for group entries) is what the workspace saves as `settings.spec` and the backend turns into constraints; `getConfig()` (`{categories, values}`) is saved as `settings.config` to restore the editor.
+
+### Novel workspaces (`/novel/create` → `/novel/workspace/:id`)
+
+- List page creates a workspace: title, model source (local; remote shown but not wired yet), base model (default Qwen2.5-1.5B-Instruct), adapter (disabled at this stage), context window 8192 / 32768. It shows the default-model check with a one-click download (`/api/local/models/download` → `models/base/<id>/weights/`) and Hugging Face / hf-mirror links.
+- Workspace page: 设定 tab = `SettingsEditor` (保存设定), 写作 tab = chapter list, next-chapter form (title, goal, target chars), 预览上下文, live segmented generation with cancel, per-call token table, workspace totals. Unsaved settings are saved automatically before preview/generation.
 
 ## 6. Python AI Service (`python-service/`)
 
@@ -244,6 +252,25 @@ Local-only for now; remote inference/training must plug into the existing extens
 - **Hardware assumptions** (dev machine): RTX 4060 Laptop 8 GB (≈6.3 GB free with the display), 16 GB RAM (often only ~2 GB free), C: nearly full. Defaults are conservative (`maxSeqLen` 512, batch 1, grad-accum 4, r 16). 0.5B–1.5B (3B borderline) are the intended QLoRA sizes; 7B QLoRA is reported as *exceed*. GGUF files cannot be trained.
 - **Install**: torch's CUDA wheel is not on PyPI — see the header of `requirements-local.txt` (Aliyun mirror / resumable download). The extraction service still runs without these packages; torch is imported lazily.
 - **E2E test**: `.venv/Scripts/python scripts/local_e2e.py --model-path <HF model dir> --port 8011 [--samples my.txt]`.
+
+### Novel generation (`app/generation/`, `/api/gen/**`)
+
+Base model only (no LoRA at this stage). Called directly by the frontend like `/api/local/**`.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/gen/status` | Default model check (`Qwen/Qwen2.5-1.5B-Instruct`: found / download links / target dir), inference state, active job, allowed windows |
+| `GET/POST /api/gen/novels` · `GET /novels/{id}` · `POST /novels/{id}/update {title?, model?, contextWindow?, params?, settings?{config, spec}}` · `POST /novels/{id}/delete` | Workspaces |
+| `POST /api/gen/novels/{id}/model/load` | Load the workspace's base model (no adapter) |
+| `POST /api/gen/novels/{id}/preview {goal, title, targetChars}` | Assemble next chapter's first-segment context without generating (tokenizer only) → layer token report + full messages |
+| `POST /api/gen/novels/{id}/chapters {goal, title, targetChars}` · `GET /jobs/{jobId}` · `POST /jobs/{jobId}/cancel` | Background chapter job; job response includes the chapter (live text, calls) |
+| `GET /api/gen/novels/{id}/chapters/{n}` · `POST .../chapters/{n}/delete` | Chapter detail; only the last chapter can be deleted |
+
+- **Model interface** (`backends.py`): everything goes through `TextGenerator` (`count_messages`, `count_text`, `tail_tokens`, `context_limit`, `ensure_ready`, `generate(messages, GenParams) → GenResult`). `LocalHFGenerator` wraps `app.local.inference.chat_generate` (chat template + system message, token-level cancel via `StoppingCriteria`, exact `finishReason`). Remote backends implement the same class and register in `get_generator` (currently raises "not wired").
+- **Constraints** (`spec.py`): world / plot / style plain fields + the protagonist (role contains 主角) + a character roster → **core** (system message, never trimmed); other characters, plot milestones, custom elements (category overview + one card per item, keyed by names) → **retrievable cards**; missing built-in categories → "尚未设定" (open, may be invented without contradiction). `plot.chapters` / `plot.wordsPerChapter` are parameters, not facts (the latter is the default target length).
+- **Layered context** (`context.py`, real tokenizer): L0 core + L4 task are mandatory (error if they exceed `window − maxNewTokens − 64`); then L3 recent text minimum (256 tokens of the chapter so far, or the previous chapter's ending), L2 latest chapter summary, L1 cards with keyword relevance > 0 (irrelevant cards are never sent), arc summary, older summaries, then L3 is extended (≤ `params.recentTokens`, 900). The final chat-template count is verified and pieces are rolled back in reverse priority until it fits.
+- **Segmented chapters** (`chapter.py`): each segment ≤ `params.segmentTokens` (768, capped at window/4) and only sees the chapter tail, never the whole chapter. Stops at ~95% of target chars, natural end on the last segment, cancel, or a segment cap. Then a summary call (≤150字, temp 0.3); when > 8 unmerged chapter summaries exist the oldest 5 are merged into `arcSummary`. Every call (type, prompt/completion tokens, finish reason, seconds, layer report) is stored on the chapter and added to the workspace totals. One generation job at a time; refused during training; model load/unload/training are refused while a chapter is generating.
+- **Storage** (`store.py`): `python-service/novels/<id>/novel.json` + `chapters/NNNN.json` (override with `NOVELS_DIR`; mount it as a volume in Docker). All persistence goes through `store.py` so the planned MySQL migration replaces only that module.
 
 ### Conventions
 

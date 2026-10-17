@@ -20,11 +20,17 @@ _state: dict = {"status": "idle", "baseId": None, "adapterId": None, "quantizati
 _model = None
 _tokenizer = None
 _gpu_busy_check = lambda: False  # 由 jobs 注入：训练进行中返回 True
+_generation_busy_check = lambda: False  # 由 generation 注入：小说章节生成进行中返回 True
 
 
 def set_gpu_busy_check(fn) -> None:
     global _gpu_busy_check
     _gpu_busy_check = fn
+
+
+def set_generation_busy_check(fn) -> None:
+    global _generation_busy_check
+    _generation_busy_check = fn
 
 
 def status() -> dict:
@@ -104,6 +110,8 @@ def load(base_id: str, adapter_id: str | None = None, quantization: str = "auto"
     """异步加载；立即返回当前状态。"""
     if _gpu_busy_check():
         raise RuntimeError("有训练任务正在使用 GPU，请等待完成或取消后再加载模型")
+    if _generation_busy_check():
+        raise RuntimeError("小说章节正在生成，请等待完成或取消后再切换模型")
     if not hardware.deps_info()["ready"]:
         raise RuntimeError("未安装本地模型依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")
     base = registry.get_base(base_id)
@@ -138,6 +146,8 @@ def _free() -> None:
 
 
 def unload() -> None:
+    if _generation_busy_check():
+        raise RuntimeError("小说章节正在生成，请等待完成或取消后再卸载模型 / 开始训练")
     with _lock:
         if _state["status"] == "loading":
             raise RuntimeError("模型正在加载，暂时不能卸载")
@@ -180,3 +190,57 @@ def generate(prompt: str, *, max_new_tokens: int = 200, temperature: float = 0.8
         "adapterId": _state["adapterId"],
     }
 
+
+
+def loaded_model() -> dict | None:
+    """当前已加载的模型信息（未加载返回 None）。"""
+    with _lock:
+        if _state["status"] != "loaded" or _model is None:
+            return None
+        return {"baseId": _state["baseId"], "adapterId": _state["adapterId"], "quantization": _state["quantization"]}
+
+
+def chat_generate(messages: list[dict], *, max_new_tokens: int, temperature: float = 0.7, top_p: float = 0.8,
+                  top_k: int = 20, repetition_penalty: float = 1.1, stop_event: threading.Event | None = None) -> dict:
+    """按聊天模板生成（支持 system 消息）。stop_event 被置位时在下一个 token 处停止。
+
+    返回 {text, promptTokens, completionTokens, finishReason: stop|length|cancelled, seconds}
+    """
+    import torch
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    with _lock:
+        if _state["status"] != "loaded" or _model is None:
+            raise RuntimeError("请先加载模型")
+        model, tokenizer = _model, _tokenizer
+
+    class _Cancel(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):
+            return bool(stop_event and stop_event.is_set())
+
+    with _gen_lock:
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(text, return_tensors="pt").to(model.device)
+        start = time.monotonic()
+        with torch.inference_mode():
+            out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=temperature > 0,
+                                 temperature=max(temperature, 1e-5), top_p=top_p, top_k=top_k,
+                                 repetition_penalty=repetition_penalty, pad_token_id=tokenizer.pad_token_id,
+                                 stopping_criteria=StoppingCriteriaList([_Cancel()]))
+        new_tokens = out[0][inputs["input_ids"].shape[1]:]
+        seconds = time.monotonic() - start
+    eos_ids = model.generation_config.eos_token_id
+    eos_ids = set(eos_ids if isinstance(eos_ids, list) else [eos_ids]) | {tokenizer.eos_token_id}
+    if stop_event and stop_event.is_set():
+        reason = "cancelled"
+    elif len(new_tokens) and int(new_tokens[-1]) in eos_ids:
+        reason = "stop"
+    else:
+        reason = "length" if len(new_tokens) >= max_new_tokens else "stop"
+    return {
+        "text": tokenizer.decode(new_tokens, skip_special_tokens=True),
+        "promptTokens": int(inputs["input_ids"].shape[1]),
+        "completionTokens": int(len(new_tokens)),
+        "finishReason": reason,
+        "seconds": round(seconds, 2),
+    }
