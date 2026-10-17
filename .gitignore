@@ -1,0 +1,14 @@
+# 构建产物 / 依赖
+frontend/node_modules/
+frontend/dist/
+backend/target/
+
+# 运行时用户上传文件（见 CLAUDE.md：不入库）
+backend/upload/
+
+# Python AI 服务
+python-service/.venv/
+__pycache__/
+*.pyc
+
+start.zip

@@ -52,6 +52,14 @@
           >
             <Download />
           </el-icon>
+          <el-icon
+            v-if="isExtractable(item.fileExt)"
+            class="file-extract"
+            title="小说提取"
+            @click.stop="startExtract(item)"
+          >
+            <MagicStick />
+          </el-icon>
         </div>
       </div>
     </el-card>
@@ -85,6 +93,9 @@
             <el-button @click="copyPreview">
               {{ previewType === 'pdf' ? '复制地址' : '复制' }}
             </el-button>
+            <el-button v-if="isExtractable(current.fileExt)" type="success" @click="startExtract(current)">
+              小说提取
+            </el-button>
           </div>
         </div>
       </template>
@@ -98,9 +109,14 @@
 
 <script setup>
 import { computed, onActivated, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Download, Refresh } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, listFiles, previewUrl } from '@/api/file'
+import { isExtractable, submitExtract } from '@/api/novel'
+import { errorMessage } from '@/api/request'
+
+const router = useRouter()
 
 const tabs = [
   { name: 'all', label: '全部' },
@@ -201,6 +217,31 @@ async function copyPreview() {
     ElMessage.success('已复制')
   } catch (e) {
     ElMessage.error('复制失败')
+  }
+}
+
+/** 选中小说文件 → 提交提取任务 → 跳转到提取结果页查看进度 */
+async function startExtract(item) {
+  try {
+    await ElMessageBox.confirm(
+      `将使用本地千问模型解析《${item.fileName}》的章节、人物和文风，耗时视篇幅可能需要数分钟。`,
+      '小说提取',
+      { confirmButtonText: '开始提取', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await submitExtract(item.id)
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '提交失败')
+      return
+    }
+    ElMessage.success('已提交提取任务')
+    dialogVisible.value = false
+    router.push({ path: '/novel/extract', query: { id: res.data.id } })
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '提交提取任务失败'))
   }
 }
 
@@ -307,6 +348,21 @@ onActivated(loadFiles)
 }
 .file-download:hover {
   background: rgba(0, 0, 0, 0.7);
+}
+.file-extract {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 4px;
+  font-size: 14px;
+  color: #ffffff;
+  background: var(--el-color-success);
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.85;
+}
+.file-extract:hover {
+  opacity: 1;
 }
 
 /* 预览弹窗 */

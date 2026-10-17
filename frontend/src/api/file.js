@@ -1,12 +1,4 @@
-import axios from 'axios'
-
-// 后端地址（见 docx/fronted_vue3/api/file_upload.md）
-const baseURL = 'http://localhost:8080'
-
-const request = axios.create({
-  baseURL,
-  timeout: 60000
-})
+import request, { baseURL } from './request'
 
 /**
  * 上传文件

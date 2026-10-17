@@ -12,6 +12,11 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -124,6 +129,36 @@ public class FileService {
             log.error("读取文件失败：{}", targetFile, e);
             throw new RuntimeException("读取文件失败", e);
         }
+    }
+
+    /**
+     * 文本字节统一转成 UTF-8：中文 txt 常见 GBK 编码，按 UTF-8（严格）→ GB18030（严格）依次识别，
+     * 都不合法时按 UTF-8 替换非法字节。带 BOM 的 UTF-8 / UTF-16 直接按 BOM 解码。
+     */
+    public byte[] toUtf8Text(byte[] bytes) {
+        return decodeText(bytes).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private String decodeText(byte[] bytes) {
+        if (bytes.length >= 3 && (bytes[0] & 0xFF) == 0xEF && (bytes[1] & 0xFF) == 0xBB && (bytes[2] & 0xFF) == 0xBF) {
+            return new String(bytes, 3, bytes.length - 3, StandardCharsets.UTF_8);
+        }
+        if (bytes.length >= 2 && (((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xFE)
+                || ((bytes[0] & 0xFF) == 0xFE && (bytes[1] & 0xFF) == 0xFF))) {
+            return new String(bytes, StandardCharsets.UTF_16);
+        }
+        for (Charset charset : new Charset[]{StandardCharsets.UTF_8, Charset.forName("GB18030")}) {
+            try {
+                return charset.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(bytes))
+                        .toString();
+            } catch (CharacterCodingException ignored) {
+                // 尝试下一种编码
+            }
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     /**

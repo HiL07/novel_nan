@@ -7,6 +7,11 @@ spring:
     url: jdbc:mysql://localhost:3306/test10000?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: daijiahao123
+  sql:
+    init:
+      mode: always                              # 每次启动执行建表脚本（CREATE TABLE IF NOT EXISTS）
+      schema-locations: classpath:sql/novel_extract.sql
+      encoding: UTF-8                           # Windows 下 JDK 17 默认 GBK，脚本按 UTF-8 读取
   servlet:
     multipart:
       max-file-size: 50MB        # 单文件大小上限
@@ -20,3 +25,8 @@ file:
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true   # 下划线列名 → 驼峰字段
+
+# Python AI 服务（python-service，小说提取）
+ai:
+  service:
+    url: http://localhost:8000

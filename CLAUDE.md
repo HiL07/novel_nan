@@ -12,16 +12,17 @@ The system consists of three components:
 |---|-----------|------|--------|
 | 1 | **Frontend** (`frontend/`) | Vue 3 + Vite SPA — file upload & management UI | Implemented |
 | 2 | **Java backend** (`backend/`) | Spring Boot — **file management is the base framework**: upload-to-disk, metadata in MySQL, download/preview APIs | Implemented |
-| 3 | **Python AI backend** (planned, e.g. `python-service/`) | FastAPI — article/content extraction, text analysis, remote LLM QLoRA & Hugging Face fine-tuning | **Not scaffolded yet** |
+| 3 | **Python AI backend** (`python-service/`) | FastAPI — article/content extraction, text analysis, remote LLM QLoRA & Hugging Face fine-tuning | Novel extraction implemented; fine-tuning planned |
 
 ```
 Browser (Vue3/Vite, :5173)
         │  HTTP
         ▼
 Spring Boot (:8080) ─────► MySQL (test10000) + local disk (./upload/)
-        │  HTTP (planned)
-        ▼
-Python FastAPI (:8000 proposed) ─────► remote LLM / Hugging Face training (QLoRA)
+        │  HTTP  ▲ GET /api/file/preview/{id}
+        ▼        │
+Python FastAPI (:8000) ─────► local Qwen llama.cpp (:8001, extraction)
+                        └───► remote LLM / Hugging Face training (QLoRA, planned)
 ```
 
 ## 2. Repository Layout
@@ -38,14 +39,17 @@ nan_novel/
 │   │   ├── service/    # Business logic
 │   │   └── FileApplication.java
 │   ├── src/main/resources/application.yml
+│   ├── src/main/resources/sql/   # Table DDL, run at startup by spring.sql.init
 │   └── upload/         # Runtime file storage root (yyyy/MM/dd/<uuid>.<ext>)
 ├── frontend/           # Vue 3 + Vite SPA
 │   └── src/
 │       ├── api/        # Axios API layer (one module per backend resource)
 │       ├── layout/     # App shell: Sidebar + AppMain
 │       ├── router/     # Lazy-loaded routes
-│       └── views/file/ # upload.vue, manage.vue
-├── start.bat           # Windows one-click launcher for backend + frontend
+│       ├── views/file/ # upload.vue, manage.vue
+│       └── views/novel/ # extract.vue (extraction tasks & results)
+├── python-service/     # FastAPI AI service (app/main.py, extractor, qwen_client)
+├── start.bat           # Windows one-click launcher for backend + AI service + frontend
 └── CLAUDE.md
 ```
 
@@ -55,7 +59,7 @@ nan_novel/
 |-------|-----------|
 | Frontend | Vue 3.4 (`<script setup>` Composition API), Vite 5, Vue Router 4, Element Plus 2.7 (+ `@element-plus/icons-vue`, globally registered), Axios 1.7 |
 | Java backend | Java 17, Spring Boot 3.2.5, Spring Web, MyBatis-Plus 3.5.7, MySQL (`mysql-connector-j`), Lombok, Maven |
-| Python service (planned) | Python 3.10+, FastAPI, Uvicorn, Pydantic v2; `transformers` + `peft` (QLoRA), `datasets`, `accelerate`, `bitsandbytes`, PyTorch; extraction libs such as `python-docx` / `pypdf` |
+| Python service | Python 3.10+, FastAPI, Uvicorn, Pydantic v2, httpx, `python-docx` / `pypdf`; planned for fine-tuning: `transformers` + `peft` (QLoRA), `datasets`, `accelerate`, `bitsandbytes`, PyTorch |
 
 ## 4. Java Backend Conventions (`backend/`)
 
@@ -88,7 +92,20 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 | `POST /api/file/upload` | Multipart upload, form field name fixed to **`file`** |
 | `GET  /api/file/list` | All files, `create_time` descending |
 | `GET  /api/file/download/{id}` | Attachment download |
-| `GET  /api/file/preview/{id}` | Inline preview (image/PDF/text) |
+| `GET  /api/file/preview/{id}` | Inline preview (image/PDF/text). Text files are transcoded to UTF-8 (`charset=UTF-8`): BOM → strict UTF-8 → strict GB18030, so GBK novels don't show as mojibake. Download returns original bytes. |
+
+### Novel extraction API (`NovelExtractController`)
+
+| Method & path | Purpose |
+|---------------|---------|
+| `POST /api/novel/extract/{fileId}` | Create an async extraction task for a txt/md/docx/pdf file; returns the task (`QUEUED`) |
+| `GET  /api/novel/extract/list` | Tasks without `result`, `create_time` descending |
+| `GET  /api/novel/extract/{id}` | Task detail; `result` is the extraction JSON string (chapters, characters, style) |
+
+- Table `novel_extract` (DDL `sql/novel_extract.sql`, auto-created via `spring.sql.init`): `id`, `file_id`, `file_name`, `status` (QUEUED/RUNNING/SUCCEEDED/FAILED), `progress`, `message`, `job_id`, `result` (LONGTEXT JSON), `create_time`, `update_time`.
+- `NovelExtractService` runs tasks on a single background thread (local Qwen has 1 slot): submits to Python `POST /api/extract/jobs`, polls `GET /api/extract/jobs/{jobId}` every 3s, and persists progress/result. Tasks left QUEUED/RUNNING at restart are marked FAILED.
+- Python URL: `ai.service.url` in `application.yml` (default `http://localhost:8000`).
+- JDK 17 on Chinese Windows defaults to GBK: always pass an explicit charset when converting bytes ↔ String (and `spring.sql.init.encoding: UTF-8`).
 
 ### File storage rules
 
@@ -123,7 +140,7 @@ npm run preview
 - Routes are lazy-loaded (`() => import(...)`) with `meta.title` / `meta.icon` consumed by the sidebar; register new pages in `src/router/index.js`.
 - Element Plus and all its icons are registered globally in `main.js`.
 
-## 6. Python AI Service (planned — `python-service/`)
+## 6. Python AI Service (`python-service/`)
 
 This service is the **AI/ML layer**; the Spring Boot service remains the system of record for files and metadata.
 
@@ -132,8 +149,28 @@ Responsibilities:
 2. **Content analysis** — e.g. chapter segmentation, characters, plotlines, style statistics; results returned as JSON.
 3. **LLM fine-tuning** — dataset preparation and **QLoRA fine-tuning with Hugging Face** (`transformers` + `peft`) against remote GPU/LLM resources; manage training jobs and LoRA adapters.
 
-Conventions to follow when scaffolding:
-- FastAPI app served by Uvicorn on **port 8000 (proposed)**, all routes prefixed with `/api`, Pydantic v2 models for request/response.
+### Commands
+
+```bash
+cd python-service
+py -3.10 -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt   # keep requirements.txt ASCII (old pip reads it as GBK)
+.venv/Scripts/python -m uvicorn app.main:app --port 8000
+```
+
+Extraction needs the local Qwen llama.cpp server on `http://127.0.0.1:8001` (start command in the `qwen` skill). Env vars (`app/config.py`): `JAVA_BACKEND_URL`, `QWEN_URL`, `QWEN_MODEL`, `CHUNK_CHARS` (default 6000), `QWEN_MAX_TOKENS`, `QWEN_TIMEOUT`. No torch/CUDA needed for extraction.
+
+### Novel extraction (implemented)
+
+- `POST /api/extract/jobs` `{fileId, fileExt}` → job; `GET /api/extract/jobs/{jobId}` → `queued/running/succeeded/failed`, `progress`, `message`, `error`, `result`; `GET /api/health` → Qwen reachability.
+- Jobs are in-memory and run one at a time; Java is responsible for persisting results.
+- Languages: Chinese (primary) and English novels. Analysis text is always output in Simplified Chinese; character/place names keep the original spelling.
+- All `httpx` calls to local services use `trust_env=False` — a system proxy (Clash etc.) otherwise turns `localhost` requests into 502.
+- Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → Qwen JSON per chunk (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
+
+### Conventions
+
+- FastAPI app served by Uvicorn on **port 8000**, all routes prefixed with `/api`, Pydantic v2 models for request/response.
 - Do **not** re-implement file storage or a second file database. Consume files via the Java backend (by file id / relative storage path) or a shared volume, and return extracted/analyzed results over HTTP.
 - Fine-tuning is long-running: run training as **background/async jobs with a status endpoint** (queued/running/succeeded/failed + logs), never block a request worker.
 - Keep model weights, datasets, and LoRA adapters outside the Git working tree (configurable paths / env vars).
@@ -142,8 +179,9 @@ Conventions to follow when scaffolding:
 ## 7. Local Development (Windows)
 
 - Prerequisites: **JDK 17** (the project does not compile on JDK 8), Maven, Node.js, and a running MySQL with schema `test10000`.
-- `start.bat` launches both services with one click. It contains **machine-specific hardcoded tool paths** (`JAVA17_HOME`, `MAVEN_BIN`, `NODE_DIR` under `D:\workplace\...`) — edit them to match the current machine; do not "fix" them for everyone.
-- Service URLs: backend http://localhost:8080, frontend http://localhost:5173.
+- `start.bat` launches the services with one click. It contains **machine-specific hardcoded tool paths** (`JAVA17_HOME`, `MAVEN_BIN`, `NODE_DIR` under `D:\workplace\...`) — edit them to match the current machine; do not "fix" them for everyone.
+- `start.bat` also starts the AI service if `python-service/.venv` exists; the Qwen llama.cpp server is started separately.
+- Service URLs: backend http://localhost:8080, AI service http://localhost:8000, Qwen http://127.0.0.1:8001, frontend http://localhost:5173.
 
 ## 8. Rules for Code-Generating Agents
 

@@ -21,6 +21,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 文件接口：上传 + 列表 / 下载 / 预览。
@@ -88,6 +89,14 @@ public class FileController {
             String contentType = info.getContentType() != null
                     ? info.getContentType()
                     : MediaType.APPLICATION_OCTET_STREAM_VALUE;
+            // 预览文本：GBK 等编码统一转 UTF-8 并声明 charset，避免中文乱码；下载保持原始字节
+            if (!attachment && isText(info, contentType)) {
+                bytes = fileService.toUtf8Text(bytes);
+                MediaType type = contentType.startsWith("text/")
+                        ? MediaType.parseMediaType(contentType)
+                        : MediaType.TEXT_PLAIN;
+                contentType = new MediaType(type, StandardCharsets.UTF_8).toString();
+            }
             ContentDisposition disposition = ContentDisposition
                     .builder(attachment ? "attachment" : "inline")
                     .filename(info.getFileName(), StandardCharsets.UTF_8)
@@ -104,5 +113,13 @@ public class FileController {
             log.error("文件读取失败，id={}", id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
+    }
+
+    /** 与前端 classify() 的「纯文本」分类一致，另含所有 text/* 类型 */
+    private static final Set<String> TEXT_EXTS = Set.of("txt", "md", "js", "py", "json", "sql", "html", "vue");
+
+    private boolean isText(FileInfo info, String contentType) {
+        String ext = info.getFileExt() == null ? "" : info.getFileExt().toLowerCase();
+        return TEXT_EXTS.contains(ext) || contentType.startsWith("text/");
     }
 }

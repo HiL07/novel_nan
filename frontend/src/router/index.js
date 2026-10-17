@@ -13,6 +13,12 @@ const routes = [
     name: 'fileManage',
     component: () => import('@/views/file/manage.vue'),
     meta: { title: '文件管理', icon: 'Folder' }
+  },
+  {
+    path: '/novel/extract',
+    name: 'novelExtract',
+    component: () => import('@/views/novel/extract.vue'),
+    meta: { title: '小说提取', icon: 'MagicStick' }
   }
 ]
 
