@@ -4,11 +4,13 @@ POST /api/models/verify       验证模型配置（真实发一次极小请求�
 POST /api/extract/jobs        提交任务 → jobId（立即返回，后台执行；任务间串行，任务内按配置并发）
 GET  /api/extract/jobs/{id}   查询状态 queued/running/succeeded/failed + 进度 + 结果
 GET  /api/health              本服务健康状态
+/api/local/**                 本地模型：登记 / 下载、推理、LoRA/QLoRA 风格微调（见 app/local/router.py）
 
 模型配置（含 API Key）由 Java 后端随请求传入，本服务不落盘、不回显密钥；
 任务状态只保存在内存中，结果的持久化由 Java 后端负责（系统唯一数据源）。
 """
 import logging
+import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -16,15 +18,29 @@ from datetime import datetime
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import config, extractor, llm_client
 from .llm_client import ModelConfig
+from .local import jobs as local_jobs
+from .local.router import LocalError, local_error_handler, router as local_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("extract")
 
 app = FastAPI(title="nan_novel AI service")
+
+# 本地模型页面由前端直接调用本服务（日常 5173，测试 5174）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","),
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+app.add_exception_handler(LocalError, local_error_handler)
+app.include_router(local_router)
+local_jobs.recover()
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 

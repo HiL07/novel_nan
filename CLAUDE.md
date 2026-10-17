@@ -12,7 +12,7 @@ The system consists of three components:
 |---|-----------|------|--------|
 | 1 | **Frontend** (`frontend/`) | Vue 3 + Vite SPA — file upload & management UI | Implemented |
 | 2 | **Java backend** (`backend/`) | Spring Boot — **file management is the base framework**: upload-to-disk, metadata in MySQL, download/preview APIs | Implemented |
-| 3 | **Python AI backend** (`python-service/`) | FastAPI — article/content extraction, text analysis, remote LLM QLoRA & Hugging Face fine-tuning | Novel extraction implemented; fine-tuning planned |
+| 3 | **Python AI backend** (`python-service/`) | FastAPI — article/content extraction, text analysis, local model management + LoRA/QLoRA style fine-tuning (Hugging Face) | Extraction + **local** fine-tuning implemented; remote inference/training planned |
 
 ```
 Browser (Vue3/Vite, :5173)
@@ -22,7 +22,9 @@ Spring Boot (:8022) ─────► MySQL (test10000) + local disk (./upload/
         │  HTTP  ▲ GET /api/file/preview/{id}
         ▼        │
 Python FastAPI (:8021) ─────► OpenAI-compatible LLM (default DeepSeek; configurable, e.g. local llama.cpp)
-                        └───► remote LLM / Hugging Face training (QLoRA, planned)
+                        ├───► local GPU: Transformers + PEFT inference / LoRA-QLoRA training (models/)
+                        └───► remote inference / training (planned)
+Browser ──(本地模型 page, direct)──► Python /api/local/**
 ```
 
 ## 2. Repository Layout
@@ -47,8 +49,18 @@ nan_novel/
 │       ├── layout/     # App shell: Sidebar + AppMain
 │       ├── router/     # Lazy-loaded routes
 │       ├── views/file/ # upload.vue, manage.vue
-│       └── views/novel/ # extract.vue (extraction tasks & results)
-├── python-service/     # FastAPI AI service (app/main.py, extractor, llm_client)
+│       ├── views/novel/ # create.vue (novel setting selector), extract.vue (extraction tasks & results)
+│       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型: models / fine-tuning / adapters / inference)
+│       ├── components/novel-options/ # schema-driven option UI (OptionField, ChoiceWidget, …)
+│       ├── novel-options/ # field-type registry, schema helpers, editor context
+│       └── mock/        # local placeholder data (until the DB exists)
+├── python-service/     # FastAPI AI service
+│   ├── app/            # main.py, extractor, llm_client, text_loader (extraction)
+│   ├── app/local/      # local models: settings, hardware, registry, inference, training, download, jobs, worker, router
+│   ├── models/         # git-ignored: base/<id>/model.json (+weights if downloaded), adapters/<id>/, jobs/<id>/
+│   ├── scripts/local_e2e.py  # end-to-end smoke test over HTTP
+│   ├── requirements.txt       # extraction service (no torch)
+│   └── requirements-local.txt # local models (torch CUDA + transformers/peft/accelerate/bitsandbytes)
 ├── start.bat           # Windows one-click launcher for backend + AI service + frontend
 └── CLAUDE.md
 ```
@@ -59,7 +71,7 @@ nan_novel/
 |-------|-----------|
 | Frontend | Vue 3.4 (`<script setup>` Composition API), Vite 5, Vue Router 4, Element Plus 2.7 (+ `@element-plus/icons-vue`, globally registered), Axios 1.7 |
 | Java backend | Java 17, Spring Boot 3.2.5, Spring Web, MyBatis-Plus 3.5.7, MySQL (`mysql-connector-j`), Lombok, Maven |
-| Python service | Python 3.10+, FastAPI, Uvicorn, Pydantic v2, httpx, `python-docx` / `pypdf`; planned for fine-tuning: `transformers` + `peft` (QLoRA), `datasets`, `accelerate`, `bitsandbytes`, PyTorch |
+| Python service | Python 3.10+, FastAPI, Uvicorn, Pydantic v2, httpx, `python-docx` / `pypdf`; local models: PyTorch 2.6 (CUDA 12.4 build), `transformers` 4.5x, `peft`, `accelerate`, `bitsandbytes` (QLoRA) |
 
 ## 4. Java Backend Conventions (`backend/`)
 
@@ -152,10 +164,18 @@ npm run preview
 
 - All SFCs use **`<script setup>`** (Composition API); UI text is Chinese, identifiers/comments may be Chinese or English.
 - `@` alias → `src/` (configured in `vite.config.js`).
-- Keep HTTP calls inside `src/api/*.js` using the shared Axios instance (`src/api/request.js`, `baseURL` from `VITE_API_BASE_URL`, fallback `http://localhost:8022`, 60s timeout). Views must not create their own Axios instances.
+- Keep HTTP calls inside `src/api/*.js` using the shared Axios instances: `request` (Java) and `aiRequest` (Python, `VITE_AI_BASE_URL`, fallback `http://localhost:8021`, 180s timeout — only for `/api/local/**`) (`src/api/request.js`; Java `baseURL` from `VITE_API_BASE_URL`, fallback `http://localhost:8022`, 60s timeout). Views must not create their own Axios instances.
 - API helpers unwrap `res.data`; callers treat `response.code === 0` as success.
 - Routes are lazy-loaded (`() => import(...)`) with `meta.title` / `meta.icon` consumed by the sidebar; register new pages in `src/router/index.js`.
 - Element Plus and all its icons are registered globally in `main.js`.
+
+### Novel setting selector (`/novel/create`) — options only, no persistence yet
+
+- **Schema-driven**: everything renders from data — `categories[] → fields[] → options[] → children(fields[])`, nestable to any depth. Field types live in `src/novel-options/fieldTypes.js` (`single`, `multi`, `text`, `textarea`, `number`, `slider`, `tags`, `group`); to add a type, register it there and map it in `OptionField.vue`.
+- **Data source**: `src/api/novelOptions.js#getOptionSchema()` currently returns `src/mock/novelOptionSchema.js` (built-in categories 世界观/角色/情节推进/文风, `elementTemplates` such as 怪物/势力/种族/地点/物品/功法, `genericSuggestions`). When the DB exists, switch only this function to a backend call returning the same shape.
+- **Values**: `{ [categoryKey]: { [fieldKey]: value } }`; choice value `{ selected: string[], sub: { [optionValue]: childValues } }`, group value `[{ _id, ...childValues }]`.
+- **Extensibility (编辑模式)**: users can add custom options inline, add fields to any category / group / option (from suggestions or self-defined), and create custom elements (e.g. 怪物) from a template or blank. User-created items carry `custom: true` and `uid()` keys.
+- **Output**: `buildSpec()` + `specToJson()` (`src/novel-options/schema.js`) give a label-keyed JSON of the chosen settings (for generation prompts); the "完整配置" export is `{ categories, values }` (for later DB storage). Nothing is saved yet — refresh loses state.
 
 ## 6. Python AI Service (`python-service/`)
 
@@ -189,12 +209,32 @@ The model (base URL, key, model name, concurrency) is **not** configured here �
 - All `httpx` calls to local services use `trust_env=False` — a system proxy (Clash etc.) otherwise turns `localhost` requests into 502.
 - Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → LLM JSON per chunk, `concurrency` requests in parallel (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
 
+### Local models & style fine-tuning (`app/local/`, `/api/local/**`)
+
+Local-only for now; remote inference/training must plug into the existing extension points (`source` on registry records, `backend` on jobs + `worker.RUNNERS[(kind, backend)]`). The frontend calls these endpoints **directly** (CORS: `CORS_ORIGINS`, default 5173/5174) — an explicit exception to "frontend → Java → Python", because model files live next to the Python service. Responses use `{code, message, data}` (code 0 = success; `LocalError` → HTTP status).
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/local/system` | GPU (nvidia-smi), RAM, disk, dependency versions, inference state, active job |
+| `GET  /api/local/models` · `POST /models/register {name, path}` · `POST /models/download {repoId, name, useMirror}` · `POST /models/{id}/delete` | Base models. Register = record path only (no copying); download = background job into `models/base/<id>/weights/` then auto-register |
+| `POST /api/local/estimate {baseModelId, mode: infer\|train, quantization: 4bit\|none, maxSeqLen, batchSize, loraR}` | Conservative VRAM/RAM estimate → `level` ok/warn/exceed + messages |
+| `GET  /api/local/adapters` · `GET /adapters/{id}` · `POST /adapters/{id}/rename` · `POST /adapters/{id}/delete` | LoRA adapters; each has `compat` ok/changed/missing vs its base model fingerprint |
+| `GET  /api/local/inference` · `POST /inference/load {baseId, adapterId?, quantization: auto\|4bit\|none}` · `POST /inference/unload` · `POST /inference/generate {prompt, maxNewTokens, temperature, topP, repetitionPenalty, useChatTemplate}` | One model resident in VRAM; load is async (`idle/loading/loaded/error`) |
+| `POST /api/local/train` (`TrainReq` in `router.py`) · `GET /jobs` · `GET /jobs/{id}` · `GET /jobs/{id}/log?lines=` · `POST /jobs/{id}/cancel` | Fine-tuning jobs; 409 + estimate when resources would be exceeded (resend with `force: true`) |
+
+- **Storage** (`app/local/settings.py`, override root with `LOCAL_MODELS_DIR`): `models/base/<id>/model.json` (path, modelType, arch, numParams, sizeBytes, `configHash`), `models/adapters/<id>/` (PEFT files + tokenizer + `meta.json`: exact base model fingerprint, training config, dataset stats, metrics, post-training sample), `models/jobs/<id>/` (`job.json`, `progress.json`, `job.log`, `samples.txt`, `cancel` flag). Adapters are written to `<id>.partial` and renamed only on success.
+- **Jobs** run as separate subprocesses (`python -m app.local.worker <jobId>`) so the API stays responsive and VRAM/RAM are released when they end. One job at a time; starting training unloads the inference model and loading is refused while training. On Windows never probe PIDs with `os.kill(pid, 0)` (it kills the process) — use `jobs.pid_alive`.
+- **Training** (`training.py`): samples (pasted text and/or Java file ids via `text_loader`) are packed into `maxSeqLen` blocks for causal-LM continued training; PEFT LoRA on `all-linear`, gradient checkpointing, cosine LR, `paged_adamw_8bit` for QLoRA (nf4 + double quant, bf16 compute on RTX 40xx). Cancel = flag checked every step (force-kill after 90 s).
+- **Hardware assumptions** (dev machine): RTX 4060 Laptop 8 GB (≈6.3 GB free with the display), 16 GB RAM (often only ~2 GB free), C: nearly full. Defaults are conservative (`maxSeqLen` 512, batch 1, grad-accum 4, r 16). 0.5B–1.5B (3B borderline) are the intended QLoRA sizes; 7B QLoRA is reported as *exceed*. GGUF files cannot be trained.
+- **Install**: torch's CUDA wheel is not on PyPI — see the header of `requirements-local.txt` (Aliyun mirror / resumable download). The extraction service still runs without these packages; torch is imported lazily.
+- **E2E test**: `.venv/Scripts/python scripts/local_e2e.py --model-path <HF model dir> --port 8011 [--samples my.txt]`.
+
 ### Conventions
 
 - FastAPI app served by Uvicorn on **port 8021** (test 8011), all routes prefixed with `/api`, Pydantic v2 models for request/response.
 - Do **not** re-implement file storage or a second file database. Consume files via the Java backend (by file id / relative storage path) or a shared volume, and return extracted/analyzed results over HTTP.
 - Fine-tuning is long-running: run training as **background/async jobs with a status endpoint** (queued/running/succeeded/failed + logs), never block a request worker.
-- Keep model weights, datasets, and LoRA adapters outside the Git working tree (configurable paths / env vars).
+- Keep model weights, datasets, and LoRA adapters out of Git: `python-service/models/` is git-ignored; large base models are registered by path instead of copied.
 - Add `requirements.txt` (or `pyproject.toml`) and document the Python version and CUDA/torch assumptions.
 
 ## 7. Local Development (Windows)

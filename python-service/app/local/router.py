@@ -1,0 +1,263 @@
+"""本地模型 API（前缀 /api/local），响应统一为 {code, message, data}，code=0 表示成功。"""
+import logging
+import re
+from typing import Literal, Optional
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from .. import text_loader
+from . import hardware, inference, jobfiles, jobs, registry, settings
+
+log = logging.getLogger("local.api")
+router = APIRouter(prefix="/api/local", tags=["local-models"])
+
+
+class LocalError(Exception):
+    def __init__(self, code: int, message: str, data=None):
+        super().__init__(message)
+        self.code, self.message, self.data = code, message, data
+
+
+def local_error_handler(_, exc: LocalError) -> JSONResponse:
+    status = exc.code if 400 <= exc.code < 600 else 400
+    return JSONResponse(status_code=status, content={"code": exc.code, "message": exc.message, "data": exc.data})
+
+
+def ok(data=None) -> dict:
+    return {"code": 0, "message": "ok", "data": data}
+
+
+def _guard(fn, *args, **kwargs):
+    """把业务异常转成 LocalError（400），其余异常交给全局处理。"""
+    try:
+        return fn(*args, **kwargs)
+    except (registry.RegistryError, jobs.JobError, RuntimeError) as e:
+        raise LocalError(400, str(e)) from e
+
+
+# ---------------------------------------------------------------- 系统 / 模型
+
+@router.get("/system")
+def system():
+    return ok({**hardware.system_info(), "inference": inference.status(), "activeJob": jobs.active_job()})
+
+
+def _with_load_status(models: list[dict]) -> list[dict]:
+    st = inference.status()
+    for m in models:
+        m["loadStatus"] = st["status"] if st["baseId"] == m["id"] else "idle"
+        m["managed"] = registry.is_managed(m)
+    return models
+
+
+@router.get("/models")
+def list_models():
+    return ok(_with_load_status(registry.list_base()))
+
+
+class RegisterReq(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    path: str = Field(min_length=1, max_length=1000)
+
+
+@router.post("/models/register")
+def register_model(req: RegisterReq):
+    return ok(_guard(registry.register_base, req.name, req.path))
+
+
+class DownloadReq(BaseModel):
+    repoId: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
+    name: str = ""
+    useMirror: bool = True
+
+
+@router.post("/models/download")
+def download_model(req: DownloadReq):
+    name = req.name.strip() or req.repoId.split("/")[-1]
+    cfg = {"repoId": req.repoId, "name": name, "modelId": registry.new_id(name), "useMirror": req.useMirror}
+    return ok(_guard(jobs.create, "download", cfg))
+
+
+@router.post("/models/{model_id}/delete")
+def delete_model(model_id: str):
+    st = inference.status()
+    if st["baseId"] == model_id and st["status"] in ("loaded", "loading"):
+        raise LocalError(400, "该模型正在使用中，请先卸载")
+    _guard(registry.delete_base, model_id)
+    return ok()
+
+
+class EstimateReq(BaseModel):
+    baseModelId: str
+    mode: Literal["infer", "train"] = "train"
+    quantization: Literal["4bit", "none"] = "4bit"
+    maxSeqLen: int = Field(default=512, ge=64, le=4096)
+    batchSize: int = Field(default=1, ge=1, le=16)
+    loraR: int = Field(default=16, ge=1, le=256)
+
+
+@router.post("/estimate")
+def estimate(req: EstimateReq):
+    base = _guard(registry.get_base, req.baseModelId)
+    return ok(hardware.estimate(base, req.mode, quantization=req.quantization, seq_len=req.maxSeqLen,
+                                batch_size=req.batchSize, lora_r=req.loraR))
+
+
+# ---------------------------------------------------------------- 适配器
+
+@router.get("/adapters")
+def list_adapters():
+    return ok(registry.list_adapters())
+
+
+@router.get("/adapters/{adapter_id}")
+def get_adapter(adapter_id: str):
+    return ok(_guard(registry.get_adapter, adapter_id))
+
+
+class RenameReq(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+@router.post("/adapters/{adapter_id}/rename")
+def rename_adapter(adapter_id: str, req: RenameReq):
+    return ok(_guard(registry.rename_adapter, adapter_id, req.name))
+
+
+@router.post("/adapters/{adapter_id}/delete")
+def delete_adapter(adapter_id: str):
+    st = inference.status()
+    if st["adapterId"] == adapter_id and st["status"] in ("loaded", "loading"):
+        raise LocalError(400, "该适配器正在使用中，请先卸载模型")
+    _guard(registry.delete_adapter, adapter_id)
+    return ok()
+
+
+# ---------------------------------------------------------------- 推理
+
+class LoadReq(BaseModel):
+    baseId: str
+    adapterId: Optional[str] = None
+    quantization: Literal["auto", "4bit", "none"] = "auto"
+
+
+@router.get("/inference")
+def inference_status():
+    return ok(inference.status())
+
+
+@router.post("/inference/load")
+def inference_load(req: LoadReq):
+    return ok(_guard(inference.load, req.baseId, req.adapterId or None, req.quantization))
+
+
+@router.post("/inference/unload")
+def inference_unload():
+    _guard(inference.unload)
+    return ok(inference.status())
+
+
+class GenerateReq(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8000)
+    maxNewTokens: int = Field(default=200, ge=1, le=1024)
+    temperature: float = Field(default=0.8, ge=0, le=2)
+    topP: float = Field(default=0.9, gt=0, le=1)
+    repetitionPenalty: float = Field(default=1.1, ge=1, le=2)
+    useChatTemplate: bool = False
+
+
+@router.post("/inference/generate")
+def inference_generate(req: GenerateReq):
+    return ok(_guard(inference.generate, req.prompt, max_new_tokens=req.maxNewTokens, temperature=req.temperature,
+                     top_p=req.topP, repetition_penalty=req.repetitionPenalty,
+                     use_chat_template=req.useChatTemplate))
+
+
+# ---------------------------------------------------------------- 训练任务
+
+class SampleFile(BaseModel):
+    id: int = Field(gt=0)
+    ext: str
+    name: str = ""
+
+
+class TrainReq(BaseModel):
+    baseModelId: str
+    adapterName: str = Field(min_length=1, max_length=100)
+    method: Literal["qlora", "lora"] = "qlora"
+    sampleText: str = ""
+    sampleFiles: list[SampleFile] = []
+    loraR: int = Field(default=16, ge=1, le=128)
+    loraAlpha: int = Field(default=32, ge=1, le=256)
+    loraDropout: float = Field(default=0.05, ge=0, le=0.5)
+    maxSeqLen: int = Field(default=512, ge=64, le=4096)
+    epochs: int = Field(default=3, ge=1, le=50)
+    learningRate: float = Field(default=2e-4, gt=0, le=1e-2)
+    batchSize: int = Field(default=1, ge=1, le=16)
+    gradAccum: int = Field(default=4, ge=1, le=64)
+    maxSteps: int = Field(default=0, ge=0, le=100000)
+    seed: int = 42
+    force: bool = False  # 资源评估为 exceed 时仍强制开始
+
+
+def _collect_samples(req: TrainReq) -> tuple[str, list[dict]]:
+    parts, sources = [], []
+    if req.sampleText.strip():
+        parts.append(text_loader.clean_text(req.sampleText))
+        sources.append({"type": "text", "chars": len(parts[-1])})
+    for f in req.sampleFiles:
+        try:
+            text = text_loader.to_plain_text(text_loader.fetch_file(f.id), f.ext)
+        except Exception as e:  # noqa: BLE001
+            raise LocalError(400, f"读取文件「{f.name or f.id}」失败：{e}") from e
+        if text:
+            parts.append(text)
+            sources.append({"type": "file", "fileId": f.id, "name": f.name, "chars": len(text)})
+    return "\n\n".join(parts), sources
+
+
+@router.post("/train")
+def start_training(req: TrainReq):
+    base = _guard(registry.get_base, req.baseModelId)
+    if not base["exists"]:
+        raise LocalError(400, f"模型目录不存在：{base['path']}")
+    deps = hardware.deps_info()
+    if not deps["ready"]:
+        raise LocalError(400, "未安装本地训练依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")
+    quant = "4bit" if req.method == "qlora" else "none"
+    est = hardware.estimate(base, "train", quantization=quant, seq_len=req.maxSeqLen, batch_size=req.batchSize,
+                            lora_r=req.loraR)
+    if est["level"] == "exceed" and not req.force:
+        raise LocalError(409, "当前配置可能超出本机资源：" + "；".join(est["messages"]), est)
+
+    samples, sources = _collect_samples(req)
+    if len(samples) < settings.MIN_SAMPLE_CHARS:
+        raise LocalError(400, f"写作样本太少（{len(samples)} 字），至少需要 {settings.MIN_SAMPLE_CHARS} 字，建议 1 万字以上")
+
+    adapter_id = re.sub(r"[^a-zA-Z0-9-]", "", registry.new_id(req.adapterName))
+    cfg = req.model_dump(exclude={"sampleText", "sampleFiles", "force", "baseModelId"})
+    cfg.update(baseModel=base, adapterId=adapter_id, sampleChars=len(samples), sampleSources=sources, estimate=est)
+    return ok(_guard(jobs.create, "train", cfg, samples=samples))
+
+
+@router.get("/jobs")
+def list_jobs():
+    return ok(jobs.list_jobs())
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    return ok(_guard(jobs.get_job, job_id))
+
+
+@router.get("/jobs/{job_id}/log")
+def job_log(job_id: str, lines: int = 300):
+    _guard(jobs.get_job, job_id)
+    return ok({"log": jobfiles.tail_log(job_id, max(1, min(lines, 2000)))})
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    return ok(_guard(jobs.cancel, job_id))

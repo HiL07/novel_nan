@@ -1,0 +1,15 @@
+# Local model management / LoRA-QLoRA fine-tuning (optional; the extraction service runs without it).
+# Keep this file ASCII (old pip decodes it as GBK on Windows).
+# Tested: Windows 11, Python 3.10, RTX 4060 Laptop 8GB, NVIDIA driver 560 (CUDA 12.6).
+#
+# 1) Install the CUDA build of torch FIRST (the PyPI default is CPU-only):
+#    pip install --no-cache-dir "torch==2.6.0+cu124" -f https://mirrors.aliyun.com/pytorch-wheels/cu124/
+#    (or --index-url https://download.pytorch.org/whl/cu124). If the 2.5GB download keeps dropping,
+#    fetch the .whl with a resumable downloader (curl -C -) and `pip install <file>.whl`.
+# 2) Then: pip install --no-cache-dir -r requirements-local.txt
+transformers>=4.45,<5
+peft>=0.13
+accelerate>=1.0
+bitsandbytes>=0.45
+safetensors
+huggingface_hub

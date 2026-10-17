@@ -15,6 +15,12 @@ const routes = [
     meta: { title: '文件管理', icon: 'Folder' }
   },
   {
+    path: '/novel/create',
+    name: 'novelCreate',
+    component: () => import('@/views/novel/create.vue'),
+    meta: { title: '小说创作', icon: 'EditPen' }
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),
@@ -25,6 +31,12 @@ const routes = [
     name: 'aiModel',
     component: () => import('@/views/ai/model.vue'),
     meta: { title: '模型配置', icon: 'Cpu' }
+  },
+  {
+    path: '/ai/local',
+    name: 'aiLocal',
+    component: () => import('@/views/ai/local.vue'),
+    meta: { title: '本地模型', icon: 'Monitor' }
   }
 ]
 
