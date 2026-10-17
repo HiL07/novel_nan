@@ -23,6 +23,8 @@ MERGE_THRESHOLD, MERGE_COUNT = 8, 5
 # 模型偶尔自带的章节标题，含 Markdown 形式：**第1章《退婚》** / # 第1章 …
 HEADING = re.compile(r"^\s*[#*\s]*(第[零〇一二三四五六七八九十百千\d]+章[^\n]{0,30}?|《[^》\n]{1,30}》)[*\s]*\n")
 SENTENCE_END = "。！？!?…」”』）)"
+# 正文中途出现的 Markdown 小标题（### xxx），整行去掉
+MD_HEADING_LINE = re.compile(r"^[ \t]*#{1,6}[ \t]+[^\n]*\n?", re.MULTILINE)
 
 
 def _trim_incomplete(text: str) -> str:
@@ -65,6 +67,7 @@ def _clean(piece: str, written: str) -> str:
     """去掉模型偶尔加的开场白 / 章节标题，以及与前文末尾的重复。"""
     piece = PREAMBLE.sub("", piece, count=1)
     piece = HEADING.sub("", piece, count=1)
+    piece = MD_HEADING_LINE.sub("", piece)
     if written:
         tail = written.rstrip()
         for k in range(min(40, len(tail)), 7, -1):
@@ -176,7 +179,10 @@ def _write_chapter(job: dict, req: dict) -> None:
                             arc_summary=novel["arcSummary"], window=novel["contextWindow"],
                             max_new_tokens=seg_tokens, recent_max=p["recentTokens"])
         job["lastContext"] = ctx.report()
-        r = gen.generate(ctx.messages, GenParams(max_new_tokens=seg_tokens, temperature=p["temperature"],
+        # 模型不严格遵守「约 N 字」：按剩余字数给本段设硬上限（留 30% 余量让它写完整句），避免最后一段严重超长
+        ratio = out_chars / out_tokens if out_tokens else CHARS_PER_TOKEN
+        cap = min(seg_tokens, int(remaining / ratio * 1.3) + 64)
+        r = gen.generate(ctx.messages, GenParams(max_new_tokens=cap, temperature=p["temperature"],
                                                  top_p=p["topP"], top_k=p["topK"],
                                                  repetition_penalty=p["repetitionPenalty"], stop_event=stop))
         piece = _clean(r.text, chapter["text"])

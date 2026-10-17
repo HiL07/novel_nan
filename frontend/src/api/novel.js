@@ -9,10 +9,11 @@ export function isExtractable(ext) {
 
 /**
  * 对文件发起小说提取（异步任务，立即返回任务记录）
- * POST /api/novel/extract/{fileId}
+ * POST /api/novel/extract/{fileId} {materials?}
  */
-export function submitExtract(fileId) {
-  return request.post(`/api/novel/extract/${fileId}`).then((res) => res.data)
+export function submitExtract(fileId, options = {}) {
+  // options.materials = {enabled, categories, maxPerChunk, focus}：同时提取创作素材候选（需用户确认后入库）
+  return request.post(`/api/novel/extract/${fileId}`, options).then((res) => res.data)
 }
 
 /**

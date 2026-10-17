@@ -8,42 +8,54 @@
 # Build / 构建:
 #   docker build -f docker/Dockerfile.python -t nan-novel-python .
 #
-# NOTE / 说明:
-#   This slim image installs requirements.txt ONLY (no torch/CUDA).
-#   本精简镜像只安装 requirements.txt（不含 torch/CUDA）。
-#   Extraction + remote LLM features work; local inference / QLoRA
-#   training report "deps not ready" in the UI (app handles it).
-#   文本提取与远程大模型功能可用；本机推理 / QLoRA 训练在页面上会提示
-#   「依赖未安装」（程序本身对缺依赖有容错）。
-#   For GPU training use Dockerfile.python-gpu + compose.gpu.yaml.
-#   GPU 训练请改用 Dockerfile.python-gpu + compose.gpu.yaml。
+# 说明 / NOTE:
+#   - 容器内不安装 GPU / CUDA / PyTorch，也不需要宿主机显卡配置。
+#     No GPU / CUDA / PyTorch inside the container, and no host GPU setup.
+#   - 只安装 python-service/requirements.txt（文本提取 + 远程大模型客户端）。
+#     Installs python-service/requirements.txt only (extraction + remote LLM client).
+#   - 依赖使用 uv 安装（官方 uv 镜像中的二进制，安装更快、行为可复现）。
+#     Dependencies are installed with uv (binary copied from the official image).
 # =====================================================================
 
 FROM python:3.11-slim AS runtime
 WORKDIR /app
 
+# Copy the uv binary from the official image (no pip bootstrap needed).
+# 从官方镜像复制 uv 二进制，无需先用 pip 安装 uv。
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Install into the system interpreter of this image.
+    # 安装到镜像自带的系统解释器。
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1 \
+    # Copy instead of symlink (safe across Docker layers).
+    # 使用复制而非软链接（跨 Docker 层更安全）。
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
     # Where base models / LoRA adapters / jobs are persisted.
     # 基础模型 / LoRA 适配器 / 任务的持久化目录。
-    LOCAL_MODELS_DIR=/data/models
+    LOCAL_MODELS_DIR=/data/models \
+    # Where novel workspaces are persisted (overridable by NOVELS_DIR).
+    # 小说工作区的持久化目录（可用 NOVELS_DIR 覆盖）。
+    NOVELS_DIR=/data/novels
 
 # Install the lightweight service dependencies first (better caching).
 # 先安装轻量服务依赖（利用构建缓存）。
 COPY python-service/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN uv pip install -r /tmp/requirements.txt
 
 # Application package (only the app/ tree is needed at runtime).
 # 应用代码（运行时只需要 app/ 目录）。
 COPY python-service/app ./app
 
-# Persistent model directory owned by the non-root user.
-# 持久化模型目录，归属非 root 用户。
-RUN mkdir -p /data/models \
+# Persistent data directories owned by the non-root user (app creates
+# sub-directories on import, so the parent must be writable).
+# 持久化数据目录，归属非 root 用户（应用会在导入时创建子目录，父目录必须可写）。
+RUN mkdir -p /data/models /data/novels \
     && groupadd --system pyapp && useradd --system --gid pyapp --uid 10002 pyapp \
-    && chown -R pyapp:pyapp /data/models
+    && chown -R pyapp:pyapp /data
 USER pyapp
 
 # Uvicorn serves the FastAPI app on 8021 (same port as local development).

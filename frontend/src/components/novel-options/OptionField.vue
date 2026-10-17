@@ -41,7 +41,10 @@
     <template v-else-if="field.type === 'group'">
       <div v-for="(item, i) in value" :key="item._id" class="group-item">
         <div class="group-item-head">
-          <span>{{ field.itemLabel || '项' }} {{ i + 1 }}<template v-if="itemName(item)">：{{ itemName(item) }}</template></span>
+          <span>
+            {{ field.itemLabel || '项' }} {{ i + 1 }}<template v-if="itemName(item)">：{{ itemName(item) }}</template>
+            <el-tag v-if="item._fromMaterial" size="small" type="success" effect="plain" class="from-material">来自素材库</el-tag>
+          </span>
           <div>
             <el-button link size="small" :icon="CopyDocument" @click="duplicateItem(i)">复制</el-button>
             <el-button link type="danger" size="small" :icon="Delete" @click="value.splice(i, 1)">删除</el-button>
@@ -193,6 +196,9 @@ function duplicateItem(i) {
   font-weight: 600;
   color: #606266;
   border-bottom: 1px solid #ebeef5;
+}
+.from-material {
+  margin-left: 6px;
 }
 .group-actions,
 .add-btn {

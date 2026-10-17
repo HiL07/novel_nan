@@ -6,13 +6,14 @@ from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Callable
 
-from . import config, llm_client, text_loader
+from . import config, llm_client, materials, text_loader
 from .llm_client import LLMError, ModelConfig
 
 log = logging.getLogger(__name__)
 
 
-def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable[[int, str], None]) -> dict:
+def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable[[int, str], None],
+            material_opts: "materials.MaterialOptions | None" = None) -> dict:
     data = text_loader.fetch_file(file_id)
     text = text_loader.to_plain_text(data, file_ext)
     if not text:
@@ -26,6 +27,7 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
 
     on_progress(0, f"共 {len(chapters)} 章，{len(tasks)} 个分块，模型 {cfg.model}，并发 {cfg.concurrency}")
     results: list[dict | None] = [None] * len(tasks)
+    extra = materials.prompt_fragment(material_opts) if material_opts and material_opts.enabled else ""
     lock = threading.Lock()
     state = {"done": 0, "failed": 0}
 
@@ -33,7 +35,7 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
         ci, part = tasks[i]
         title = chapters[ci]["title"]
         try:
-            results[i] = llm_client.analyze_chunk(cfg, title, part)
+            results[i] = llm_client.analyze_chunk(cfg, title, part, extra)
         except LLMError as e:
             if e.fatal:
                 raise  # 配置级错误：终止整个任务
@@ -64,6 +66,10 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
             chunk_results[ci].append(r)
     result = merge(text, chapters, chunk_results, state["failed"])
     result["model"] = cfg.model
+    if material_opts and material_opts.enabled:
+        result["materials"] = materials.merge_candidates(
+            [(chapters[ci]["title"], r) for (ci, _), r in zip(tasks, results) if r], material_opts)
+        result["materialOptions"] = material_opts.model_dump()
     return result
 
 

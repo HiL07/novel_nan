@@ -64,6 +64,8 @@
       </div>
     </el-card>
 
+    <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.item?.fileName" @confirm="doExtract" />
+
     <!-- 预览弹窗 -->
     <el-dialog
       v-model="dialogVisible"
@@ -108,12 +110,13 @@
 </template>
 
 <script setup>
-import { computed, onActivated, ref } from 'vue'
+import { computed, onActivated, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, listFiles, previewUrl } from '@/api/file'
 import { isExtractable, submitExtract } from '@/api/novel'
+import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
 import { errorMessage } from '@/api/request'
 
 const router = useRouter()
@@ -220,19 +223,16 @@ async function copyPreview() {
   }
 }
 
-/** 选中小说文件 → 提交提取任务 → 跳转到提取结果页查看进度 */
-async function startExtract(item) {
+/** 选中小说文件 → 选择提取范围（含素材）→ 提交提取任务 → 跳转到提取结果页查看进度 */
+const extractDlg = reactive({ visible: false, item: null })
+function startExtract(item) {
+  Object.assign(extractDlg, { visible: true, item })
+}
+
+async function doExtract(options) {
+  const item = extractDlg.item
   try {
-    await ElMessageBox.confirm(
-      `将使用「模型配置」中当前启用的模型解析《${item.fileName}》的章节、人物和文风，耗时视篇幅可能需要数分钟。`,
-      '小说提取',
-      { confirmButtonText: '开始提取', cancelButtonText: '取消' }
-    )
-  } catch {
-    return
-  }
-  try {
-    const res = await submitExtract(item.id)
+    const res = await submitExtract(item.id, options)
     if (res.code !== 0) {
       ElMessage.error(res.message || '提交失败')
       return

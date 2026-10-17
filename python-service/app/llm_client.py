@@ -143,11 +143,16 @@ def verify(cfg: ModelConfig) -> dict:
     return {"ok": True, "latencyMs": latency, "message": f"验证通过，耗时 {latency} ms", "reply": reply[:100]}
 
 
-def analyze_chunk(cfg: ModelConfig, title: str, content: str) -> dict:
+def analyze_chunk(cfg: ModelConfig, title: str, content: str, extra: str = "") -> dict:
+    """extra：追加的输出要求（如素材候选，见 app/materials.py），插在正文之前。"""
+    prompt = USER_TEMPLATE.format(title=title, content=content)
+    if extra:
+        head, sep, tail = prompt.partition("\n\n标题：")
+        prompt = f"{head}\n{extra}{sep}{tail}"
     text = chat(cfg, [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": USER_TEMPLATE.format(title=title, content=content)},
-    ], max_tokens=config.LLM_MAX_TOKENS)
+        {"role": "user", "content": prompt},
+    ], max_tokens=config.LLM_MAX_TOKENS + (600 if extra else 0))
     return parse_json(text)
 
 

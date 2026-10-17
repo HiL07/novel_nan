@@ -93,10 +93,10 @@ services:
       - app-net
 
   # -----------------------------------------------------------------
-  # FastAPI Python AI service (slim image: extraction + remote LLM)
-  # FastAPI Python AI 服务（精简镜像：文本提取 + 远程大模型）
-  # GPU training: add compose.gpu.yaml, see README-Docker.md.
-  # GPU 训练：叠加 compose.gpu.yaml，见 README-Docker.md。
+  # FastAPI Python AI service (text extraction + remote LLM client)
+  # FastAPI Python AI 服务（文本提取 + 远程大模型客户端）
+  # No GPU / CUDA is required or configured in this stack.
+  # 本编排不需要、也不配置任何 GPU / CUDA。
   # -----------------------------------------------------------------
   python:
     build:
@@ -117,8 +117,11 @@ services:
       # Base models / LoRA adapters / jobs persist in this volume.
       # 基础模型 / LoRA 适配器 / 任务在此数据卷持久化。
       LOCAL_MODELS_DIR: /data/models
+      # Novel workspaces persist in this volume / 小说工作区在此数据卷持久化。
+      NOVELS_DIR: /data/novels
     volumes:
       - models-data:/data/models
+      - novels-data:/data/novels
     # No host port by default: reach it through nginx (/ai/...).
     # 默认不映射宿主机端口，经 nginx（/ai/...）访问；调试时可取消注释。
     # ports:
@@ -164,6 +167,8 @@ volumes:
     name: nan-upload-data
   models-data:
     name: nan-models-data
+  novels-data:
+    name: nan-novels-data
 
 networks:
   app-net:

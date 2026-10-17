@@ -7,6 +7,8 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -31,13 +33,27 @@ public class AiServiceClient {
         return client.post().uri("/api/models/verify").body(modelBody(cfg)).retrieve().body(JsonNode.class);
     }
 
-    /** POST /api/extract/jobs → Job（含 jobId） */
-    public JsonNode submitExtract(Long fileId, String fileExt, AiModelConfig cfg) {
-        return client.post()
-                .uri("/api/extract/jobs")
-                .body(Map.of("fileId", fileId, "fileExt", fileExt, "model", modelBody(cfg)))
-                .retrieve()
-                .body(JsonNode.class);
+    /** POST /api/extract/jobs → Job（含 jobId）。materials 为素材候选提取范围（null 表示不提取） */
+    public JsonNode submitExtract(Long fileId, String fileExt, AiModelConfig cfg, Map<String, Object> materials) {
+        Map<String, Object> body = new HashMap<>(Map.of("fileId", fileId, "fileExt", fileExt, "model", modelBody(cfg)));
+        if (materials != null) {
+            body.put("materials", materials);
+        }
+        return client.post().uri("/api/extract/jobs").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/materials/expand：语义检索第 1 步，需求 → {ok, keywords, tags, categories} */
+    public JsonNode expandMaterialQuery(String query, AiModelConfig cfg) {
+        return client.post().uri("/api/materials/expand")
+                .body(Map.of("query", query, "model", modelBody(cfg)))
+                .retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/materials/rerank：语义检索第 2 步，对候选打分 → {ok, results: [{id, score, reason}]} */
+    public JsonNode rerankMaterials(String query, List<Map<String, Object>> items, int limit, AiModelConfig cfg) {
+        return client.post().uri("/api/materials/rerank")
+                .body(Map.of("query", query, "items", items, "limit", limit, "model", modelBody(cfg)))
+                .retrieve().body(JsonNode.class);
     }
 
     /** GET /api/extract/jobs/{jobId} → Job（状态、进度、结果） */

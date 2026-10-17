@@ -43,7 +43,9 @@
 
     <!-- 结果详情 -->
     <el-drawer v-model="drawerVisible" :title="detail?.fileName" size="60%" destroy-on-close>
-      <div v-if="result" class="result">
+      <el-tabs v-if="result" v-model="drawerTab">
+        <el-tab-pane label="提取结果" name="result">
+      <div class="result">
         <div class="result-actions">
           <el-button type="primary" :icon="Download" @click="downloadJson">下载 JSON</el-button>
         </div>
@@ -88,6 +90,18 @@
           </el-collapse-item>
         </el-collapse>
       </div>
+        </el-tab-pane>
+        <el-tab-pane :label="`素材候选${result.materials ? '（' + result.materials.length + '）' : ''}`" name="materials">
+          <el-alert
+            v-if="!result.materials"
+            type="info"
+            :closable="false"
+            show-icon
+            title="这次提取没有开启素材提取。可在「文件管理」中重新提取并勾选「提取创作素材」。"
+          />
+          <CandidateReview v-else :extract-id="detail.id" />
+        </el-tab-pane>
+      </el-tabs>
     </el-drawer>
   </div>
 </template>
@@ -98,6 +112,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, Refresh } from '@element-plus/icons-vue'
 import { getExtract, listExtracts } from '@/api/novel'
+import CandidateReview from '@/components/material/CandidateReview.vue'
 import { errorMessage } from '@/api/request'
 
 const STATUS = {
@@ -115,6 +130,7 @@ const loading = ref(false)
 const tasks = ref([])
 const drawerVisible = ref(false)
 const detail = ref(null)
+const drawerTab = ref('result')
 let timer = null
 
 const result = computed(() => {
@@ -166,6 +182,8 @@ async function openDetail(id) {
       return
     }
     detail.value = res.data
+    // 有待确认的素材候选时直接打开「素材候选」
+    drawerTab.value = res.data.message?.includes("素材候选") ? "materials" : "result"
     drawerVisible.value = true
   } catch (e) {
     ElMessage.error(errorMessage(e, '加载提取结果失败'))

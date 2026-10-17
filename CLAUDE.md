@@ -51,6 +51,8 @@ nan_novel/
 │       ├── views/file/ # upload.vue, manage.vue
 │       ├── views/novel/ # create.vue (workspace list), workspace.vue (设定 + 写作), extract.vue (extraction tasks & results)
 │       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型), pyenv.vue (Python 环境 selection & check)
+│       ├── views/material/ # index.vue (素材库: keyword/tag + AI semantic search, 待确认 candidates)
+│       ├── components/material/ # ExtractOptionsDialog, CandidateReview, MaterialEditor, AttributeEditor, MaterialPicker
 │       ├── components/novel-options/ # schema-driven option UI (SettingsEditor, OptionField, ChoiceWidget, …)
 │       ├── novel-options/ # field-type registry, schema helpers, editor context
 │       └── mock/        # local placeholder data (until the DB exists)
@@ -152,6 +154,23 @@ Detection runs **in Java**: `PythonEnvService` executes the selected `python.exe
 - `python-service/.python-env` (git-ignored): one line, the interpreter path, written in the **native charset (GBK)** so `start.bat`'s `set /p` reads Chinese paths correctly; re-synced from the DB on every backend start. `start.bat` uses it for the AI service, falling back to `python-service/.venv`.
 - Project root is auto-detected (works when started from `backend/` or the repo root); override with `python-env.project-root`.
 
+### Material library API (`MaterialController`, `/api/material/**`)
+
+Reusable creative material extracted from novels or added by hand. **Nothing enters `material` without explicit confirmation**: AI output is stored as `material_candidate` (PENDING) and only "保存" turns it into a material.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/material/categories` · `GET /tags?category=` | Fixed categories with counts; tag cloud `[{tag, count}]` |
+| `GET  /api/material/list?category=&tags=a,b&tagMode=all\|any&keyword=&page=&size=` | Keyword (title/summary/subtype/detail/tags) + tag search, paged (MyBatis-Plus `Page`, needs `MybatisPlusConfig` pagination plugin) |
+| `POST /api/material/semantic-search {query, category?, tags?, limit?}` | AI semantic search with the **active** model config: Python `/api/materials/expand` (query → keywords/tags/categories) → SQL prefilter (whole library if ≤150 items, else LIKE on expansions, cap 150) → Python `/api/materials/rerank` (score 0–100 + reason) |
+| `GET /api/material/{id}` · `POST /save` (no id = create, source `manual`) · `POST /{id}/delete` · `POST /use {ids}` | Detail / CRUD / usage counter when applied to a workspace |
+| `GET /api/material/candidates?status=PENDING&extractId=` · `GET /candidates/count` · `POST /candidates/save {items:[{id, ...edits}]}` · `POST /candidates/ignore {ids}` | Candidate inbox; `duplicateOf` flags a same-category same-title material already in the library |
+
+- Categories (fixed codes, keep in sync with `python-service/app/materials.py` and `frontend/src/api/material.js`): `world` 世界观, `faction` 势力, `character` 角色, `monster` 怪物, `location` 地点, `item` 物品功法, `plot` 情节. `subtype` is free text.
+- Tables (`sql/material.sql`, also in `init.sql`): `material` (`attributes` / `tags` / `source` are JSON text via `JacksonTypeHandler`, entity needs `autoResultMap = true`), `material_tag` (tag index, rewritten on every save), `material_candidate` (`payload` JSON, unique `(extract_id, candidate_key)`).
+- Tag filters resolve material ids with a parameterized query on `material_tag` — never build SQL strings from user tags (`inSql`).
+- Extraction: `POST /api/novel/extract/{fileId}` takes optional `{materials: {enabled, categories, maxPerChunk, focus}}`; on success `NovelExtractService` calls `MaterialService.createCandidates(...)` and the task message says how many candidates await confirmation.
+
 ### File storage rules
 
 - Root dir from `file.storage.path` in `application.yml` (default `./upload/`).
@@ -199,6 +218,7 @@ npm run preview
 ### Novel workspaces (`/novel/create` → `/novel/workspace/:id`)
 
 - List page creates a workspace: title, model source (local; remote shown but not wired yet), base model (default Qwen2.5-1.5B-Instruct), adapter (disabled at this stage), context window 8192 / 32768. It shows the default-model check with a one-click download (`/api/local/models/download` → `models/base/<id>/weights/`) and Hugging Face / hf-mirror links.
+- **Using materials**: `SettingsEditor` → 「从素材库添加」 opens `MaterialPicker` (category / keyword / tag filters, preview of where each item goes). `novel-options/materialApply.js#APPLY_TARGETS` maps categories to settings (monster/faction/location/item → custom element from template, auto-created if missing → its list; character → 角色·主要角色; plot → 情节推进·关键情节节点; world → 世界观补充). Applying **copies** the data (later library edits don't change the story); group items get `_fromMaterial` (shown as「来自素材库」, never exported by `buildSpec`), unmapped attributes go into an added 备注 field.
 - Workspace page: 设定 tab = `SettingsEditor` (保存设定), 写作 tab = chapter list, next-chapter form (title, goal, target chars), 预览上下文, live segmented generation with cancel, per-call token table, workspace totals. Unsaved settings are saved automatically before preview/generation.
 
 ## 6. Python AI Service (`python-service/`)
@@ -231,6 +251,7 @@ The model (base URL, key, model name, concurrency) is **not** configured here �
 - Jobs are in-memory and run one at a time; Java is responsible for persisting results.
 - Languages: Chinese (primary) and English novels. Analysis text is always output in Simplified Chinese; character/place names keep the original spelling.
 - All `httpx` calls to local services use `trust_env=False` — a system proxy (Clash etc.) otherwise turns `localhost` requests into 502.
+- **Material candidates** (`app/materials.py`): when `ExtractRequest.materials.enabled`, `prompt_fragment()` adds a `"materials"` field to each chunk's JSON (selected categories, ≤ `maxPerChunk`, optional `focus`, abstracted wording + ≤60-char excerpt; ~+600 max tokens per chunk). `merge_candidates()` dedupes by category + normalized title across chunks (attributes/tags unioned, chapters recorded) into `result.materials[]` with a stable `candidateId`. `POST /api/materials/expand` and `/api/materials/rerank` back the semantic search (model config passed from Java, never stored).
 - Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → LLM JSON per chunk, `concurrency` requests in parallel (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
 
 ### Local models & style fine-tuning (`app/local/`, `/api/local/**`)

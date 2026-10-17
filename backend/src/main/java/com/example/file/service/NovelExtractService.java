@@ -21,6 +21,7 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -44,6 +45,7 @@ public class NovelExtractService {
     private final ObjectMapper objectMapper;
     private final AiServiceClient aiClient;
     private final AiModelConfigService modelService;
+    private final MaterialService materialService;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "novel-extract");
         t.setDaemon(true);
@@ -54,12 +56,14 @@ public class NovelExtractService {
                                FileService fileService,
                                ObjectMapper objectMapper,
                                AiServiceClient aiClient,
-                               AiModelConfigService modelService) {
+                               AiModelConfigService modelService,
+                               MaterialService materialService) {
         this.extractMapper = extractMapper;
         this.fileService = fileService;
         this.objectMapper = objectMapper;
         this.aiClient = aiClient;
         this.modelService = modelService;
+        this.materialService = materialService;
     }
 
     /**
@@ -84,8 +88,9 @@ public class NovelExtractService {
 
     /**
      * 提交提取任务，立即返回任务记录（QUEUED）。
+     * materials：素材候选提取范围 {enabled, categories, maxPerChunk, focus}，null 或 enabled=false 表示不提取素材。
      */
-    public NovelExtract submit(Long fileId) {
+    public NovelExtract submit(Long fileId, Map<String, Object> materials) {
         FileInfo file = fileService.getById(fileId);
         String ext = file.getFileExt() == null ? "" : file.getFileExt().toLowerCase();
         if (!SUPPORTED_EXTS.contains(ext)) {
@@ -99,12 +104,14 @@ public class NovelExtractService {
         task.setFileName(file.getFileName());
         task.setStatus(NovelExtract.QUEUED);
         task.setProgress(0);
-        task.setMessage("排队中（模型：" + model.getName() + "）");
+        boolean withMaterials = materials != null && Boolean.TRUE.equals(materials.get("enabled"));
+        task.setMessage("排队中（模型：" + model.getName() + (withMaterials ? "，含素材提取" : "") + "）");
         task.setCreateTime(LocalDateTime.now());
         task.setUpdateTime(task.getCreateTime());
         extractMapper.insert(task);
 
-        executor.submit(() -> run(task.getId(), fileId, ext, model));
+        Map<String, Object> materialOpts = withMaterials ? materials : null;
+        executor.submit(() -> run(task.getId(), file, ext, model, materialOpts));
         return task;
     }
 
@@ -130,12 +137,12 @@ public class NovelExtractService {
         return task;
     }
 
-    private void run(Long taskId, Long fileId, String ext, AiModelConfig model) {
+    private void run(Long taskId, FileInfo file, String ext, AiModelConfig model, Map<String, Object> materials) {
         try {
-            JsonNode job = aiClient.submitExtract(fileId, ext, model);
+            JsonNode job = aiClient.submitExtract(file.getId(), ext, model, materials);
             String jobId = job.path("jobId").asText();
             update(taskId, NovelExtract.RUNNING, 0, "已提交 AI 服务", jobId, null);
-            poll(taskId, jobId);
+            poll(taskId, jobId, file);
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，taskId={}", taskId, e);
             update(taskId, NovelExtract.FAILED, null, "AI 服务不可达，请确认 python-service 已启动", null, null);
@@ -149,7 +156,7 @@ public class NovelExtractService {
         }
     }
 
-    private void poll(Long taskId, String jobId) throws Exception {
+    private void poll(Long taskId, String jobId, FileInfo file) throws Exception {
         int unreachable = 0;
         while (!Thread.currentThread().isInterrupted()) {
             Thread.sleep(POLL_INTERVAL_MS);
@@ -172,7 +179,15 @@ public class NovelExtractService {
             switch (status) {
                 case "succeeded" -> {
                     String result = objectMapper.writeValueAsString(job.path("result"));
-                    update(taskId, NovelExtract.SUCCEEDED, 100, "提取完成", null, result);
+                    // 素材只生成「待确认候选」，由用户在提取结果 / 素材库页确认后才入库
+                    int candidates = 0;
+                    try {
+                        candidates = materialService.createCandidates(taskId, file.getId(), file.getFileName(), job.path("result"));
+                    } catch (Exception e) {
+                        log.error("保存素材候选失败，taskId={}", taskId, e);
+                    }
+                    update(taskId, NovelExtract.SUCCEEDED, 100,
+                            candidates > 0 ? "提取完成，发现 " + candidates + " 条素材候选待确认" : "提取完成", null, result);
                     return;
                 }
                 case "failed" -> {

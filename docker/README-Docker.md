@@ -12,7 +12,7 @@ This guide covers delivering the stack (Vue3 + Spring Boot + FastAPI + MySQL) to
 |---|---|---|---|
 | `frontend` | `nan-novel-frontend` (nginx) | 80 | 托管 Vue 静态文件，并反代 `/java/` → 后端、`/ai/` → Python 服务 / Serves the SPA and reverse-proxies both APIs |
 | `backend` | `nan-novel-backend` | 8022 | Spring Boot 文件管理后端（系统主服务） / Spring Boot file-management service |
-| `python` | `nan-novel-python` | 8021 | FastAPI：文本提取/分析；精简镜像不含 torch / FastAPI extraction service (slim, no torch) |
+| `python` | `nan-novel-python` | 8021 | FastAPI：文本提取/分析；依赖用 uv 安装，不含 GPU/CUDA / FastAPI extraction service; deps installed by uv, no GPU/CUDA |
 | `mysql` | `mysql:8.0` | 3306 | 数据库（库名 `test10000`，表由后端启动时自动创建） / Database; tables auto-created by the backend |
 
 ```
@@ -38,10 +38,10 @@ By default only **8080 (web)** and **3307 (MySQL, optional)** are published to t
 - Windows / macOS：安装 **Docker Desktop**（Windows 使用 WSL2 后端）。
 - Linux：`docker` + `docker-compose-plugin`（`docker compose version` 能输出版本即可）。
 - 内存建议 ≥ 4 GB；磁盘 ≥ 5 GB（镜像 + MySQL + 上传文件）。
-- 需要联网拉取基础镜像与依赖（离线交付见第 8 节）。
-- （仅容器内 QLoRA 训练需要）NVIDIA GPU + 驱动：Linux 另装 NVIDIA Container Toolkit；Windows 用 Docker Desktop + 最新 NVIDIA 驱动。
+- 需要联网拉取基础镜像与依赖（离线交付见第 7 节）。
+- 无需显卡、无需安装 CUDA / NVIDIA Container Toolkit：容器内只包含 JDK、Node 构建产物与 Python 运行依赖。
 
-Requires Docker 24+ with the Compose plugin, ~4GB RAM and ~5GB disk. GPU training additionally needs an NVIDIA driver (and the NVIDIA Container Toolkit on Linux).
+Requires Docker 24+ with the Compose plugin, ~4GB RAM and ~5GB disk. No GPU, CUDA or NVIDIA Container Toolkit is needed — images only contain the JDK, the built frontend, and Python runtime dependencies.
 
 ```powershell
 # 验证安装 / verify
@@ -131,7 +131,7 @@ docker compose logs --tail=200 mysql
 | 上传失败/413 | nginx 已放行 50MB，与后端一致；勿在前面再加限制更小的代理 / nginx allows 50MB; don't put a stricter proxy in front |
 | Python 提取任务失败 | `logs python`：看是否连不到 `backend:8022`（同网络默认互通）或文件 id 不存在 / check network or file id |
 | 「Python 环境」页为空 | **正常现象**：该页检测的是宿主机 Python（开发模式用）；容器化后 AI 服务已独立运行，无需在此检测 / expected: that page probes the host Python for the dev workflow; the AI service runs as its own container |
-| 「本地模型」页提示依赖未安装 | 精简镜像不含 torch（设计如此）；需要容器内训练/推理时使用 GPU 覆盖文件，见第 7 节 / slim image has no torch by design; use the GPU override (section 7) |
+| 「本地模型」页提示依赖未安装 | **正常现象**：容器内只安装文本提取依赖，不含 torch/CUDA；本机推理与 QLoRA 微调请在宿主机的 Python 环境中进行 / expected: the image ships extraction deps only (no torch/CUDA); run local inference/QLoRA on the host Python env |
 | MySQL 端口 3307 连不上 | 默认仅 Web 8080 必需；确认 `.env` 的 `MYSQL_PORT` 未被占用、防火墙已放行 / check port conflicts and firewall |
 
 直接验证内部链路 / Verify the internal chain:
@@ -162,6 +162,7 @@ The database is created on first MySQL start; tables are created by the backend.
 | `nan-mysql-data` | `/var/lib/mysql` | 全部业务数据 / all database data |
 | `nan-upload-data` | `/data/upload` | 上传的小说与文件 / uploaded files |
 | `nan-models-data` | `/data/models` | 基础模型、LoRA 适配器、训练任务 / models, adapters, jobs |
+| `nan-novels-data` | `/data/novels` | 小说工作区与章节数据 / novel workspaces and chapters |
 
 查看卷 / inspect volumes:
 
@@ -197,26 +198,9 @@ docker run --rm -v nan-upload-data:/data -v ${PWD}:/backup alpine sh -c "tar xzf
 
 ---
 
-## 7. （可选）GPU 容器：本地推理与 QLoRA 训练 / Optional GPU Container
+## 7. 交付到目标机器 / Delivery to Target Machines
 
-默认精简镜像只支持「文本提取 + 远程大模型」。需要在容器内做本地模型推理 / QLoRA 微调时，用 GPU 覆盖文件（会额外下载数 GB 的 CUDA 版 PyTorch）：
-
-The slim image supports extraction + remote LLMs. For in-container local inference/QLoRA, use the GPU override (downloads several GB of CUDA PyTorch):
-
-```powershell
-# 前置：宿主机有 N 卡驱动；Linux 已装 NVIDIA Container Toolkit
-docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
-```
-
-启动后在页面「本地模型 → 系统信息」确认能看到 GPU/CUDA；模型权重下载与适配器输出都持久化在 `nan-models-data` 卷中。无 GPU 的机器不要使用该覆盖文件。
-
-After start, check GPU/CUDA on the Local-Model system page. Don't use this override on machines without an NVIDIA GPU.
-
----
-
-## 8. 交付到目标机器 / Delivery to Target Machines
-
-### 8.1 目标机器可以联网 / Online target
+### 7.1 目标机器可以联网 / Online target
 
 1. 打包整个项目目录（或 `git clone`），确保包含 `backend/`、`frontend/`、`python-service/`、`docker/`。
 2. 目标机安装 Docker Desktop / Docker Engine。
@@ -224,7 +208,7 @@ After start, check GPU/CUDA on the Local-Model system page. Don't use this overr
 4. `docker compose up -d --build`。
 5. 放行防火墙 TCP 端口（默认 Web **8080**；如需远程连库再放行 **3307**）。
 
-### 8.2 目标机器不能联网（离线交付）/ Offline / air-gapped target
+### 7.2 目标机器不能联网（离线交付）/ Offline / air-gapped target
 
 在一台**与目标机同 CPU 架构、能联网**的机器上准备镜像：
 
@@ -260,7 +244,7 @@ docker compose ps
 
 ---
 
-## 9. 防火墙与访问地址 / Firewall & Access
+## 8. 防火墙与访问地址 / Firewall & Access
 
 - Linux 放行端口示例（ufw）：`sudo ufw allow 8080/tcp`（必要时再加 `3307/tcp`，不建议对公网开放数据库）。
 - Windows：首次启动 Docker 发布端口时按提示允许专用网络；或在「高级安全 Windows Defender 防火墙」放行入站 TCP 8080。
@@ -273,17 +257,15 @@ Open inbound TCP 8080 (and 3307 only if you need remote DB access — not recomm
 
 ---
 
-## 10. 交付清单与设计说明 / Delivery Notes
+## 9. 交付清单与设计说明 / Delivery Notes
 
 **新增文件（全部在 `docker/`，另有 1 个根目录文件）/ New files:**
 
 ```
 docker/
 ├── compose.yaml              # 主编排：mysql/backend/python/frontend
-├── compose.gpu.yaml          # 可选 GPU 覆盖（QLoRA 容器训练）
-├── Dockerfile.backend        # Spring Boot 多阶段构建
-├── Dockerfile.python         # FastAPI 精简镜像
-├── Dockerfile.python-gpu     # FastAPI + CUDA PyTorch（可选）
+├── Dockerfile.backend        # Spring Boot 多阶段构建（JDK 17）
+├── Dockerfile.python         # FastAPI 镜像（uv 安装依赖）
 ├── Dockerfile.frontend       # Node 构建 + nginx 托管
 ├── nginx/default.conf        # 静态托管 + /java /ai 反向代理
 ├── .env.example              # 环境变量模板（无真实密码）
@@ -299,18 +281,18 @@ No existing file was modified. Container wiring is 100% environment-variable dri
 
 **功能差异（容器模式下的已知限制）/ Known limitations in container mode:**
 1. 「Python 环境检测」页是为宿主机开发流程设计的（Java 探测本机 python.exe），容器内无需使用，显示为空属正常；AI 服务本身已作为独立容器运行。
-2. 默认精简 Python 镜像不含 torch，本地推理/QLoRA 训练需用第 7 节 GPU 覆盖方案（且需要 NVIDIA 容器运行时）。
+2. 容器内不安装 torch/CUDA，也不挂载宿主机显卡；本机推理与 QLoRA 微调请在宿主机 Python 环境进行（AI 服务本身仍可正常运行文本提取与远程大模型调用）。
 3. 远程大模型 API Key 仍在网页端配置；HuggingFace 下载需要容器能访问外网（或使用已持久化的本地权重）。
 
 ---
 
-## 11. 本次实际验证记录 / Verification performed
+## 10. 本次实际验证记录 / Verification performed
 
 测试环境：Windows 11 + Docker Desktop（Engine 29.6.1，Linux 容器，WSL2）。
 
 | 验证项 Check | 命令 Command | 结果 Result |
 |---|---|---|
-| Compose 语法与变量插值 | `docker compose config --quiet` | 通过，主文件与 GPU 覆盖文件均通过 |
+| Compose 语法与变量插值 | `docker compose config --quiet` | 通过 |
 | 镜像构建 | `docker compose build` | 3 个镜像全部构建成功（MySQL 使用官方镜像） |
 | 服务启动 | `docker compose up -d` | 4 个容器全部 `healthy` |
 | 前端静态页 | `GET http://localhost:8080/` | 200 |
@@ -322,7 +304,6 @@ No existing file was modified. Container wiring is 100% environment-variable dri
 | 数据库自动建表 | `SHOW TABLES FROM test10000` | `file` / `novel_extract` / `ai_model_config` / `python_env` |
 | 上传卷持久化 | 上传后 `docker exec nan-backend ls /data/upload/...` | 文件存在 |
 | down → up 数据保持 | `docker compose down && up -d` | 文件记录与卷数据仍存在 |
-| GPU 镜像 | `compose.gpu.yaml` | **未验证**：当前机器未执行 GPU 覆盖构建（需 NVIDIA 容器运行时） |
 
 > 说明：测试产生的示例文件与数据库记录已在验证后清理。
 > Test artifacts were cleaned up after verification.

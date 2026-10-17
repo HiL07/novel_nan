@@ -7,6 +7,7 @@
           编辑模式
           <el-switch v-model="editMode" />
         </span>
+        <el-button :icon="Collection" @click="openPicker">从素材库添加</el-button>
         <el-button :icon="RefreshLeft" @click="resetAll">重置设定</el-button>
         <slot name="actions" />
       </div>
@@ -116,6 +117,8 @@
       @save="onCategorySave"
     />
 
+    <MaterialPicker v-model="picker.visible" :categories="categories" :initial-category="picker.category" @apply="onApplyMaterials" />
+
     <el-dialog v-model="jsonVisible" title="设定 JSON" width="680px">
       <el-radio-group v-model="jsonMode" size="small" class="json-mode">
         <el-radio-button value="spec">设定结果</el-radio-button>
@@ -135,13 +138,16 @@
 <script setup>
 import { computed, onMounted, provide, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CopyDocument, Delete, Edit, Plus, RefreshLeft } from '@element-plus/icons-vue'
+import { Collection, CopyDocument, Delete, Edit, Plus, RefreshLeft } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import FieldEditor from './FieldEditor.vue'
 import CategoryEditor from './CategoryEditor.vue'
 import SpecTree from './SpecTree.vue'
 import { getOptionSchema } from '@/api/novelOptions'
 import { EDITOR_KEY } from '@/novel-options/editor'
+import { applyMaterial } from '@/novel-options/materialApply'
+import { recordMaterialUse } from '@/api/material'
+import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import { buildSpec, clone, initValues, isFilled, specToJson, uid } from '@/novel-options/schema'
 
 /**
@@ -279,8 +285,15 @@ function onCategorySave({ label, icon, desc, templateKey }) {
     Object.assign(categoryEditor.editing, { label, icon, desc })
     return
   }
+  const cat = addCustomCategory({ label, icon, desc, templateKey })
+  activeKey.value = cat.key
+  ElMessage.success(`已添加自定义元素「${label}」`)
+}
+
+/** 新建自定义元素（可基于模板），返回响应式分类对象 */
+function addCustomCategory({ label, icon, desc, templateKey }) {
   const t = templates.value.find((x) => x.key === templateKey)
-  const cat = {
+  categories.value.push({
     key: uid('cat'),
     label,
     icon,
@@ -292,11 +305,49 @@ function onCategorySave({ label, icon, desc, templateKey }) {
     suggestions: [...(t?.suggestions || []), ...genericSuggestions.value].filter(
       (s, i, arr) => arr.findIndex((x) => x.label === s.label) === i
     )
-  }
-  categories.value.push(cat)
+  })
+  const cat = categories.value[categories.value.length - 1]
   values[cat.key] = initValues(cat.fields)
-  activeKey.value = cat.key
-  ElMessage.success(`已添加自定义元素「${label}」`)
+  return cat
+}
+
+/* ---------------- 素材库：选择素材并应用到当前设定 ---------------- */
+const picker = reactive({ visible: false, category: '' })
+// 当前设定分类 → 素材分类（用于打开素材库时预选）
+const MATERIAL_OF = { world: 'world', characters: 'character', plot: 'plot', monster: 'monster', faction: 'faction', location: 'location', item: 'item', skill: 'item' }
+
+function openPicker() {
+  const cat = activeCategory.value
+  picker.category = (cat && MATERIAL_OF[cat.custom ? cat.templateKey : cat.key]) || ''
+  picker.visible = true
+}
+
+function onApplyMaterials(list) {
+  const ctx = {
+    categories: categories.value,
+    values,
+    createFromTemplate: (key) => {
+      const t = templates.value.find((x) => x.key === key)
+      return addCustomCategory({ label: t?.label || key, icon: t?.icon || 'Collection', desc: t?.desc || '', templateKey: key })
+    }
+  }
+  const done = []
+  const failed = []
+  let lastKey = ''
+  for (const m of list) {
+    try {
+      lastKey = applyMaterial(m, ctx).categoryKey
+      done.push(m.id)
+    } catch (e) {
+      failed.push(`${m.title}：${e.message}`)
+    }
+  }
+  if (lastKey) activeKey.value = lastKey
+  if (done.length) {
+    ElMessage.success(`已应用 ${done.length} 条素材（可在对应分类中继续修改）`)
+    recordMaterialUse(done).catch(() => {})
+  }
+  if (failed.length) ElMessage.error({ message: failed.join('；'), duration: 6000 })
 }
 
 async function removeCategory(cat) {

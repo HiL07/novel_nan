@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import config, extractor, llm_client
+from . import materials as material_mod
 from .llm_client import ModelConfig
 from .local import jobs as local_jobs
 from .generation import defaults as gen_defaults
@@ -54,6 +55,7 @@ class ExtractRequest(BaseModel):
     fileId: int = Field(gt=0)
     fileExt: str
     model: ModelConfig
+    materials: Optional[material_mod.MaterialOptions] = None  # 素材候选提取范围；为空则不提取
 
 
 class VerifyResult(BaseModel):
@@ -79,13 +81,13 @@ _lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="extract")
 
 
-def _run(job: Job, file_ext: str, cfg: ModelConfig) -> None:
+def _run(job: Job, file_ext: str, cfg: ModelConfig, material_opts=None) -> None:
     def on_progress(progress: int, message: str) -> None:
         job.progress, job.message = progress, message
 
     job.status = "running"
     try:
-        job.result = extractor.extract(job.fileId, file_ext, cfg, on_progress)
+        job.result = extractor.extract(job.fileId, file_ext, cfg, on_progress, material_opts)
         job.progress, job.status = 100, "succeeded"
     except Exception as e:  # 任何异常都要落到 failed，供 Java 端轮询拿到原因
         log.exception("提取失败 jobId=%s fileId=%s", job.jobId, job.fileId)
@@ -104,6 +106,24 @@ def verify_model(cfg: ModelConfig) -> VerifyResult:
     return result
 
 
+@app.post("/api/materials/expand")
+def materials_expand(req: material_mod.ExpandRequest) -> dict:
+    """AI 语义检索第 1 步：需求 → 关键词 / 标签 / 分类（Java 用于数据库初筛）。"""
+    try:
+        return {"ok": True, **material_mod.expand_query(req)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "keywords": [], "tags": [], "categories": []}
+
+
+@app.post("/api/materials/rerank")
+def materials_rerank(req: material_mod.RerankRequest) -> dict:
+    """AI 语义检索第 2 步：对初筛出的候选按需求打分排序。"""
+    try:
+        return {"ok": True, "results": material_mod.rerank(req)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "results": []}
+
+
 @app.post("/api/extract/jobs")
 def submit(req: ExtractRequest) -> Job:
     ext = req.fileExt.lower()
@@ -112,7 +132,7 @@ def submit(req: ExtractRequest) -> Job:
     job = Job(jobId=uuid.uuid4().hex, fileId=req.fileId, message="排队中")
     with _lock:
         _jobs[job.jobId] = job
-    _executor.submit(_run, job, ext, req.model)
+    _executor.submit(_run, job, ext, req.model, req.materials)
     return job
 
 

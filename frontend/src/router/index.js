@@ -27,6 +27,12 @@ const routes = [
     component: () => import('@/views/novel/workspace.vue')
   },
   {
+    path: '/material',
+    name: 'material',
+    component: () => import('@/views/material/index.vue'),
+    meta: { title: '素材库', icon: 'Collection' }
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),
