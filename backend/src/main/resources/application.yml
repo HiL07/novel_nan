@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/test10000?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: daijiahao123
+  servlet:
+    multipart:
+      max-file-size: 50MB        # 单文件大小上限
+      max-request-size: 50MB     # 请求总大小上限
+
+# 文件存储根目录（由 Spring Boot 管理，上传时自动创建缺失子目录）
+file:
+  storage:
+    path: ./upload/
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true   # 下划线列名 → 驼峰字段

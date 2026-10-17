@@ -1,0 +1,8 @@
+com\example\file\common\BizException.class
+com\example\file\config\WebConfig.class
+com\example\file\FileApplication.class
+com\example\file\controller\FileController.class
+com\example\file\service\FileService.class
+com\example\file\common\Result.class
+com\example\file\mapper\FileMapper.class
+com\example\file\entity\FileInfo.class
