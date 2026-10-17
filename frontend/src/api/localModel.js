@@ -17,7 +17,15 @@ export const getSystem = () => get('/api/local/system')
 /* ---------- 基础模型 ---------- */
 export const listModels = () => get('/api/local/models')
 export const registerModel = (name, path) => post('/api/local/models/register', { name, path })
-export const downloadModel = (repoId, name, useMirror = true) => post('/api/local/models/download', { repoId, name, useMirror })
+/** 下载源：auto（依次尝试 ModelScope → hf-mirror → Hugging Face）/ modelscope / hf-mirror / huggingface；空 = 服务默认 */
+export const DOWNLOAD_SOURCES = [
+  { value: 'auto', label: '自动（推荐）', note: '依次尝试，某个源不可用时自动换下一个' },
+  { value: 'modelscope', label: 'ModelScope 魔搭', note: '国内直连，逐文件校验 SHA-256' },
+  { value: 'hf-mirror', label: 'hf-mirror 镜像', note: 'Hugging Face 国内镜像' },
+  { value: 'huggingface', label: 'Hugging Face 官方', note: '需能访问 huggingface.co' }
+]
+export const downloadModel = (repoId, name, source = 'auto') => post('/api/local/models/download', { repoId, name, source })
+export const getDownloadSources = () => get('/api/local/models/download/sources')
 export const deleteModel = (id) => post(`/api/local/models/${id}/delete`)
 /** 资源评估：{baseModelId, mode: infer|train, quantization: 4bit|none, maxSeqLen, batchSize, loraR} */
 export const estimate = (body) => post('/api/local/estimate', body)

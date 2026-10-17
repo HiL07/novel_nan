@@ -289,7 +289,12 @@
       <el-form label-width="80px" class="dl-form">
         <el-form-item label="仓库 ID"><el-input v-model="downloadDlg.repoId" placeholder="如 Qwen/Qwen2.5-0.5B-Instruct" /></el-form-item>
         <el-form-item label="名称"><el-input v-model="downloadDlg.name" placeholder="留空则使用仓库名" /></el-form-item>
-        <el-form-item label="镜像"><el-switch v-model="downloadDlg.useMirror" /> <span class="hint">使用 hf-mirror.com（国内推荐）</span></el-form-item>
+        <el-form-item label="下载源">
+          <el-select v-model="downloadDlg.source" style="width: 200px">
+            <el-option v-for="s in DOWNLOAD_SOURCES" :key="s.value" :label="s.label" :value="s.value" />
+          </el-select>
+          <span class="hint">{{ DOWNLOAD_SOURCES.find((s) => s.value === downloadDlg.source)?.note }}</span>
+        </el-form-item>
       </el-form>
       <div class="hint">下载到 python-service/models/base/ 下，完成后自动登记；进度见「风格微调 → 任务记录」的日志。</div>
       <template #footer>
@@ -328,7 +333,7 @@ import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, FolderAdd, MagicStick, Monitor, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import {
-  RECOMMENDED_MODELS, cancelJob, deleteAdapter, deleteModel, downloadModel, estimate, generate, getInference,
+  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, deleteAdapter, deleteModel, downloadModel, estimate, generate, getInference,
   getJobLog, getSystem, listAdapters, listJobs, listModels, loadModel, registerModel, renameAdapter,
   startTraining, unloadModel
 } from '@/api/localModel'
@@ -439,10 +444,10 @@ async function onRegister() {
   }
 }
 
-const downloadDlg = reactive({ visible: false, repoId: RECOMMENDED_MODELS[0].repoId, name: '', useMirror: true })
+const downloadDlg = reactive({ visible: false, repoId: RECOMMENDED_MODELS[0].repoId, name: '', source: 'auto' })
 async function onDownload() {
   try {
-    await call(downloadModel(downloadDlg.repoId.trim(), downloadDlg.name.trim(), downloadDlg.useMirror), '启动下载失败')
+    await call(downloadModel(downloadDlg.repoId.trim(), downloadDlg.name.trim(), downloadDlg.source), '启动下载失败')
     ElMessage.success('已开始下载，可在「风格微调 → 任务记录」查看进度')
     downloadDlg.visible = false
     await refreshAll()

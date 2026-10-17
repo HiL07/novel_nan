@@ -18,9 +18,11 @@ import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -70,12 +72,20 @@ public class FileService {
         Path rootPath = Paths.get(storagePath).toAbsolutePath().normalize();
         Path targetDir = rootPath.resolve(dateDir);
         Path targetFile = targetDir.resolve(storedName);
+        // 先写同目录临时文件再原子改名，避免中途失败留下半截文件
+        Path tmpFile = targetDir.resolve(storedName + ".part");
         try {
             Files.createDirectories(targetDir);
             try (InputStream in = file.getInputStream()) {
-                Files.copy(in, targetFile);
+                Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+            try {
+                Files.move(tmpFile, targetFile, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmpFile, targetFile);
             }
         } catch (IOException e) {
+            deleteQuietly(tmpFile);
             log.error("文件落盘失败，目标路径：{}", targetFile, e);
             throw new RuntimeException("文件落盘失败", e);
         }
@@ -88,7 +98,13 @@ public class FileService {
         info.setContentType(file.getContentType());
         info.setFileExt(fileExt);
         info.setCreateTime(LocalDateTime.now());
-        fileMapper.insert(info);
+        try {
+            fileMapper.insert(info);
+        } catch (RuntimeException e) {
+            // 写库失败：删除已落盘的文件，避免出现没有记录的孤儿文件
+            deleteQuietly(targetFile);
+            throw e;
+        }
 
         // 9. 返回（含自增 id）
         return info;
@@ -119,7 +135,11 @@ public class FileService {
     public byte[] read(Long id) {
         FileInfo info = getById(id);
         Path rootPath = Paths.get(storagePath).toAbsolutePath().normalize();
-        Path targetFile = rootPath.resolve(info.getStoragePath());
+        Path targetFile = rootPath.resolve(info.getStoragePath()).normalize();
+        if (!targetFile.startsWith(rootPath)) {
+            log.error("非法的存储路径，id={}：{}", id, info.getStoragePath());
+            throw new BizException(404, "文件路径非法");
+        }
         try {
             return Files.readAllBytes(targetFile);
         } catch (NoSuchFileException e) {
@@ -159,6 +179,14 @@ public class FileService {
             }
         }
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static void deleteQuietly(Path p) {
+        try {
+            Files.deleteIfExists(p);
+        } catch (IOException e) {
+            log.warn("清理文件失败：{}", p, e);
+        }
     }
 
     /**

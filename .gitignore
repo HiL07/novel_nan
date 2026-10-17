@@ -26,5 +26,10 @@ python-service/.python-env
 # 小说生成工作区（生成的正文、章节摘要），绝不入库
 python-service/novels/
 
-# 爬虫抓取结果
-python-service/crawler/output/
+# 本地打包的 Docker 配置（内含 docker/.env 明文密钥），绝不入库
+docker.zip
+
+# 共享数据目录：SQLite 数据库、上传文件、提取结果、生成的小说等用户数据，绝不入库（只保留说明文件）
+data/*
+!data/.gitkeep
+!data/README.md

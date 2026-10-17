@@ -10,7 +10,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * AI 模型配置（OpenAI 兼容接口），对应 test10000.ai_model_config 表。
+ * AI 模型配置（OpenAI 兼容接口），对应 SQLite ai_model_config 表。
  * 只有验证通过（VERIFIED）的配置才能启用；同一时间只有一个启用（active）的配置用于小说提取。
  */
 @Data

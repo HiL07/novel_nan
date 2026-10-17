@@ -23,3 +23,10 @@ SAFETY_RATIO = float(os.getenv("LOCAL_SAFETY_RATIO", "0.9"))
 
 # 训练样本下限（字符数），太少学不到风格
 MIN_SAMPLE_CHARS = int(os.getenv("LOCAL_MIN_SAMPLE_CHARS", "500"))
+
+# 模型下载源：auto（依次尝试 DOWNLOAD_AUTO_ORDER）/ modelscope / hf-mirror / huggingface；请求里的 source 优先
+DOWNLOAD_SOURCE = os.getenv("MODEL_DOWNLOAD_SOURCE", "auto")
+DOWNLOAD_AUTO_ORDER = [s.strip() for s in os.getenv("MODEL_DOWNLOAD_AUTO_ORDER", "modelscope,hf-mirror,huggingface").split(",") if s.strip()]
+HF_MIRROR_ENDPOINT = os.getenv("HF_MIRROR_ENDPOINT", "https://hf-mirror.com").rstrip("/")
+HF_OFFICIAL_ENDPOINT = (os.getenv("HF_ENDPOINT") or "https://huggingface.co").rstrip("/")  # 沿用 huggingface_hub 的标准变量
+MODELSCOPE_ENDPOINT = os.getenv("MODELSCOPE_ENDPOINT", "https://modelscope.cn").rstrip("/")

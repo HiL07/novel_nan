@@ -1,11 +1,11 @@
--- 文件信息表（spring.sql.init 启动时执行，已存在则跳过）
-CREATE TABLE IF NOT EXISTS `file` (
-    `id`           BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
-    `file_name`    VARCHAR(255) NOT NULL COMMENT '原始文件名',
-    `storage_path` VARCHAR(512) NOT NULL COMMENT '存储路径（相对存储根目录）',
-    `file_size`    BIGINT       NOT NULL DEFAULT 0 COMMENT '文件大小（字节）',
-    `content_type` VARCHAR(128) NULL COMMENT 'MIME 类型',
-    `file_ext`     VARCHAR(32)  NULL COMMENT '扩展名（不含点）',
-    `create_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '上传时间',
-    PRIMARY KEY (`id`)
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '文件信息表';
+-- 文件元数据（SQLite；spring.sql.init 启动时执行，已存在则跳过）。文件本体在 data/upload/，storage_path 为相对路径
+CREATE TABLE IF NOT EXISTS file (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_name    TEXT    NOT NULL,                 -- 原始文件名
+    storage_path TEXT    NOT NULL,                 -- 相对上传根目录的路径 yyyy/MM/dd/<uuid>.<ext>
+    file_size    INTEGER NOT NULL DEFAULT 0,       -- 字节
+    content_type TEXT,                             -- MIME 类型
+    file_ext     TEXT,                             -- 扩展名（不含点）
+    create_time  TEXT    NOT NULL                  -- yyyy-MM-dd HH:mm:ss
+);
+CREATE INDEX IF NOT EXISTS idx_file_create_time ON file (create_time);

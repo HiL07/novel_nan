@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 创作素材（只保存用户确认过的），对应 test10000.material 表。
+ * 创作素材（只保存用户确认过的），对应 SQLite material 表。
  * attributes 的键与前端设定模板的字段名一致（如 外形 / 能力 / 弱点），便于应用到写作设定。
  */
 @Data

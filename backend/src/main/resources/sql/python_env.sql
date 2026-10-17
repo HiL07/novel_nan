@@ -1,17 +1,17 @@
--- Python 环境配置（spring.sql.init 启动时执行，已存在则跳过）。只保存检测通过的配置，active=1 为当前使用
+-- Python 环境配置（SQLite）。只保存检测通过的配置，active=1 为当前使用；check_result 为有上限的检测结果 JSON（约 4 KB）
 CREATE TABLE IF NOT EXISTS python_env (
-    id             BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    env_type       VARCHAR(16)   NOT NULL COMMENT 'SYSTEM/CONDA/VENV/CUSTOM',
-    python_path    VARCHAR(1000) NOT NULL COMMENT 'python.exe 绝对路径',
-    conda_root     VARCHAR(1000) NULL     COMMENT 'Conda 安装目录（CONDA 类型）',
-    conda_env      VARCHAR(200)  NULL     COMMENT 'Conda 环境名（CONDA 类型）',
-    python_version VARCHAR(32)   NULL,
-    cuda_available TINYINT(1)    NOT NULL DEFAULT 0,
-    gpu_name       VARCHAR(200)  NULL,
-    torch_version  VARCHAR(64)   NULL,
-    status         VARCHAR(16)   NOT NULL COMMENT '检测结论 OK/WARN',
-    check_result   LONGTEXT      NULL     COMMENT '完整检测结果 JSON',
-    active         TINYINT(1)    NOT NULL DEFAULT 0,
-    checked_time   DATETIME      NOT NULL,
-    create_time    DATETIME      NOT NULL
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = 'Python 环境配置';
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    env_type       TEXT    NOT NULL,               -- SYSTEM/CONDA/VENV/CUSTOM
+    python_path    TEXT    NOT NULL,               -- python.exe 绝对路径
+    conda_root     TEXT,
+    conda_env      TEXT,
+    python_version TEXT,
+    cuda_available INTEGER NOT NULL DEFAULT 0,
+    gpu_name       TEXT,
+    torch_version  TEXT,
+    status         TEXT    NOT NULL,               -- OK/WARN
+    check_result   TEXT,
+    active         INTEGER NOT NULL DEFAULT 0,
+    checked_time   TEXT    NOT NULL,
+    create_time    TEXT    NOT NULL
+);

@@ -9,7 +9,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 检测通过的 Python 环境配置，对应 test10000.python_env 表；active 为当前使用的那一个。
+ * 检测通过的 Python 环境配置，对应 SQLite python_env 表；active 为当前使用的那一个。
  */
 @Data
 @TableName("python_env")

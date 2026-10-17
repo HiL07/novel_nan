@@ -32,7 +32,8 @@ def status() -> dict:
         "model": {k: m[k] for k in ("id", "name", "path", "numParams")} if m else None,
         "downloadDir": str(settings.BASE_DIR),
         "links": {"huggingface": f"https://huggingface.co/{DEFAULT_REPO}",
-                  "mirror": f"https://hf-mirror.com/{DEFAULT_REPO}"},
+                  "mirror": f"{settings.HF_MIRROR_ENDPOINT}/{DEFAULT_REPO}",
+                  "modelscope": f"{settings.MODELSCOPE_ENDPOINT}/models/{DEFAULT_REPO}"},
     }
 
 

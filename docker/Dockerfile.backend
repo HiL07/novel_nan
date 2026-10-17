@@ -29,11 +29,14 @@ RUN mvn -B -q clean package -DskipTests
 FROM eclipse-temurin:17-jre-jammy AS runtime
 WORKDIR /app
 
-# Persistent upload directory; a Docker volume is mounted here by compose.
-# 上传文件持久化目录，compose 会把数据卷挂载到这里。
-RUN mkdir -p /data/upload \
-    && groupadd --system app && useradd --system --gid app --uid 10001 app \
-    && chown -R app:app /data/upload
+# Shared data dir (SQLite db, upload/, extract-results/); compose mounts the
+# shared volume here. UID/GID 10001 is the same in the python image so both can write.
+# 共享数据目录（SQLite、上传文件、提取结果），compose 会把共享数据卷挂载到这里；
+# python 镜像使用相同的 UID/GID 10001，双方都能写入各自负责的子目录。
+ENV DATA_DIR=/data
+RUN mkdir -p /data/upload /data/extract-results \
+    && groupadd --system --gid 10001 app && useradd --system --gid app --uid 10001 app \
+    && chown -R app:app /data
 
 # The fat jar (file-manager-*.jar) produced by Spring Boot Maven plugin.
 # Spring Boot Maven 插件生成的 fat jar。

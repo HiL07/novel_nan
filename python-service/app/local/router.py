@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import text_loader
-from . import hardware, inference, jobfiles, jobs, registry, settings
+from . import download, hardware, inference, jobfiles, jobs, registry, settings
 
 log = logging.getLogger("local.api")
 router = APIRouter(prefix="/api/local", tags=["local-models"])
@@ -70,13 +70,26 @@ def register_model(req: RegisterReq):
 class DownloadReq(BaseModel):
     repoId: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
     name: str = ""
-    useMirror: bool = True
+    # auto / modelscope / hf-mirror / huggingface；不传则用服务配置 MODEL_DOWNLOAD_SOURCE（默认 auto）
+    source: Literal["auto", "modelscope", "hf-mirror", "huggingface"] | None = None
+    useMirror: bool | None = None  # 旧参数：仅在未传 source 时生效（True → hf-mirror，False → huggingface）
+
+
+@router.get("/models/download/sources")
+def download_sources():
+    return ok({"default": settings.DOWNLOAD_SOURCE, "autoOrder": download.resolve_order("auto"),
+               "endpoints": {"modelscope": settings.MODELSCOPE_ENDPOINT, "hf-mirror": settings.HF_MIRROR_ENDPOINT,
+                             "huggingface": settings.HF_OFFICIAL_ENDPOINT}})
 
 
 @router.post("/models/download")
 def download_model(req: DownloadReq):
     name = req.name.strip() or req.repoId.split("/")[-1]
-    cfg = {"repoId": req.repoId, "name": name, "modelId": registry.new_id(name), "useMirror": req.useMirror}
+    source = req.source or ({True: "hf-mirror", False: "huggingface"}[req.useMirror] if req.useMirror is not None
+                            else settings.DOWNLOAD_SOURCE)
+    if source not in download.SOURCES:
+        raise LocalError(500, f"服务配置 MODEL_DOWNLOAD_SOURCE 无效：{source}（可选 {', '.join(download.SOURCES)}）")
+    cfg = {"repoId": req.repoId, "name": name, "modelId": registry.new_id(name), "source": source}
     return ok(_guard(jobs.create, "download", cfg))
 
 

@@ -9,7 +9,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 文件实体，对应 test10000.file 表。
+ * 文件实体，对应 SQLite file 表。
  */
 @Data
 @TableName("file")

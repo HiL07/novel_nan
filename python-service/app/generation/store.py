@@ -1,10 +1,12 @@
-"""工作区存储：python-service/novels/<id>/（JSON 文件，可用环境变量 NOVELS_DIR 覆盖）。
+"""工作区存储：共享数据目录下的 data/novels/<id>/（JSON 文件；默认 ${DATA_DIR}/novels，可用 NOVELS_DIR 单独覆盖）。
+
+写入者：本模块（Python）；Java 按 data/README.md 的约定只读。所有写入均为「临时文件 → 原子替换」。
 
 novels/<id>/
 ├── novel.json          工作区：标题、模型、上下文窗口、设定（编辑器配置 + 规范化设定）、生成参数、前情概要、token 统计
 └── chapters/0001.json  章节：目标、正文、摘要、状态、每次模型调用的 token 明细
 
-日后迁移 MySQL 只需替换本模块的函数实现，接口保持不变。
+以后若改为数据库存储，只需替换本模块的函数实现，接口保持不变。
 """
 import json
 import os
@@ -14,9 +16,9 @@ import time
 import uuid
 from pathlib import Path
 
-from ..local.settings import SERVICE_ROOT
+from ..config import DATA_DIR
 
-NOVELS_DIR = Path(os.getenv("NOVELS_DIR", SERVICE_ROOT / "novels")).resolve()
+NOVELS_DIR = Path(os.getenv("NOVELS_DIR") or DATA_DIR / "novels").resolve()
 NOVELS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_PARAMS = {"segmentTokens": 768, "temperature": 0.7, "topP": 0.8, "topK": 20, "repetitionPenalty": 1.1,

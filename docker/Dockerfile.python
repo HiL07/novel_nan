@@ -34,12 +34,12 @@ ENV PYTHONUNBUFFERED=1 \
     # 使用复制而非软链接（跨 Docker 层更安全）。
     UV_LINK_MODE=copy \
     UV_NO_CACHE=1 \
-    # Where base models / LoRA adapters / jobs are persisted.
-    # 基础模型 / LoRA 适配器 / 任务的持久化目录。
-    LOCAL_MODELS_DIR=/data/models \
-    # Where novel workspaces are persisted (overridable by NOVELS_DIR).
-    # 小说工作区的持久化目录（可用 NOVELS_DIR 覆盖）。
-    NOVELS_DIR=/data/novels
+    # Shared data dir (this service writes novels/ only; see data/README.md).
+    # 共享数据目录（本服务只写 novels/，见 data/README.md）。
+    DATA_DIR=/data \
+    # Where base models / LoRA adapters / jobs are persisted (unchanged).
+    # 基础模型 / LoRA 适配器 / 任务的持久化目录（不变）。
+    LOCAL_MODELS_DIR=/data/models
 
 # Install the lightweight service dependencies first (better caching).
 # 先安装轻量服务依赖（利用构建缓存）。
@@ -53,8 +53,10 @@ COPY python-service/app ./app
 # Persistent data directories owned by the non-root user (app creates
 # sub-directories on import, so the parent must be writable).
 # 持久化数据目录，归属非 root 用户（应用会在导入时创建子目录，父目录必须可写）。
+# UID/GID 10001 matches the backend image: both write the shared /data volume.
+# UID/GID 10001 与后端镜像一致：双方共享 /data 数据卷。
 RUN mkdir -p /data/models /data/novels \
-    && groupadd --system pyapp && useradd --system --gid pyapp --uid 10002 pyapp \
+    && groupadd --system --gid 10001 pyapp && useradd --system --gid pyapp --uid 10001 pyapp \
     && chown -R pyapp:pyapp /data
 USER pyapp
 

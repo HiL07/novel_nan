@@ -22,6 +22,7 @@ import org.springframework.web.client.RestClientResponseException;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,6 +47,7 @@ public class NovelExtractService {
     private final AiServiceClient aiClient;
     private final AiModelConfigService modelService;
     private final MaterialService materialService;
+    private final ExtractResultStore resultStore;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "novel-extract");
         t.setDaemon(true);
@@ -57,13 +59,15 @@ public class NovelExtractService {
                                ObjectMapper objectMapper,
                                AiServiceClient aiClient,
                                AiModelConfigService modelService,
-                               MaterialService materialService) {
+                               MaterialService materialService,
+                               ExtractResultStore resultStore) {
         this.extractMapper = extractMapper;
         this.fileService = fileService;
         this.objectMapper = objectMapper;
         this.aiClient = aiClient;
         this.modelService = modelService;
         this.materialService = materialService;
+        this.resultStore = resultStore;
     }
 
     /**
@@ -122,17 +126,26 @@ public class NovelExtractService {
         return extractMapper.selectList(new LambdaQueryWrapper<NovelExtract>()
                 .select(NovelExtract::getId, NovelExtract::getFileId, NovelExtract::getFileName,
                         NovelExtract::getStatus, NovelExtract::getProgress, NovelExtract::getMessage,
+                        NovelExtract::getWordCount, NovelExtract::getChapterCount, NovelExtract::getCandidateCount,
                         NovelExtract::getCreateTime, NovelExtract::getUpdateTime)
                 .orderByDesc(NovelExtract::getCreateTime));
     }
 
     /**
-     * 任务详情（含结果 JSON），不存在抛 404。
+     * 任务详情，不存在抛 404。result 从 data/ 下的结果文件读出（保持原接口结构）；
+     * 文件缺失 / 校验失败时 result 为 null，并在 message 中说明，任务状态不变。
      */
     public NovelExtract getById(Long id) {
         NovelExtract task = extractMapper.selectById(id);
         if (task == null) {
             throw new BizException(404, "提取任务不存在：" + id);
+        }
+        if (task.getResultPath() != null) {
+            ExtractResultStore.Loaded loaded = resultStore.read(task.getResultPath(), task.getResultSha256());
+            task.setResult(loaded.json());
+            if (loaded.problem() != null) {
+                task.setMessage(Objects.requireNonNullElse(task.getMessage(), "") + "（" + loaded.problem() + "）");
+            }
         }
         return task;
     }
@@ -141,18 +154,18 @@ public class NovelExtractService {
         try {
             JsonNode job = aiClient.submitExtract(file.getId(), ext, model, materials);
             String jobId = job.path("jobId").asText();
-            update(taskId, NovelExtract.RUNNING, 0, "已提交 AI 服务", jobId, null);
+            update(taskId, NovelExtract.RUNNING, 0, "已提交 AI 服务", jobId);
             poll(taskId, jobId, file);
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，taskId={}", taskId, e);
-            update(taskId, NovelExtract.FAILED, null, "AI 服务不可达，请确认 python-service 已启动", null, null);
+            update(taskId, NovelExtract.FAILED, null, "AI 服务不可达，请确认 python-service 已启动", null);
         } catch (RestClientResponseException e) {
             // 不记录响应体：校验错误的回显里可能带有 API Key
             log.error("AI 服务拒绝提取任务，taskId={}，HTTP {}", taskId, e.getStatusCode().value());
-            update(taskId, NovelExtract.FAILED, null, "AI 服务拒绝任务（HTTP " + e.getStatusCode().value() + "）", null, null);
+            update(taskId, NovelExtract.FAILED, null, "AI 服务拒绝任务（HTTP " + e.getStatusCode().value() + "）", null);
         } catch (Exception e) {
             log.error("小说提取失败，taskId={}", taskId, e);
-            update(taskId, NovelExtract.FAILED, null, "提取失败：" + e.getMessage(), null, null);
+            update(taskId, NovelExtract.FAILED, null, "提取失败：" + e.getMessage(), null);
         }
     }
 
@@ -165,7 +178,7 @@ public class NovelExtractService {
                 job = aiClient.getExtractJob(jobId);
                 unreachable = 0;
             } catch (HttpClientErrorException.NotFound e) {
-                update(taskId, NovelExtract.FAILED, null, "AI 服务已重启，任务丢失，请重新提取", null, null);
+                update(taskId, NovelExtract.FAILED, null, "AI 服务已重启，任务丢失，请重新提取", null);
                 return;
             } catch (ResourceAccessException e) {
                 if (++unreachable >= MAX_UNREACHABLE) {
@@ -178,35 +191,66 @@ public class NovelExtractService {
             int progress = job.path("progress").asInt();
             switch (status) {
                 case "succeeded" -> {
-                    String result = objectMapper.writeValueAsString(job.path("result"));
-                    // 素材只生成「待确认候选」，由用户在提取结果 / 素材库页确认后才入库
-                    int candidates = 0;
-                    try {
-                        candidates = materialService.createCandidates(taskId, file.getId(), file.getFileName(), job.path("result"));
-                    } catch (Exception e) {
-                        log.error("保存素材候选失败，taskId={}", taskId, e);
-                    }
-                    update(taskId, NovelExtract.SUCCEEDED, 100,
-                            candidates > 0 ? "提取完成，发现 " + candidates + " 条素材候选待确认" : "提取完成", null, result);
+                    finishSucceeded(taskId, file, job.path("result"));
                     return;
                 }
                 case "failed" -> {
-                    update(taskId, NovelExtract.FAILED, progress, "提取失败：" + job.path("error").asText(), null, null);
+                    update(taskId, NovelExtract.FAILED, progress, "提取失败：" + job.path("error").asText(), null);
                     return;
                 }
-                default -> update(taskId, NovelExtract.RUNNING, progress, job.path("message").asText(), null, null);
+                default -> update(taskId, NovelExtract.RUNNING, progress, job.path("message").asText(), null);
             }
         }
     }
 
-    private void update(Long taskId, String status, Integer progress, String message, String jobId, String result) {
+    /**
+     * 成功收尾：① 结果写入 data/extract-results/（失败则任务记为 FAILED，不留路径）→ ② 生成素材候选
+     * → ③ 写入结果元数据并置为 SUCCEEDED（失败则删除刚写的文件，避免孤儿文件）。
+     */
+    private void finishSucceeded(Long taskId, FileInfo file, JsonNode result) throws Exception {
+        ExtractResultStore.Stored stored;
+        try {
+            stored = resultStore.write(taskId, objectMapper.writeValueAsString(result));
+        } catch (Exception e) {
+            log.error("保存提取结果文件失败，taskId={}", taskId, e);
+            update(taskId, NovelExtract.FAILED, 100, "提取完成但结果保存失败：" + e.getMessage()
+                    + "（请检查 data/extract-results 目录的磁盘空间与写权限后重新提取）", null);
+            return;
+        }
+        // 素材只生成「待确认候选」，由用户在提取结果 / 素材库页确认后才入库
+        int candidates = 0;
+        try {
+            candidates = materialService.createCandidates(taskId, file.getId(), file.getFileName(), result);
+        } catch (Exception e) {
+            log.error("保存素材候选失败，taskId={}", taskId, e);
+        }
+        NovelExtract patch = new NovelExtract();
+        patch.setId(taskId);
+        patch.setStatus(NovelExtract.SUCCEEDED);
+        patch.setProgress(100);
+        patch.setMessage(candidates > 0 ? "提取完成，发现 " + candidates + " 条素材候选待确认" : "提取完成");
+        patch.setResultPath(stored.relativePath());
+        patch.setResultSize(stored.size());
+        patch.setResultSha256(stored.sha256());
+        patch.setWordCount(result.path("wordCount").isNumber() ? result.path("wordCount").asInt() : null);
+        patch.setChapterCount(result.path("chapterCount").isNumber() ? result.path("chapterCount").asInt() : null);
+        patch.setCandidateCount(result.path("materials").isArray() ? result.path("materials").size() : null);
+        patch.setUpdateTime(LocalDateTime.now());
+        try {
+            extractMapper.updateById(patch);
+        } catch (RuntimeException e) {
+            resultStore.deleteQuietly(stored.relativePath());
+            throw e;
+        }
+    }
+
+    private void update(Long taskId, String status, Integer progress, String message, String jobId) {
         NovelExtract patch = new NovelExtract();
         patch.setId(taskId);
         patch.setStatus(status);
         patch.setProgress(progress);
         patch.setMessage(message != null && message.length() > 1000 ? message.substring(0, 1000) : message);
         patch.setJobId(jobId);
-        patch.setResult(result);
         patch.setUpdateTime(LocalDateTime.now());
         extractMapper.updateById(patch);
     }

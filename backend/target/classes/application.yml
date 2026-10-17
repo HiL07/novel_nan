@@ -5,11 +5,14 @@ spring:
   # 本机私密配置（如默认模型 API Key），不入库；从 backend/ 或项目根目录启动都能找到
   config:
     import: optional:file:./application-secret.yml,optional:file:./backend/application-secret.yml
+  # SQLite：只存元数据；库文件在共享数据目录 ${app.data-dir}/nan_novel.db（app.data-dir 见文末）
+  # WAL：读写可并发；busy_timeout：写锁等待 10 秒而不是立即报错
   datasource:
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/test10000?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
-    username: root
-    password: daijiahao123
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:${app.data-dir}/nan_novel.db?journal_mode=WAL&busy_timeout=10000&synchronous=NORMAL
+    hikari:
+      maximum-pool-size: 4
+      connection-timeout: 30000
   sql:
     init:
       mode: always                              # 每次启动执行建表脚本（CREATE TABLE IF NOT EXISTS）
@@ -20,17 +23,20 @@ spring:
       max-file-size: 50MB        # 单文件大小上限
       max-request-size: 50MB     # 请求总大小上限
 
-# 文件存储根目录（由 Spring Boot 管理，上传时自动创建缺失子目录）
+# 上传文件根目录（由 Spring Boot 管理，上传时自动创建缺失子目录），位于共享数据目录下
 file:
   storage:
-    path: ./upload/
+    path: ${app.data-dir}/upload
 
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true   # 下划线列名 → 驼峰字段
 
+# 共享数据目录（SQLite、上传文件、提取结果；Python 的生成小说也在此）。
+# 留空则自动识别为 <项目根>/data（从 backend/ 或项目根启动都可）；可用环境变量 DATA_DIR 覆盖，Docker 中为 /data
 # CORS 白名单：日常前端 5173，测试前端 5174
 app:
+  data-dir: ${DATA_DIR:}
   cors:
     allowed-origins: http://localhost:5173,http://localhost:5174
 

@@ -23,7 +23,8 @@
         <div>
           可一键下载到项目目录（<code>{{ status.defaultModel.downloadDir }}</code>，约 3.1 GB，完成后自动登记），
           或手动下载：<a :href="status.defaultModel.links.huggingface" target="_blank" rel="noopener">Hugging Face</a>
-          ／ <a :href="status.defaultModel.links.mirror" target="_blank" rel="noopener">hf-mirror 国内镜像</a>，
+          ／ <a :href="status.defaultModel.links.mirror" target="_blank" rel="noopener">hf-mirror 国内镜像</a>
+          ／ <a :href="status.defaultModel.links.modelscope" target="_blank" rel="noopener">ModelScope 魔搭</a>，
           再到「本地模型」页登记目录。
         </div>
         <el-button class="dl-btn" type="primary" size="small" :loading="downloading" @click="downloadDefault">下载到项目</el-button>
@@ -133,7 +134,7 @@ async function load() {
 async function downloadDefault() {
   downloading.value = true
   try {
-    await call(downloadModel(status.value.defaultModel.repoId, 'Qwen2.5-1.5B-Instruct', true), '启动下载失败')
+    await call(downloadModel(status.value.defaultModel.repoId, 'Qwen2.5-1.5B-Instruct', 'auto'), '启动下载失败')
     ElMessage.success('已开始下载，可在「本地模型 → 风格微调 → 任务记录」查看进度，完成后刷新本页')
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 6000 })

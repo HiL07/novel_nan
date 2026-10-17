@@ -9,7 +9,9 @@ C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\c
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\MaterialTagMapper.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\PythonEnvController.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\FileController.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\config\DataDirEnvironmentPostProcessor.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\FileInfo.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\config\LocalDateTimeTextTypeHandler.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\FileApplication.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\AiModelConfigService.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\AiModelConfigMapper.java
@@ -23,9 +25,11 @@ C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\s
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\Material.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\config\MybatisPlusConfig.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\NovelExtractService.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\common\DataPaths.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\controller\NovelExtractController.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\NovelExtract.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\MaterialCandidate.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\entity\AiModelConfig.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\NovelExtractMapper.java
 C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\mapper\FileMapper.java
+C:\Users\daijiahao123\Desktop\nan_novel\backend\src\main\java\com\example\file\service\ExtractResultStore.java
