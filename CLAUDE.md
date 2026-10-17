@@ -18,10 +18,10 @@ The system consists of three components:
 Browser (Vue3/Vite, :5173)
         │  HTTP
         ▼
-Spring Boot (:8080) ─────► MySQL (test10000) + local disk (./upload/)
+Spring Boot (:8022) ─────► MySQL (test10000) + local disk (./upload/)
         │  HTTP  ▲ GET /api/file/preview/{id}
         ▼        │
-Python FastAPI (:8000) ─────► local Qwen llama.cpp (:8001, extraction)
+Python FastAPI (:8021) ─────► OpenAI-compatible LLM (default DeepSeek; configurable, e.g. local llama.cpp)
                         └───► remote LLM / Hugging Face training (QLoRA, planned)
 ```
 
@@ -48,7 +48,7 @@ nan_novel/
 │       ├── router/     # Lazy-loaded routes
 │       ├── views/file/ # upload.vue, manage.vue
 │       └── views/novel/ # extract.vue (extraction tasks & results)
-├── python-service/     # FastAPI AI service (app/main.py, extractor, qwen_client)
+├── python-service/     # FastAPI AI service (app/main.py, extractor, llm_client)
 ├── start.bat           # Windows one-click launcher for backend + AI service + frontend
 └── CLAUDE.md
 ```
@@ -66,7 +66,8 @@ nan_novel/
 ### Commands
 
 ```bash
-mvn spring-boot:run     # run on http://localhost:8080 (requires JDK 17)
+mvn spring-boot:run     # run on http://localhost:8022 (requires JDK 17)
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8012 --ai.service.url=http://localhost:8011"   # test instance
 mvn clean package       # build jar (Lombok excluded from the fat jar)
 ```
 
@@ -103,8 +104,23 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 | `GET  /api/novel/extract/{id}` | Task detail; `result` is the extraction JSON string (chapters, characters, style) |
 
 - Table `novel_extract` (DDL `sql/novel_extract.sql`, auto-created via `spring.sql.init`): `id`, `file_id`, `file_name`, `status` (QUEUED/RUNNING/SUCCEEDED/FAILED), `progress`, `message`, `job_id`, `result` (LONGTEXT JSON), `create_time`, `update_time`.
-- `NovelExtractService` runs tasks on a single background thread (local Qwen has 1 slot): submits to Python `POST /api/extract/jobs`, polls `GET /api/extract/jobs/{jobId}` every 3s, and persists progress/result. Tasks left QUEUED/RUNNING at restart are marked FAILED.
-- Python URL: `ai.service.url` in `application.yml` (default `http://localhost:8000`).
+- `NovelExtractService` runs tasks on a single background thread using the **active, verified** model config (snapshot taken at submit; none → 400): submits to Python `POST /api/extract/jobs`, polls `GET /api/extract/jobs/{jobId}` every 3s, and persists progress/result. Tasks left QUEUED/RUNNING at restart are marked FAILED.
+- Python URL: `ai.service.url` in `application.yml` (default `http://localhost:8021`).
+
+### AI model config API (`AiModelConfigController`)
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/ai/model/list` | Configs, active first. `apiKey` is write-only; responses carry only `apiKeyMasked` |
+| `POST /api/ai/model/save` | Create (no `id`) or update; blank `apiKey` keeps the stored key. Changing `baseUrl`/`model`/`apiKey` → `UNVERIFIED` + inactive |
+| `POST /api/ai/model/{id}/verify` | Python sends one tiny real request; `VERIFIED` (auto-activates if nothing is active) or `FAILED` (+ deactivated); 503 if Python is down |
+| `POST /api/ai/model/{id}/activate` | Only `VERIFIED` configs; deactivates all others |
+| `POST /api/ai/model/{id}/delete` | Delete |
+
+- Table `ai_model_config` (DDL `sql/ai_model_config.sql`): `id`, `name`, `base_url`, `model`, `api_key`, `concurrency` (1–8), `status` (UNVERIFIED/VERIFIED/FAILED), `verify_message`, `verified_time`, `active`, `create_time`, `update_time`.
+- Default model (`ai.default.*` in `application.yml`: DeepSeek, `https://api.deepseek.com`, `deepseek-chat`) is seeded on first start when the table is empty, then auto-verified in the background. Its key comes from `ai.default.api-key` in **`backend/application-secret.yml` (git-ignored, imported via `spring.config.import`)** or env `DEEPSEEK_API_KEY`. Never put API keys in tracked files or logs; don't log AI-service error bodies (422 echoes can contain the key).
+- CORS is GET/POST only, so update/delete endpoints use POST.
+- JSON endpoints use `common/ResultResponses.handle(...)` to map `BizException` → HTTP status + `Result.error`.
 - JDK 17 on Chinese Windows defaults to GBK: always pass an explicit charset when converting bytes ↔ String (and `spring.sql.init.encoding: UTF-8`).
 
 ### File storage rules
@@ -118,7 +134,7 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 ### Configuration & CORS
 
 - Config lives in `backend/src/main/resources/application.yml`. **Do not hardcode or copy DB credentials into code or docs**; read them from the yml.
-- `WebConfig` allows CORS only from `http://localhost:5173` (GET/POST on `/api/**`). If the frontend adds methods (PUT/DELETE), update both sides.
+- `WebConfig` allows CORS only from `app.cors.allowed-origins` (default `http://localhost:5173,http://localhost:5174`; GET/POST on `/api/**`). If the frontend adds methods (PUT/DELETE), update both sides.
 
 ## 5. Frontend Conventions (`frontend/`)
 
@@ -126,7 +142,8 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
+npm run dev        # http://localhost:5173 → backend 8022 (.env.development)
+npm run dev:test   # http://localhost:5174 → test backend 8012 (.env.test)
 npm run build      # production build
 npm run preview
 ```
@@ -135,7 +152,7 @@ npm run preview
 
 - All SFCs use **`<script setup>`** (Composition API); UI text is Chinese, identifiers/comments may be Chinese or English.
 - `@` alias → `src/` (configured in `vite.config.js`).
-- Keep HTTP calls inside `src/api/*.js` using the shared Axios instance (`baseURL: http://localhost:8080`, 60s timeout). Views must not create their own Axios instances.
+- Keep HTTP calls inside `src/api/*.js` using the shared Axios instance (`src/api/request.js`, `baseURL` from `VITE_API_BASE_URL`, fallback `http://localhost:8022`, 60s timeout). Views must not create their own Axios instances.
 - API helpers unwrap `res.data`; callers treat `response.code === 0` as success.
 - Routes are lazy-loaded (`() => import(...)`) with `meta.title` / `meta.icon` consumed by the sidebar; register new pages in `src/router/index.js`.
 - Element Plus and all its icons are registered globally in `main.js`.
@@ -155,22 +172,26 @@ Responsibilities:
 cd python-service
 py -3.10 -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # keep requirements.txt ASCII (old pip reads it as GBK)
-.venv/Scripts/python -m uvicorn app.main:app --port 8000
+.venv/Scripts/python -m uvicorn app.main:app --port 8021
+# test instance (talks to test Java backend 8012):
+JAVA_BACKEND_URL=http://localhost:8012 .venv/Scripts/python -m uvicorn app.main:app --port 8011
 ```
 
-Extraction needs the local Qwen llama.cpp server on `http://127.0.0.1:8001` (start command in the `qwen` skill). Env vars (`app/config.py`): `JAVA_BACKEND_URL`, `QWEN_URL`, `QWEN_MODEL`, `CHUNK_CHARS` (default 6000), `QWEN_MAX_TOKENS`, `QWEN_TIMEOUT`. No torch/CUDA needed for extraction.
+The model (base URL, key, model name, concurrency) is **not** configured here — Java sends the active config with each request and Python never stores the key. Env vars (`app/config.py`): `JAVA_BACKEND_URL`, `CHUNK_CHARS` (default 6000), `LLM_MAX_TOKENS`, `LLM_TIMEOUT`. No torch/CUDA needed for extraction.
 
 ### Novel extraction (implemented)
 
-- `POST /api/extract/jobs` `{fileId, fileExt}` → job; `GET /api/extract/jobs/{jobId}` → `queued/running/succeeded/failed`, `progress`, `message`, `error`, `result`; `GET /api/health` → Qwen reachability.
+- `POST /api/models/verify` `{baseUrl, apiKey, model}` → `{ok, latencyMs, message, reply}`.
+- `POST /api/extract/jobs` `{fileId, fileExt, model:{baseUrl, apiKey, model, concurrency}}` → job; `GET /api/extract/jobs/{jobId}` → `queued/running/succeeded/failed`, `progress`, `message`, `error`, `result`; `GET /api/health`.
+- `app/llm_client.py`: OpenAI-compatible `POST {baseUrl}/chat/completions` with `Bearer` key. Friendly errors (401/403 key, 402 balance, 404 model/URL are *fatal* and abort the job; 429/5xx/timeouts retry ×2). Falls back without `response_format` if a provider rejects JSON mode. Local hosts skip the system proxy; remote hosts use it.
 - Jobs are in-memory and run one at a time; Java is responsible for persisting results.
 - Languages: Chinese (primary) and English novels. Analysis text is always output in Simplified Chinese; character/place names keep the original spelling.
 - All `httpx` calls to local services use `trust_env=False` — a system proxy (Clash etc.) otherwise turns `localhost` requests into 502.
-- Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → Qwen JSON per chunk (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
+- Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → LLM JSON per chunk, `concurrency` requests in parallel (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
 
 ### Conventions
 
-- FastAPI app served by Uvicorn on **port 8000**, all routes prefixed with `/api`, Pydantic v2 models for request/response.
+- FastAPI app served by Uvicorn on **port 8021** (test 8011), all routes prefixed with `/api`, Pydantic v2 models for request/response.
 - Do **not** re-implement file storage or a second file database. Consume files via the Java backend (by file id / relative storage path) or a shared volume, and return extracted/analyzed results over HTTP.
 - Fine-tuning is long-running: run training as **background/async jobs with a status endpoint** (queued/running/succeeded/failed + logs), never block a request worker.
 - Keep model weights, datasets, and LoRA adapters outside the Git working tree (configurable paths / env vars).
@@ -180,8 +201,16 @@ Extraction needs the local Qwen llama.cpp server on `http://127.0.0.1:8001` (sta
 
 - Prerequisites: **JDK 17** (the project does not compile on JDK 8), Maven, Node.js, and a running MySQL with schema `test10000`.
 - `start.bat` launches the services with one click. It contains **machine-specific hardcoded tool paths** (`JAVA17_HOME`, `MAVEN_BIN`, `NODE_DIR` under `D:\workplace\...`) — edit them to match the current machine; do not "fix" them for everyone.
-- `start.bat` also starts the AI service if `python-service/.venv` exists; the Qwen llama.cpp server is started separately.
-- Service URLs: backend http://localhost:8080, AI service http://localhost:8000, Qwen http://127.0.0.1:8001, frontend http://localhost:5173.
+- `start.bat` also starts the AI service if `python-service/.venv` exists. To use the local Qwen llama.cpp server instead of DeepSeek, start it (see the `qwen` skill) and add a config with base URL `http://127.0.0.1:8001/v1`, concurrency 1.
+- Ports:
+
+  | Service | Daily (user) | Testing (agents) |
+  |---------|--------------|------------------|
+  | Java backend | 8022 | 8012 |
+  | Python AI service | 8021 | 8011 |
+  | Vue frontend | 5173 | 5174 |
+
+  Agents must test only on the testing ports and never stop or occupy the user's daily ports.
 
 ## 8. Rules for Code-Generating Agents
 

@@ -12,3 +12,7 @@ __pycache__/
 *.pyc
 
 start.zip
+
+# 本机私密配置（API Key 等），绝不入库
+application-secret.yml
+.env

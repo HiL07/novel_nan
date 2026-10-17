@@ -5,6 +5,7 @@
         <div class="card-header">
           <span class="card-title">小说提取</span>
           <div>
+            <el-button @click="router.push('/ai/model')">模型配置</el-button>
             <el-button @click="router.push('/file/manage')">去选择文件</el-button>
             <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
           </div>
@@ -54,6 +55,7 @@
           <el-descriptions-item label="节奏">{{ result.style?.pace || '-' }}</el-descriptions-item>
           <el-descriptions-item label="基调">{{ (result.style?.tones || []).join('、') || '-' }}</el-descriptions-item>
           <el-descriptions-item label="解析失败分块">{{ result.failedChunks }}</el-descriptions-item>
+          <el-descriptions-item label="使用模型">{{ result.model || '-' }}</el-descriptions-item>
         </el-descriptions>
 
         <h4>人物（{{ result.characters?.length || 0 }}）</h4>

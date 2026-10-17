@@ -3,6 +3,7 @@ package com.example.file.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
+import com.example.file.entity.AiModelConfig;
 import com.example.file.entity.FileInfo;
 import com.example.file.entity.NovelExtract;
 import com.example.file.mapper.NovelExtractMapper;
@@ -13,23 +14,20 @@ import org.springframework.context.event.EventListener;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
-import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * 小说提取：建任务落库 → 后台提交给 Python AI 服务 → 轮询进度 → 结果写回数据库。
- * 本地千问只有 1 个并发槽，任务在单线程里串行执行。
+ * 使用「模型配置」中启用且已验证的模型；任务之间单线程串行，任务内由 Python 按配置的并发数调用模型。
  */
 @Service
 public class NovelExtractService {
@@ -44,7 +42,8 @@ public class NovelExtractService {
     private final NovelExtractMapper extractMapper;
     private final FileService fileService;
     private final ObjectMapper objectMapper;
-    private final RestClient aiClient;
+    private final AiServiceClient aiClient;
+    private final AiModelConfigService modelService;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "novel-extract");
         t.setDaemon(true);
@@ -54,14 +53,13 @@ public class NovelExtractService {
     public NovelExtractService(NovelExtractMapper extractMapper,
                                FileService fileService,
                                ObjectMapper objectMapper,
-                               @Value("${ai.service.url}") String aiServiceUrl) {
+                               AiServiceClient aiClient,
+                               AiModelConfigService modelService) {
         this.extractMapper = extractMapper;
         this.fileService = fileService;
         this.objectMapper = objectMapper;
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(5000);
-        factory.setReadTimeout(30000);
-        this.aiClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(factory).build();
+        this.aiClient = aiClient;
+        this.modelService = modelService;
     }
 
     /**
@@ -93,18 +91,20 @@ public class NovelExtractService {
         if (!SUPPORTED_EXTS.contains(ext)) {
             throw new BizException(400, "仅支持 txt / md / docx / pdf 文件提取");
         }
+        // 提交时锁定模型配置快照，执行期间修改配置不影响本任务
+        AiModelConfig model = modelService.requireActive();
 
         NovelExtract task = new NovelExtract();
         task.setFileId(fileId);
         task.setFileName(file.getFileName());
         task.setStatus(NovelExtract.QUEUED);
         task.setProgress(0);
-        task.setMessage("排队中");
+        task.setMessage("排队中（模型：" + model.getName() + "）");
         task.setCreateTime(LocalDateTime.now());
         task.setUpdateTime(task.getCreateTime());
         extractMapper.insert(task);
 
-        executor.submit(() -> run(task.getId(), fileId, ext));
+        executor.submit(() -> run(task.getId(), fileId, ext, model));
         return task;
     }
 
@@ -130,19 +130,19 @@ public class NovelExtractService {
         return task;
     }
 
-    private void run(Long taskId, Long fileId, String ext) {
+    private void run(Long taskId, Long fileId, String ext, AiModelConfig model) {
         try {
-            JsonNode job = aiClient.post()
-                    .uri("/api/extract/jobs")
-                    .body(Map.of("fileId", fileId, "fileExt", ext))
-                    .retrieve()
-                    .body(JsonNode.class);
+            JsonNode job = aiClient.submitExtract(fileId, ext, model);
             String jobId = job.path("jobId").asText();
             update(taskId, NovelExtract.RUNNING, 0, "已提交 AI 服务", jobId, null);
             poll(taskId, jobId);
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，taskId={}", taskId, e);
             update(taskId, NovelExtract.FAILED, null, "AI 服务不可达，请确认 python-service 已启动", null, null);
+        } catch (RestClientResponseException e) {
+            // 不记录响应体：校验错误的回显里可能带有 API Key
+            log.error("AI 服务拒绝提取任务，taskId={}，HTTP {}", taskId, e.getStatusCode().value());
+            update(taskId, NovelExtract.FAILED, null, "AI 服务拒绝任务（HTTP " + e.getStatusCode().value() + "）", null, null);
         } catch (Exception e) {
             log.error("小说提取失败，taskId={}", taskId, e);
             update(taskId, NovelExtract.FAILED, null, "提取失败：" + e.getMessage(), null, null);
@@ -155,7 +155,7 @@ public class NovelExtractService {
             Thread.sleep(POLL_INTERVAL_MS);
             JsonNode job;
             try {
-                job = aiClient.get().uri("/api/extract/jobs/{id}", jobId).retrieve().body(JsonNode.class);
+                job = aiClient.getExtractJob(jobId);
                 unreachable = 0;
             } catch (HttpClientErrorException.NotFound e) {
                 update(taskId, NovelExtract.FAILED, null, "AI 服务已重启，任务丢失，请重新提取", null, null);

@@ -19,6 +19,12 @@ const routes = [
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),
     meta: { title: '小说提取', icon: 'MagicStick' }
+  },
+  {
+    path: '/ai/model',
+    name: 'aiModel',
+    component: () => import('@/views/ai/model.vue'),
+    meta: { title: '模型配置', icon: 'Cpu' }
   }
 ]
 

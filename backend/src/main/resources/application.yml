@@ -1,7 +1,10 @@
 server:
-  port: 8080
+  port: 8022                       # 日常端口；测试用 --server.port=8012
 
 spring:
+  # 本机私密配置（如默认模型 API Key），不入库；从 backend/ 或项目根目录启动都能找到
+  config:
+    import: optional:file:./application-secret.yml,optional:file:./backend/application-secret.yml
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/test10000?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
@@ -10,7 +13,7 @@ spring:
   sql:
     init:
       mode: always                              # 每次启动执行建表脚本（CREATE TABLE IF NOT EXISTS）
-      schema-locations: classpath:sql/novel_extract.sql
+      schema-locations: classpath:sql/novel_extract.sql,classpath:sql/ai_model_config.sql
       encoding: UTF-8                           # Windows 下 JDK 17 默认 GBK，脚本按 UTF-8 读取
   servlet:
     multipart:
@@ -26,7 +29,19 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true   # 下划线列名 → 驼峰字段
 
+# CORS 白名单：日常前端 5173，测试前端 5174
+app:
+  cors:
+    allowed-origins: http://localhost:5173,http://localhost:5174
+
 # Python AI 服务（python-service，小说提取）
 ai:
   service:
-    url: http://localhost:8000
+    url: http://localhost:8021     # 日常端口；测试用 --ai.service.url=http://localhost:8011
+  # 默认模型（首次启动、模型配置表为空时自动写入并验证）。API Key 不写在这里：
+  # 放在 backend/application-secret.yml（已 gitignore）的 ai.default.api-key，或环境变量 DEEPSEEK_API_KEY
+  default:
+    name: DeepSeek（默认）
+    base-url: https://api.deepseek.com
+    model: deepseek-chat
+    api-key: ${DEEPSEEK_API_KEY:}

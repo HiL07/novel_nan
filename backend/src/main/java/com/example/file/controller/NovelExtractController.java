@@ -1,12 +1,11 @@
 package com.example.file.controller;
 
-import com.example.file.common.BizException;
 import com.example.file.common.Result;
+import com.example.file.common.ResultResponses;
 import com.example.file.entity.NovelExtract;
 import com.example.file.service.NovelExtractService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,7 +14,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
-import java.util.function.Supplier;
 
 /**
  * 小说提取接口：提交任务 / 任务列表 / 任务详情（含结果）。
@@ -33,11 +31,11 @@ public class NovelExtractController {
     }
 
     /**
-     * POST /api/novel/extract/{fileId}，对指定文件发起提取，立即返回任务（异步执行）。
+     * POST /api/novel/extract/{fileId}，用当前启用的模型对指定文件发起提取，立即返回任务（异步执行）。
      */
     @PostMapping("/{fileId}")
     public ResponseEntity<Result<NovelExtract>> submit(@PathVariable Long fileId) {
-        return handle(() -> extractService.submit(fileId), "提交提取任务失败，fileId=" + fileId);
+        return ResultResponses.handle(() -> extractService.submit(fileId), log, "提交提取任务失败，fileId=" + fileId);
     }
 
     /**
@@ -45,7 +43,7 @@ public class NovelExtractController {
      */
     @GetMapping("/list")
     public ResponseEntity<Result<List<NovelExtract>>> list() {
-        return handle(extractService::list, "查询提取任务失败");
+        return ResultResponses.handle(extractService::list, log, "查询提取任务失败");
     }
 
     /**
@@ -53,23 +51,6 @@ public class NovelExtractController {
      */
     @GetMapping("/{id}")
     public ResponseEntity<Result<NovelExtract>> detail(@PathVariable Long id) {
-        return handle(() -> extractService.getById(id), "查询提取任务失败，id=" + id);
-    }
-
-    /**
-     * BizException → 对应 HTTP 状态 + Result.error；其他异常 → 500，不暴露堆栈。
-     */
-    private <T> ResponseEntity<Result<T>> handle(Supplier<T> action, String errorLog) {
-        try {
-            return ResponseEntity.ok(Result.ok(action.get()));
-        } catch (BizException e) {
-            HttpStatus status = HttpStatus.resolve(e.getCode());
-            return ResponseEntity.status(status != null ? status : HttpStatus.BAD_REQUEST)
-                    .body(Result.error(e.getCode(), e.getMessage()));
-        } catch (Exception e) {
-            log.error(errorLog, e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Result.error(500, "服务器内部错误"));
-        }
+        return ResultResponses.handle(() -> extractService.getById(id), log, "查询提取任务失败，id=" + id);
     }
 }

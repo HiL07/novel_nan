@@ -52,17 +52,17 @@ set "JAVA_HOME=%JAVA17_HOME%"
 set "PATH=%JAVA17_HOME%\bin;%MAVEN_BIN%;%NODE_DIR%;%PATH%"
 
 rem ==================== 启动后端 ====================
-echo [1/3] 启动后端  mvn spring-boot:run   -^>  http://localhost:8080
+echo [1/3] 启动后端  mvn spring-boot:run   -^>  http://localhost:8022
 start "文件管理-后端" /D "%BACKEND_DIR%" cmd /k "mvn spring-boot:run"
 
 rem 等后端先起，避免同时抢占资源
 ping -n 4 127.0.0.1 >nul
 
 rem ==================== 启动 AI 服务 ====================
-rem 小说提取依赖本地千问 llama.cpp 服务（http://127.0.0.1:8001），需另行启动，见 qwen skill
+rem 小说提取调用「模型配置」中启用的模型（默认 DeepSeek，Key 在 backendpplication-secret.yml）
 if exist "%ROOT%python-service\.venv\Scripts\python.exe" (
-    echo [2/3] 启动 AI 服务  uvicorn app.main:app  -^>  http://localhost:8000
-    start "文件管理-AI服务" /D "%ROOT%python-service" cmd /k ".venv\Scripts\python -m uvicorn app.main:app --port 8000"
+    echo [2/3] 启动 AI 服务  uvicorn app.main:app  -^>  http://localhost:8021
+    start "文件管理-AI服务" /D "%ROOT%python-service" cmd /k ".venv\Scripts\python -m uvicorn app.main:app --port 8021"
 ) else (
     echo [2/3] 跳过 AI 服务：未找到 python-service\.venv，请先按 CLAUDE.md 创建虚拟环境
 )
@@ -74,7 +74,8 @@ start "文件管理-前端" /D "%FRONTEND_DIR%" cmd /k "npm run dev"
 echo.
 echo ==========================================
 echo  已在新窗口启动，关闭对应窗口即停止服务。
-echo  后端：http://localhost:8080
+echo  后端：http://localhost:8022
+echo  AI 服务：http://localhost:8021
 echo  前端：http://localhost:5173
 echo ==========================================
 echo.

@@ -224,7 +224,7 @@ async function copyPreview() {
 async function startExtract(item) {
   try {
     await ElMessageBox.confirm(
-      `将使用本地千问模型解析《${item.fileName}》的章节、人物和文风，耗时视篇幅可能需要数分钟。`,
+      `将使用「模型配置」中当前启用的模型解析《${item.fileName}》的章节、人物和文风，耗时视篇幅可能需要数分钟。`,
       '小说提取',
       { confirmButtonText: '开始提取', cancelButtonText: '取消' }
     )

@@ -11,7 +11,7 @@ export default defineConfig({
     }
   },
   server: {
-    // 与后端 CORS 白名单一致（见 backend/src/main/java/com/example/file/config/WebConfig.java）
+    // 日常 5173；测试 `npm run dev:test` 用 5174。须在后端 CORS 白名单内（application.yml 的 app.cors.allowed-origins）
     port: 5173
   }
 })
