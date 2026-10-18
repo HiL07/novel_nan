@@ -20,6 +20,7 @@ public class AiServiceClient {
 
     private final RestClient client;
     private final RestClient slowClient;
+    private final RestClient discoverClient;
 
     public AiServiceClient(@Value("${ai.service.url}") String aiServiceUrl) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -32,6 +33,11 @@ public class AiServiceClient {
         slowFactory.setConnectTimeout(5000);
         slowFactory.setReadTimeout(180000);
         this.slowClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(slowFactory).build();
+        // 整站发现要逐页访问分类列表 + 每本书的详情 / 目录（最多 120 本），单独放宽到 5 分钟
+        SimpleClientHttpRequestFactory discoverFactory = new SimpleClientHttpRequestFactory();
+        discoverFactory.setConnectTimeout(5000);
+        discoverFactory.setReadTimeout(300000);
+        this.discoverClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(discoverFactory).build();
     }
 
     /** POST /api/models/verify → {ok, latencyMs, message, reply} */
@@ -79,7 +85,7 @@ public class AiServiceClient {
 
     /** POST /api/crawl/discover：整站发现（首页 → 分类 → 列表翻页 → 书籍 → 目录），逐页抓取较慢 → {code, data} */
     public JsonNode crawlDiscover(Map<String, Object> options) {
-        return slowClient.post().uri("/api/crawl/discover").body(options).retrieve().body(JsonNode.class);
+        return discoverClient.post().uri("/api/crawl/discover").body(options).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/crawl/jobs → {code, data: CrawlJob（含 jobId）} */

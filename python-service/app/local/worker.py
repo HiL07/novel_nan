@@ -20,7 +20,10 @@ def main(job_id: str) -> int:
     if job is None:
         print(f"job {job_id} not found", file=sys.stderr)
         return 2
-    jobfiles.update_job(job_id, status="running", pid=os.getpid(), startedAt=jobfiles.now())
+    from .jobs import process_start_time
+
+    jobfiles.update_job(job_id, status="running", pid=os.getpid(), pidStart=process_start_time(os.getpid()),
+                        startedAt=job.get("startedAt") or jobfiles.now())
     try:
         runner = _runners().get((job["kind"], job.get("backend", "local")))
         if runner is None:

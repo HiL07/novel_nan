@@ -46,9 +46,10 @@ ENV PYTHONUNBUFFERED=1 \
 COPY python-service/requirements.txt /tmp/requirements.txt
 RUN uv pip install -r /tmp/requirements.txt
 
-# Application package (only the app/ tree is needed at runtime).
-# 应用代码（运行时只需要 app/ 目录）。
+# Application package + vendored rule engine (de-AI / 番茄审核, used by app/polish).
+# 应用代码 + 第三方规则引擎（去 AI 味 / 过番茄审核，app/polish 调用）。
 COPY python-service/app ./app
+COPY python-service/vendor ./vendor
 
 # Persistent data directories owned by the non-root user (app creates
 # sub-directories on import, so the parent must be writable).

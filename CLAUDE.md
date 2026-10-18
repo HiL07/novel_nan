@@ -59,9 +59,10 @@ nan_novel/
 │   ├── app/            # main.py, extractor, llm_client, text_loader (extraction)
 │   ├── app/local/      # local models: settings, hardware, registry, inference, training, download, jobs, worker, router
 │   ├── app/generation/ # novel generation: backends, spec, context, prompts, chapter, store, defaults, router
-│   ├── app/crawler/    # web novel crawler: rules (presets / XPath), fetcher, parser (heuristics), service (jobs), router
+│   ├── app/crawler/    # web novel crawler: rules (presets / XPath), fetcher, parser (heuristics), service (jobs + site discovery), router
 │   ├── models/         # git-ignored: base/<id>/model.json (+weights if downloaded), adapters/<id>/, jobs/<id>/
 │   ├── scripts/local_e2e.py  # end-to-end smoke test over HTTP
+│   ├── scripts/crawl_site_selftest.py  # crawler self-test against a local fake book site (no network)
 │   ├── requirements.txt       # extraction service (no torch)
 │   └── requirements-local.txt # local models (torch CUDA + transformers/peft/accelerate/bitsandbytes)
 ├── data/             # shared data dir (git-ignored except README.md/.gitkeep): nan_novel.db, upload/, extract-results/, novels/ — see data/README.md
@@ -174,18 +175,23 @@ Reusable creative material extracted from novels or added by hand. **Nothing ent
 
 ### Novel crawl API (`NovelCrawlController`, `/api/novel/crawl/**`)
 
-Fetches one web novel (table-of-contents URL) and stores it as a normal **txt in file management**, so it can be extracted like an upload. Re-implementation of the idea in `copybook/` (scrapy spider for the now-dead quanshuwang.com: hardcoded XPath, whole-site crawl, writes Django's sqlite) — here: one book per task, configurable rules, rate-limited, Java is the only DB writer.
+Fetches web novels and stores them as normal **txt files in file management**, so they can be extracted like uploads. Re-implementation of the idea in `copybook/` (scrapy spider for the now-dead quanshuwang.com: hardcoded XPath, whole-site crawl, writes Django's sqlite): configurable rules, rate-limited, Java is the only DB writer. **Two modes**, chosen by `options.mode` (default `book`) and surfaced as a switch on the crawl page:
+
+- **`book`** — one table-of-contents URL → one txt (the original behaviour).
+- **`site`** — copybook's jump chain: site home → categories → category list pages (with pagination) → book detail → TOC. Python `discover()` samples it *bounded* (`maxCategories`, `maxListPages`, `maxBooks`) and returns a selectable book list; Java then crawls **one book at a time** through the same single-book pipeline, so each novel becomes its own txt (`novel_crawl_book` rows). One Java task, N Python jobs.
 
 | Method & path | Purpose |
 |---------------|---------|
-| `GET  /api/novel/crawl/presets` | Rule presets from Python (`auto` heuristics, `biquge`, `wikisource`, `quanshuwang` = copybook's original XPath) |
-| `POST /api/novel/crawl/preview {url, preset?, rule?, delayMs?, respectRobots?}` | Sync: parse TOC (+ pagination) and test-fetch chapter 1 → `{bookName, author, intro, chapters[{title,url}], chapterCount, tocPages, preset, rule, sample}` |
-| `POST /api/novel/crawl/submit {…preview fields, startIndex?, endIndex?}` | Async task (QUEUED); options whitelisted and stored as JSON in `options` |
-| `GET /list` · `GET /{id}` · `POST /{id}/cancel` · `POST /{id}/retry` | Tasks; retry = new task with the stored options |
+| `GET  /api/novel/crawl/presets` | Rule presets from Python (`auto` heuristics, `biquge`, `wikisource`, `quanshuwang` = copybook's original XPath incl. its category/book/list-next/TOC links) |
+| `POST /api/novel/crawl/preview {url, preset?, rule?, delayMs?, respectRobots?}` | book mode, sync: parse TOC (+ pagination) and test-fetch chapter 1 → `{bookName, author, intro, chapters[{title,url}], chapterCount, tocPages, preset, rule, sample}` |
+| `POST /api/novel/crawl/discover {url, maxCategories?, maxListPages?, maxBooks?, categories?[], verify?}` | site mode, sync (300 s client timeout): → `{siteName, categoriesAll[], categories[{name,pages,books,error}], books[{bookName, author, intro, category, tocUrl, sourceUrl, chapterCount, error}], bookCount, truncated, preset, rule}`. `verify` also parses each TOC (≤3 pages) to pre-check the rules |
+| `POST /api/novel/crawl/submit {…}` | Async task (QUEUED), dispatches on `mode`; options whitelisted and stored as JSON in `options` |
+| `POST /api/novel/crawl/site/submit {…discover fields, maxChaptersPerBook?, books[{tocUrl, bookName?, author?, category?}]}` | Async **site** task; a book list with at least one `tocUrl` is required |
+| `GET /list` · `GET /{id}` · `GET /{id}/books` · `POST /{id}/cancel` · `POST /{id}/retry` | Tasks; `books` = per-book detail (site only); retry = new task with the stored options (site retries the **stored book list**, no re-discovery) |
 
-- `rule` = XPath overrides `{bookName, author, intro, chapterLinks, tocNext, content, contentNext, encoding, removePatterns[]}`; non-empty fields override the preset, empty → heuristics.
-- Table `novel_crawl` (`sql/novel_crawl.sql`, also in `init.sql`): `id`, `url`, `preset`, `options`, `book_name`, `author`, `status` (QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED), `progress`, `message`, `job_id`, `chapter_total/done/failed`, `word_count`, `file_id`, times. Full text is never stored in the DB.
-- `NovelCrawlService` (single thread) submits to Python `POST /api/crawl/jobs`, polls every 3 s, on success downloads `GET /api/crawl/jobs/{id}/text` → `FileService.saveBytes("<书名>.txt")` → `file_id`, then `POST /api/crawl/jobs/{id}/release`. Python 4xx messages are passed through as 400 (no API key involved).
+- `rule` = XPath overrides; non-empty fields override the preset, empty → heuristics. Site fields: `categoryLinks`, `bookLinks`, `listNext`, `tocLink`; book fields: `bookName`, `author`, `intro`, `chapterLinks`, `tocNext`, `content`, `contentNext`, `encoding`, `removePatterns[]`.
+- Tables: `novel_crawl` (`sql/novel_crawl.sql`, also in `init.sql`): `id`, `url`, `preset`, `options`, `book_name`, `author`, `status` (QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED), `progress`, `message`, `job_id`, `chapter_total/done/failed`, `word_count`, `file_id`, times. `novel_crawl_book` (`sql/novel_crawl_book.sql`, also in `init.sql`): one row per book of a site task — `crawl_id`, `book_name`, `author`, `category`, `toc_url`, `status`, `progress`, `message`, `job_id`, `chapter_total/done/failed`, `word_count`, `file_id`, times. Full text is never stored in the DB. **Existing DBs need no migration**: the site table is created by `CREATE TABLE IF NOT EXISTS`, and `mode` lives in `options` (crawled rows without it are treated as `book`), with `book_total/done/failed` computed from the child table and exposed as entity fields via `@TableField(exist = false)`.
+- `NovelCrawlService` (single thread) submits to Python `POST /api/crawl/jobs`, polls every 3 s, on success downloads `GET /api/crawl/jobs/{id}/text` → `FileService.saveBytes("<书名>.txt")` → `file_id`, then `POST /api/crawl/jobs/{id}/release`. Site mode repeats that per book, aggregating chapter/word counts and progress (`bookDone/bookTotal`); cancel sets a flag, cancels the in-flight Python job, and marks not-yet-started books CANCELLED. Python 4xx messages are passed through as 400 (no API key involved).
 
 ### File storage rules
 
@@ -237,6 +243,13 @@ npm run preview
 - **Using materials**: `SettingsEditor` → 「从素材库添加」 opens `MaterialPicker` (category / keyword / tag filters, preview of where each item goes). `novel-options/materialApply.js#APPLY_TARGETS` maps categories to settings (monster/faction/location/item → custom element from template, auto-created if missing → its list; character → 角色·主要角色; plot → 情节推进·关键情节节点; world → 世界观补充). Applying **copies** the data (later library edits don't change the story); group items get `_fromMaterial` (shown as「来自素材库」, never exported by `buildSpec`), unmapped attributes go into an added 备注 field.
 - Workspace page: 设定 tab = `SettingsEditor` (保存设定), 写作 tab = chapter list, next-chapter form (title, goal, target chars), 预览上下文, live segmented generation with cancel, per-call token table, workspace totals. Unsaved settings are saved automatically before preview/generation.
 
+### Web novel crawl page (`/novel/crawl` → `views/novel/crawl.vue`)
+
+- A mode switch at the top: **单本（目录页）** = the original flow (目录页地址 → 解析目录 → 试抓首章样本 → 选范围 → 开始抓取); **整站（分类 → 所有书）** = the copybook flow (站点首页/分类页 → 发现书籍 → 勾选书目 → 开始抓取).
+- Site mode shows the discovery limits (`整站上限` books, `分类范围` categories/list pages, `只要分类` name filter, `每本最多` chapters — 0 means whole book, `发现时解析每本目录` switch), then a selectable book table (书名/作者/分类/章节/目录页 or error) that is **auto-selected** after discovery, plus 全选 and 「开始抓取（已选 N 本）」.
+- `RULE_FIELDS` holds every XPath field; the four site-only ones (`categoryLinks`, `bookLinks`, `listNext`, `tocLink`) are rendered only in site mode (`ruleFields` computed), and empty fields fall back to the preset then heuristics.
+- Task table shows a 模式 tag (单本/整站); site tasks show `书 done/total` and open a 书籍明细 dialog (`GET /{id}/books`) where each finished book can go straight to 小说提取. Retry re-runs the stored options; 改参数 refills the form (site books are re-discovered).
+
 ## 6. Python AI Service (`python-service/`)
 
 This service is the **AI/ML layer**; the Spring Boot service remains the system of record for files and metadata.
@@ -272,10 +285,12 @@ Shared data dir: `DATA_DIR` (`app/config.py`, default `<repo>/data`); Python wri
 
 ### Web novel crawler (`app/crawler/`, `/api/crawl/**`, called by Java)
 
-- `POST /api/crawl/preview`, `POST /api/crawl/jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `GET /jobs/{id}/text` (UTF-8 txt), `POST /jobs/{id}/release`, `GET /presets`; responses `{code, message, data}`. Jobs are in memory, one at a time; ≤3 unreleased texts kept.
+- `POST /api/crawl/preview` (book), `POST /api/crawl/discover` (site: home → categories → list pagination → book detail → TOC), `POST /api/crawl/jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `GET /jobs/{id}/text` (UTF-8 txt), `POST /jobs/{id}/release`, `GET /presets`; responses `{code, message, data}`. Jobs are in memory, one at a time; ≤3 unreleased texts kept.
+- **Discovery** (`service.discover`, bounded sampling — never the whole site): `maxCategories` (10), `maxListPages` (5), `maxBooks` (20), optional `categories` name filter, optional `verify` (parse each TOC with ≤3 pages to pre-check the rules). Returns `categoriesAll` (nav found on the home page), `categories` (visited, with page/book counts and error), `books[{bookName, author, intro, category, tocUrl, sourceUrl, chapterCount, error}]`, `truncated`. Book names/author from the detail page win over the TOC page (its `<title>` often has a「目录」suffix). Java then submits the selected books as ordinary single-book jobs, one after another.
 - `fetcher.py`: http/https only, **public addresses only** (loopback/private rejected unless `CRAWL_ALLOW_PRIVATE=1`, for local fixture tests; domains resolving into `198.18.0.0/15` are allowed — Clash fake-ip/TUN mode), non-ASCII URLs percent-encoded, robots.txt respected by default, min delay 300 ms (default 1000), retries on 5xx/network, encoding from header/meta (gbk → gb18030) else `text_loader.decode_text`. Env `CRAWL_USER_AGENT`.
-- `parser.py` heuristics: chapter links = links matching `第X章/Chapter N/1.` in the container holding most of them, deduped keeping the **last** occurrence (drops the "最新章节" block); content = block with most direct text (id/class like content ×1.5); `下一页` pagination for TOC and in-chapter (`123.html → 123_2.html` only); default ad-line filters apply to lines ≤ 80 chars.
+- `parser.py` heuristics: chapter links = links matching `第X章/Chapter N/1.` in the container holding most of them, deduped keeping the **last** occurrence (drops the "最新章节" block); content = block with most direct text (id/class like content ×1.5); `下一页` pagination for TOC and in-chapter (`123.html → 123_2.html` only); default ad-line filters apply to lines ≤ 80 chars. Site heuristics: categories = group of short same-host links in one container (≥3), book links = largest group of non-chapter links on a list page (falls back to all candidates when the page only has 1–2 books), TOC link = link text matching 开始阅读/全部章节/目录, and the detail page doubles as TOC when it already contains chapter links.
 - Failed chapters get a placeholder and the job continues; 10 consecutive failures or > 50 % failed → job fails. Output txt keeps chapter titles so `text_loader.split_chapters` works.
+- **Self-test** (no network): `.venv/Scripts/python scripts/crawl_site_selftest.py` builds a fake book site in a temp dir, serves it on 127.0.0.1, then asserts site discovery (3 categories, 分类翻页, TOC links, chapter counts) and a full single-book crawl. `.venv/Scripts/python scripts/crawl_fixture_server.py [port]` (default 8899) keeps that fake site up so the crawl page can be exercised end to end — start the AI service with `CRAWL_ALLOW_PRIVATE=1` and use `http://127.0.0.1:8899/` in site mode.
 
 ### Local models & style fine-tuning (`app/local/`, `/api/local/**`)
 

@@ -439,6 +439,14 @@ public class NovelCrawlService {
             log.error("整站抓取异常 crawlId={}", taskId, e);
             update(taskId, NovelCrawl.FAILED, null, "整站抓取异常：" + e.getMessage());
         } finally {
+            // 收尾：取消 / 异常中断时把还没轮到的书一并落状态，避免留下永远「排队中」的明细
+            boolean cancelled = siteCancels.contains(taskId);
+            bookMapper.update(null, new LambdaUpdateWrapper<NovelCrawlBook>()
+                    .eq(NovelCrawlBook::getCrawlId, taskId)
+                    .in(NovelCrawlBook::getStatus, NovelCrawlBook.QUEUED, NovelCrawlBook.RUNNING)
+                    .set(NovelCrawlBook::getStatus, cancelled ? NovelCrawlBook.CANCELLED : NovelCrawlBook.FAILED)
+                    .set(NovelCrawlBook::getMessage, cancelled ? "已取消" : "任务异常中断")
+                    .set(NovelCrawlBook::getUpdateTime, LocalDateTime.now()));
             siteCancels.remove(taskId);
         }
     }

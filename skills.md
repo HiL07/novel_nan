@@ -1,0 +1,1 @@
+https://www.skillhub.cn/skills/user_170e8f72/novel-deai-tomato-pass  小说去ai味以及过番茄审核skills
