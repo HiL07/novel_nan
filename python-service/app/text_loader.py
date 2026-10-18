@@ -2,17 +2,16 @@
 import io
 import re
 
-import httpx
-
 from . import config
 
 # 章节标题（独占一行）：中文「第X章/回/节/卷…」，英文「Chapter 12 / Chapter IV / Chapter One」
 _EN_NUM = r"(?:\d+|[ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|[a-z]+teen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[- ][a-z]+)?)"
 # 独立成行的特殊段落标题
-_SPECIAL = r"(?:序章|序言|序|前言|楔子|引子|尾声|后记|番外[^\n]{0,20}|prologue|epilogue)"
+_SPECIAL = r"(?:序[ \t　]*章|序言|序|前言|楔子|引子|尾[ \t　]*声|后[ \t　]*记|番外[^\n]{0,20}|prologue|epilogue)"
 CHAPTER_RE = re.compile(
     r"^[ \t　]*("
     r"第[零〇一二三四五六七八九十百千万两\d]+[章回节卷集部篇][^\n]{0,30}"
+    r"|[上中下]部[ \t　]+[^\s，。！？“”：；…][^\n，。！？“”：；…]{0,15}"  # 「上部　面壁者」式分部标题
     r"|chapter[ \t]+" + _EN_NUM + r"\b[^\n]{0,60}"
     r"|" + _SPECIAL +
     r")[ \t　]*$",
@@ -27,6 +26,8 @@ NUMBERED_RE = re.compile(
 
 def fetch_file(file_id: int) -> bytes:
     """通过 Java 后端的预览接口读取原始字节（不直接访问磁盘 / 数据库）。"""
+    import httpx  # 延迟导入：训练 worker（含远程执行）只用到本模块的章节切分
+
     url = f"{config.JAVA_BACKEND_URL}/api/file/preview/{file_id}"
     # trust_env=False：本机服务不走系统代理（Clash 等代理会把 localhost 请求转成 502）
     resp = httpx.get(url, timeout=60, trust_env=False)

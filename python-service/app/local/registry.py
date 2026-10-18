@@ -143,18 +143,72 @@ def adapter_dir(adapter_id: str) -> Path:
 
 
 def save_adapter_meta(adapter_id: str, meta: dict) -> None:
-    _write_json(adapter_dir(adapter_id) / "meta.json", meta)
+    save_adapter_meta_at(adapter_dir(adapter_id), meta)
+
+
+def save_adapter_meta_at(directory: Path, meta: dict) -> None:
+    meta = {k: v for k, v in meta.items() if k not in ("compat", "matchedBaseId")}
+    _write_json(directory / "meta.json", meta)
+
+
+def manifest_fingerprint(files: dict[str, str]) -> str:
+    """权重文件指纹：{相对路径: sha256} 排序后整体 sha256（与官方下载清单 / 本地逐文件计算的结果可比）。"""
+    return hashlib.sha256("\n".join(f"{k}:{v}" for k, v in sorted(files.items())).encode()).hexdigest()
+
+
+def compute_weights_fingerprint(model_dir: Path) -> str:
+    """逐个权重文件计算 sha256 后得到指纹（7B 约 15 GB，耗时分钟级，结果写入 model.json 缓存）。"""
+    files = {}
+    for f in sorted(p for g in WEIGHT_GLOBS for p in model_dir.glob(g)):
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 24), b""):
+                h.update(chunk)
+        files[f.name] = h.hexdigest()
+    return manifest_fingerprint(files)
+
+
+def verify_base_weights(model_id: str) -> dict:
+    """计算并缓存本地基础模型的权重指纹（用于与远程训练所用模型比对）。"""
+    rec = get_base(model_id)
+    if not rec["exists"]:
+        raise RegistryError(f"模型目录不存在：{rec['path']}")
+    rec.pop("exists", None)
+    rec["weightsFingerprint"] = compute_weights_fingerprint(Path(rec["path"]))
+    rec["weightsVerifiedAt"] = _now()
+    _write_json(_base_record_path(model_id), rec)
+    return get_base(model_id)
 
 
 def _with_compat(meta: dict) -> dict:
-    """附加与基础模型的匹配状态：ok / changed（config 变了）/ missing（基础模型已删除或目录不存在）。"""
+    """附加与本地基础模型的匹配状态与可加载的本地基础模型 matchedBaseId。
+
+    - 本地训练的适配器：按基础模型 id 匹配；config.json 变了 → changed，基础模型不在 → missing
+    - 远程训练的适配器（baseModel.source == "remote"）：本地须有 configHash 与权重指纹（官方清单 sha256）都一致的模型
+      → ok；只有 configHash 一致、权重指纹未计算 → unverified（不允许加载，需先校验权重）；都没有 → remote-only
+    """
     base = meta.get("baseModel") or {}
+    meta["matchedBaseId"] = None
+    if base.get("source") == "remote":
+        same_cfg = [b for b in list_base() if b["exists"] and b.get("configHash") == base.get("configHash")]
+        verified = [b for b in same_cfg if b.get("weightsFingerprint")
+                    and b["weightsFingerprint"] == base.get("weightsFingerprint")]
+        if verified:
+            meta["compat"], meta["matchedBaseId"] = "ok", verified[0]["id"]
+        elif any(b.get("weightsFingerprint") for b in same_cfg):
+            meta["compat"] = "changed"  # 配置相同但权重不同
+        elif same_cfg:
+            meta["compat"], meta["matchedBaseId"] = "unverified", same_cfg[0]["id"]
+        else:
+            meta["compat"] = "remote-only"
+        return meta
     try:
         cur = get_base(base.get("id", ""))
         if not cur["exists"]:
             meta["compat"] = "missing"
         else:
             meta["compat"] = "ok" if config_hash(Path(cur["path"])) == base.get("configHash") else "changed"
+            meta["matchedBaseId"] = cur["id"] if meta["compat"] == "ok" else None
     except (RegistryError, OSError):
         meta["compat"] = "missing"
     return meta
@@ -170,6 +224,8 @@ def get_adapter(adapter_id: str) -> dict:
 def list_adapters() -> list[dict]:
     out = []
     for f in settings.ADAPTER_DIR.glob("*/meta.json"):
+        if f.parent.name.endswith(".partial"):  # 下载 / 保存中途的目录，不可用
+            continue
         meta = _read_json(f)
         if meta and (f.parent / "adapter_config.json").exists():
             out.append(_with_compat(meta))
@@ -186,6 +242,5 @@ def delete_adapter(adapter_id: str) -> None:
 def rename_adapter(adapter_id: str, name: str) -> dict:
     meta = get_adapter(adapter_id)
     meta["name"] = name.strip() or meta["name"]
-    meta.pop("compat", None)
     save_adapter_meta(adapter_id, meta)
     return _with_compat(meta)

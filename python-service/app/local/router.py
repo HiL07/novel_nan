@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import text_loader
-from . import download, hardware, inference, jobfiles, jobs, registry, settings
+from . import download, hardware, inference, jobfiles, jobs, registry, settings, train_config
 
 log = logging.getLogger("local.api")
 router = APIRouter(prefix="/api/local", tags=["local-models"])
@@ -197,29 +197,43 @@ class SampleFile(BaseModel):
 
 
 class TrainReq(BaseModel):
-    baseModelId: str
+    """可调参数（loraR … valRatio）不传时取 train_config 的档位默认值（本机 "local" 档 / 远程 "remote" 档）。"""
+    baseModelId: str = ""
     adapterName: str = Field(min_length=1, max_length=100)
     method: Literal["qlora", "lora"] = "qlora"
     sampleText: str = ""
     sampleFiles: list[SampleFile] = []
-    loraR: int = Field(default=16, ge=1, le=128)
-    loraAlpha: int = Field(default=32, ge=1, le=256)
-    loraDropout: float = Field(default=0.05, ge=0, le=0.5)
-    maxSeqLen: int = Field(default=512, ge=64, le=4096)
-    epochs: int = Field(default=3, ge=1, le=50)
-    learningRate: float = Field(default=2e-4, gt=0, le=1e-2)
-    batchSize: int = Field(default=1, ge=1, le=16)
-    gradAccum: int = Field(default=4, ge=1, le=64)
+    loraR: Optional[int] = Field(default=None, ge=1, le=128)
+    loraAlpha: Optional[int] = Field(default=None, ge=1, le=256)
+    loraDropout: Optional[float] = Field(default=None, ge=0, le=0.5)
+    maxSeqLen: Optional[int] = Field(default=None, ge=64, le=4096)
+    epochs: Optional[int] = Field(default=None, ge=1, le=50)
+    learningRate: Optional[float] = Field(default=None, gt=0, le=1e-2)
+    batchSize: Optional[int] = Field(default=None, ge=1, le=16)
+    gradAccum: Optional[int] = Field(default=None, ge=1, le=64)
+    valRatio: Optional[float] = Field(default=None, ge=0, le=0.3)  # 0 = 不划分验证集
     maxSteps: int = Field(default=0, ge=0, le=100000)
     seed: int = 42
+    samplePrompt: Optional[str] = Field(default=None, max_length=200)  # 空 = train_config.SAMPLE_PROMPT
     force: bool = False  # 资源评估为 exceed 时仍强制开始
+    # 执行位置：local = 本机 GPU；remote = targets.json 中的远程机器（baseModelId 此时可为空，用 remoteModelId）
+    backend: Literal["local", "remote"] = "local"
+    targetId: Optional[str] = None
+    remoteModelId: Optional[str] = None
 
 
-def _collect_samples(req: TrainReq) -> tuple[str, list[dict]]:
+@router.get("/train/defaults")
+def train_defaults():
+    return ok({"profiles": train_config.PROFILES, "samplePrompt": train_config.SAMPLE_PROMPT,
+               "sampleParams": train_config.SAMPLE_PARAMS})
+
+
+def _collect_samples(req: TrainReq) -> tuple[str, list[dict], list[dict]]:
+    """返回 (拼接文本, 来源摘要, 来源在拼接文本中的字符区间)；区间供训练时按来源 / 章节划分验证集。"""
     parts, sources = [], []
     if req.sampleText.strip():
         parts.append(text_loader.clean_text(req.sampleText))
-        sources.append({"type": "text", "chars": len(parts[-1])})
+        sources.append({"type": "text", "name": "粘贴文本", "chars": len(parts[-1])})
     for f in req.sampleFiles:
         try:
             text = text_loader.to_plain_text(text_loader.fetch_file(f.id), f.ext)
@@ -228,11 +242,64 @@ def _collect_samples(req: TrainReq) -> tuple[str, list[dict]]:
         if text:
             parts.append(text)
             sources.append({"type": "file", "fileId": f.id, "name": f.name, "chars": len(text)})
-    return "\n\n".join(parts), sources
+    index, pos = [], 0
+    for src, part in zip(sources, parts):
+        index.append({**{k: v for k, v in src.items() if k != "chars"}, "start": pos, "end": pos + len(part)})
+        pos += len(part) + 2  # "\n\n"
+    return "\n\n".join(parts), sources, index
+
+
+def _start_remote_training(req: TrainReq):
+    from ..remote import targets
+
+    try:
+        target = targets.get(req.targetId or "")
+        model = targets.get_model(target, req.remoteModelId or "")
+    except targets.TargetError as e:
+        raise LocalError(400, str(e)) from e
+    params = train_config.resolve("remote", req.model_dump(include=set(train_config.TUNABLE_KEYS)))
+    samples, sources, index = _collect_samples(req)
+    if len(samples) < settings.MIN_SAMPLE_CHARS:
+        raise LocalError(400, f"写作样本太少（{len(samples)} 字），至少需要 {settings.MIN_SAMPLE_CHARS} 字")
+    adapter_id = re.sub(r"[^a-zA-Z0-9-]", "", registry.new_id(req.adapterName))
+    cfg = req.model_dump(exclude={"sampleText", "sampleFiles", "force", "baseModelId"}) | params
+    cfg.update(adapterId=adapter_id, sampleChars=len(samples), sampleSources=sources, sampleIndex=index,
+               paramProfile="remote", remoteModel={k: model.get(k) for k in ("id", "name", "repoId", "path")})
+    return ok(_guard(jobs.create, "train", cfg, samples=samples, backend="remote"))
+
+
+@router.get("/remote/targets")
+def remote_targets():
+    from ..remote import targets
+
+    try:
+        return ok([targets.public_view(t) for t in targets.list_targets()])
+    except targets.TargetError as e:
+        raise LocalError(400, str(e)) from e
+
+
+@router.post("/remote/targets/{target_id}/probe")
+def remote_probe(target_id: str):
+    """测试连接（只读）：主机名、GPU、显存、数据盘空间、Python / torch。"""
+    from ..remote import ssh, targets
+
+    try:
+        t = targets.get(target_id)
+        out = ssh.text(t, "hostname; nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader; "
+                          f"df -h {t['workDir'].rsplit('/', 1)[0]} | tail -1; "
+                          f"{t['python']} -c 'import torch;print(torch.__version__, torch.cuda.is_available())'",
+                       timeout=90)
+    except (targets.TargetError, ssh.SSHError) as e:
+        raise LocalError(400, str(e)) from e
+    lines = out.strip().splitlines()
+    return ok({"ok": True, "hostname": lines[0] if lines else None, "gpu": lines[1] if len(lines) > 1 else None,
+               "disk": lines[2] if len(lines) > 2 else None, "torch": lines[3] if len(lines) > 3 else None})
 
 
 @router.post("/train")
 def start_training(req: TrainReq):
+    if req.backend == "remote":
+        return _start_remote_training(req)
     base = _guard(registry.get_base, req.baseModelId)
     if not base["exists"]:
         raise LocalError(400, f"模型目录不存在：{base['path']}")
@@ -240,18 +307,20 @@ def start_training(req: TrainReq):
     if not deps["ready"]:
         raise LocalError(400, "未安装本地训练依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")
     quant = "4bit" if req.method == "qlora" else "none"
-    est = hardware.estimate(base, "train", quantization=quant, seq_len=req.maxSeqLen, batch_size=req.batchSize,
-                            lora_r=req.loraR)
+    params = train_config.resolve("local", req.model_dump(include=set(train_config.TUNABLE_KEYS)))
+    est = hardware.estimate(base, "train", quantization=quant, seq_len=params["maxSeqLen"],
+                            batch_size=params["batchSize"], lora_r=params["loraR"])
     if est["level"] == "exceed" and not req.force:
         raise LocalError(409, "当前配置可能超出本机资源：" + "；".join(est["messages"]), est)
 
-    samples, sources = _collect_samples(req)
+    samples, sources, index = _collect_samples(req)
     if len(samples) < settings.MIN_SAMPLE_CHARS:
         raise LocalError(400, f"写作样本太少（{len(samples)} 字），至少需要 {settings.MIN_SAMPLE_CHARS} 字，建议 1 万字以上")
 
     adapter_id = re.sub(r"[^a-zA-Z0-9-]", "", registry.new_id(req.adapterName))
-    cfg = req.model_dump(exclude={"sampleText", "sampleFiles", "force", "baseModelId"})
-    cfg.update(baseModel=base, adapterId=adapter_id, sampleChars=len(samples), sampleSources=sources, estimate=est)
+    cfg = req.model_dump(exclude={"sampleText", "sampleFiles", "force", "baseModelId"}) | params
+    cfg.update(baseModel=base, adapterId=adapter_id, sampleChars=len(samples), sampleSources=sources,
+               sampleIndex=index, paramProfile="local", estimate=est)
     return ok(_guard(jobs.create, "train", cfg, samples=samples))
 
 

@@ -28,7 +28,7 @@ log = logging.getLogger("local.jobs")
 ACTIVE = ("queued", "running")
 LANE_LIMITS = {"local-gpu": 1, "local-io": 1}  # 未列出的通道（远程）默认 1
 MAX_WAITING_PER_LANE = int(os.getenv("LOCAL_MAX_QUEUED", "5"))
-RESUMABLE_BACKENDS: set[str] = set()  # 进程丢失后应重新接管而不是判失败的后端（由远程模块注册）
+RESUMABLE_BACKENDS: set[str] = {"remote"}  # 进程丢失后应重新接管而不是判失败的后端（执行器自行核对远程状态）
 TICK_SECONDS = 5
 
 _lock = threading.RLock()
@@ -316,6 +316,8 @@ def cancel(job_id: str) -> dict:
             _dispatch(job["lane"])
         elif job["kind"] == "download":
             _terminate(pid)  # 下载可直接结束；训练先等它在当前 step 结束后优雅退出
+        elif job.get("backend", "local") != "local":
+            pass  # 远程执行：本机执行器把取消转发到远程并负责超时后结束远程进程，不能先杀本机执行器
         else:
             # 训练 / 远程执行：worker 在当前 step（远程：下一次轮询）结束时响应取消标记
             def force_kill() -> None:

@@ -2,6 +2,8 @@
 
 做法：把用户的写作样本拼接后按 maxSeqLen 切成定长块，做因果语言模型续写训练（continued pretraining），
 让模型学习用词、句式、节奏等风格；只训练 LoRA 参数，产出的适配器保存到 models/adapters/<id>/。
+验证集按来源 / 章节整组留出（见 dataset.py），只用于训练前后的 eval loss，不参与梯度；
+训练结束后用固定提示词（train_config.SAMPLE_PROMPT）生成续写样例，与 eval 结果分开记录在 meta.json。
 """
 import math
 from pathlib import Path
@@ -9,7 +11,7 @@ import platform
 import shutil
 import time
 
-from . import hardware, jobfiles, registry
+from . import dataset, hardware, jobfiles, registry, train_config
 from .inference import load_model_and_tokenizer
 
 GB = hardware.GB
@@ -30,6 +32,33 @@ def build_blocks(tokenizer, text: str, seq_len: int) -> tuple[list[list[int]], i
     return blocks, len(ids)
 
 
+def prepare_data(job_dir: Path, index: list[dict] | None, tokenizer, seq_len: int, val_ratio: float, seed: int) -> dict:
+    """分组 → 划分 → 分词切块。验证集只保留完整块；不足一个完整块时放弃评估、文本并回训练集并记录原因。"""
+    sources = dataset.load_sources(job_dir, index)
+    groups = dataset.build_groups(sources)
+    plan = dataset.split(groups, val_ratio, seed)
+    train_blocks, train_tokens = build_blocks(tokenizer, dataset.join(plan["train"]), seq_len)
+    val_blocks, val_tokens = [], 0
+    if plan["val"]:
+        ids = tokenizer(dataset.join(plan["val"]), add_special_tokens=False)["input_ids"]
+        val_tokens = len(ids)
+        val_blocks = [ids[i:i + seq_len] for i in range(0, len(ids) - seq_len + 1, seq_len)]
+        if not val_blocks:
+            plan = {**plan, "mode": "none", "train": groups, "val": [],
+                    "reason": f"验证集只有 {val_tokens} tokens，不足一个完整块（maxSeqLen {seq_len}），"
+                              f"未做评估；这部分文本已并回训练集"}
+            train_blocks, train_tokens = build_blocks(tokenizer, dataset.join(groups), seq_len)
+            val_tokens = 0
+    split = dataset.report(plan)
+    train_set = {tuple(b) for b in train_blocks}
+    removed = [line for s in sources for line in s.get("removedLines", [])]
+    split.update(cleaning={"removedLines": len(removed), "examples": removed[:12]})
+    split.update(groupsTotal=len(groups), trainTokens=train_tokens, valTokens=val_tokens,
+                 trainBlocks=len(train_blocks), valBlocks=len(val_blocks),
+                 blockOverlap=sum(tuple(b) in train_set for b in val_blocks))
+    return {"train": train_blocks, "val": val_blocks, "split": split, "tokens": train_tokens + val_tokens}
+
+
 def run(job: dict) -> dict:
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -44,9 +73,11 @@ def run(job: dict) -> dict:
     if registry.config_hash(Path(base["path"])) != base["configHash"]:
         raise RuntimeError("基础模型的 config.json 与登记时不同，请重新登记该模型")
 
-    samples = (jobfiles.job_dir(job_id) / "samples.txt").read_text(encoding="utf-8")
+    job_dir = jobfiles.job_dir(job_id)
+    samples = (job_dir / "samples.txt").read_text(encoding="utf-8")
+    val_ratio = cfg.get("valRatio", train_config.defaults("local")["valRatio"])
     _log(f"基础模型：{base['name']}（{base['path']}）")
-    _log(f"方法：{cfg['method'].upper()}  量化：{quant}  样本 {len(samples)} 字")
+    _log(f"方法：{cfg['method'].upper()}  量化：{quant}  样本 {len(samples)} 字  验证集比例 {val_ratio:.0%}")
 
     torch.manual_seed(cfg["seed"])
     torch.cuda.reset_peak_memory_stats()
@@ -54,8 +85,14 @@ def run(job: dict) -> dict:
     model, tokenizer = load_model_and_tokenizer(base["path"], quant)
     _log(f"模型加载完成，用时 {time.monotonic() - t0:.1f}s，显存 {torch.cuda.memory_allocated() / GB:.2f} GB")
 
-    blocks, n_tokens = build_blocks(tokenizer, samples, cfg["maxSeqLen"])
-    _log(f"样本切分：{n_tokens} tokens → {len(blocks)} 块（每块 ≤ {cfg['maxSeqLen']} tokens）")
+    data = prepare_data(job_dir, cfg.get("sampleIndex"), tokenizer, cfg["maxSeqLen"], val_ratio, cfg["seed"])
+    blocks, val_blocks, split = data["train"], data["val"], data["split"]
+    _log(f"样本切分：{split['groupsTotal']} 个章节/来源分组；训练 {split['trainTokens']} tokens → {len(blocks)} 块，"
+         f"验证 {split['valTokens']} tokens → {len(val_blocks)} 块（每块 ≤ {cfg['maxSeqLen']} tokens，划分方式 {split['mode']}）")
+    for w in split["warnings"] + ([split["reason"]] if split["reason"] else []):
+        _log(f"验证集：{w}")
+    if split["groupOverlap"] or split["blockOverlap"]:
+        raise RuntimeError(f"训练集与验证集存在交叉（分组 {split['groupOverlap']}，块 {split['blockOverlap']}），已停止")
 
     gc_kwargs = {"use_reentrant": False}
     if quant == "4bit":
@@ -75,7 +112,7 @@ def run(job: dict) -> dict:
     _log(f"训练步数：{max_steps}（每轮 {steps_per_epoch} 步，batch {cfg['batchSize']} × 累积 {cfg['gradAccum']}）")
 
     progress = {"step": 0, "maxSteps": max_steps, "epoch": 0, "loss": None, "learningRate": None,
-                "elapsed": 0, "eta": None, "history": []}
+                "elapsed": 0, "eta": None, "history": [], "stage": "training", "evalLoss": None}
     jobfiles.write_progress(job_id, progress)
     train_start = time.monotonic()
 
@@ -98,14 +135,16 @@ def run(job: dict) -> dict:
                 control.should_training_stop = True
 
     args = TrainingArguments(
-        output_dir=str(jobfiles.job_dir(job_id) / "trainer"),
+        output_dir=str(job_dir / "trainer"),
         per_device_train_batch_size=cfg["batchSize"],
+        per_device_eval_batch_size=cfg["batchSize"],
         gradient_accumulation_steps=cfg["gradAccum"],
         max_steps=max_steps,
         learning_rate=cfg["learningRate"],
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
         logging_steps=1,
+        eval_strategy="no",  # 只在训练前后手动评估，训练过程中不评估
         save_strategy="no",
         report_to=[],
         bf16=tinfo["bf16"],
@@ -118,17 +157,35 @@ def run(job: dict) -> dict:
         disable_tqdm=True,
         seed=cfg["seed"],
     )
+    # 验证集只作为 eval_dataset：Trainer 只从 train_dataset 取样做梯度更新
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=[{"input_ids": b} for b in blocks],
+        eval_dataset=[{"input_ids": b} for b in val_blocks] or None,
         data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
         callbacks=[ProgressCallback()],
     )
+    evaluation = {"status": "skipped", "reason": split["reason"], "valBlocks": len(val_blocks),
+                  "valTokens": split["valTokens"], "splitMode": split["mode"],
+                  "note": "验证集按章节/来源整组留出，只用于评估，不参与梯度更新"}
+    if val_blocks:
+        evaluation["evalLossBefore"] = _evaluate(trainer, evaluation, "训练前")
+    if jobfiles.cancel_requested(job_id):
+        _log("训练已取消，未保存适配器")
+        return {"cancelled": True}
     out = trainer.train()
     if jobfiles.cancel_requested(job_id):
         _log("训练已取消，未保存适配器")
         return {"cancelled": True}
+    if val_blocks and evaluation["status"] != "failed":
+        progress["stage"] = "evaluating"
+        jobfiles.write_progress(job_id, progress)
+        evaluation["evalLossAfter"] = _evaluate(trainer, evaluation, "训练后")
+        if evaluation["status"] != "failed":
+            evaluation["status"] = "ok"
+            progress["evalLoss"] = evaluation["evalLossAfter"]
+    evaluation["trainDatasetSize"] = len(trainer.train_dataset)
 
     peak = torch.cuda.max_memory_allocated() / GB
     _log(f"训练完成：{out.global_step} 步，用时 {out.metrics.get('train_runtime', 0):.0f}s，显存峰值 {peak:.2f} GB")
@@ -141,7 +198,11 @@ def run(job: dict) -> dict:
     model.save_pretrained(str(tmp_dir))
     tokenizer.save_pretrained(str(tmp_dir))
 
-    sample = _sample_generation(model, tokenizer, samples)
+    progress["stage"] = "sampling"
+    jobfiles.write_progress(job_id, progress)
+    sample = _sample_generation(model, tokenizer, cfg.get("samplePrompt") or train_config.SAMPLE_PROMPT)
+    sample["model"] = {"baseModel": base["name"], "adapterId": adapter_id, "quantization": quant,
+                       "where": "训练进程（训练所在的 GPU）", "gpu": torch.cuda.get_device_name(0)}
     from importlib.metadata import version
 
     meta = {
@@ -156,11 +217,12 @@ def run(job: dict) -> dict:
         "quantization": quant,
         "training": {k: cfg[k] for k in ("loraR", "loraAlpha", "loraDropout", "maxSeqLen", "epochs",
                                          "learningRate", "batchSize", "gradAccum", "seed")}
-                    | {"steps": out.global_step, "targetModules": "all-linear"},
-        "dataset": {"chars": len(samples), "tokens": n_tokens, "blocks": len(blocks),
-                    "sources": cfg.get("sampleSources", [])},
+                    | {"steps": out.global_step, "targetModules": "all-linear", "valRatio": val_ratio},
+        "dataset": {"chars": len(samples), "tokens": data["tokens"], "blocks": len(blocks),
+                    "sources": cfg.get("sampleSources", []), "split": split},
         "metrics": {"finalLoss": progress["loss"], "trainRuntime": round(out.metrics.get("train_runtime", 0), 1),
                     "peakVramGB": round(peak, 2)},
+        "evaluation": evaluation,
         "sample": sample,
         "env": {"torch": torch.__version__, "transformers": version("transformers"), "peft": version("peft"),
                 "gpu": torch.cuda.get_device_name(0), "python": platform.python_version()},
@@ -173,21 +235,49 @@ def run(job: dict) -> dict:
     return {"adapterId": adapter_id}
 
 
-def _sample_generation(model, tokenizer, samples: str) -> dict:
-    """训练后用样本开头做一次续写，便于直观对比风格。失败不影响训练结果。"""
+def _evaluate(trainer, evaluation: dict, label: str) -> float | None:
+    """在验证集上算一次 loss（不更新参数）。失败时把评估标记为 failed 并记录原因，不影响训练与保存。"""
     import torch
 
-    prompt = samples.strip()[:60]
+    try:
+        loss = float(trainer.evaluate()["eval_loss"])
+        if not math.isfinite(loss):
+            raise RuntimeError(f"eval_loss 不是有限值：{loss}")
+        _log(f"{label} eval_loss {loss:.4f}（困惑度 {math.exp(min(loss, 50)):.2f}）")
+        return round(loss, 4)
+    except Exception as e:  # noqa: BLE001
+        torch.cuda.empty_cache()
+        evaluation.update(status="failed", reason=f"{label}评估失败：{e}"[:500])
+        _log(f"{label}评估失败（不影响训练）：{e}")
+        return None
+
+
+def _sample_generation(model, tokenizer, prompt: str) -> dict:
+    """训练后用固定提示词 + 固定种子续写一次，并生成不带适配器（基础模型）的对照；失败只记录原因。"""
+    import torch
+
+    params = dict(train_config.SAMPLE_PARAMS)
+    result = {"status": "ok", "prompt": prompt, "params": params, "text": "", "baseText": "", "error": None,
+              "note": "生成样例只供人工对比文风，不是评估指标"}
+
+    def gen() -> str:
+        torch.manual_seed(params["seed"])
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.inference_mode():
+            out = model.generate(**inputs, max_new_tokens=params["maxNewTokens"], do_sample=True,
+                                 temperature=params["temperature"], top_p=params["topP"],
+                                 repetition_penalty=params["repetitionPenalty"], pad_token_id=tokenizer.pad_token_id)
+        return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+
     try:
         model.eval()
         model.config.use_cache = True
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        with torch.inference_mode():
-            out = model.generate(**inputs, max_new_tokens=120, do_sample=True, temperature=0.8, top_p=0.9,
-                                 repetition_penalty=1.1, pad_token_id=tokenizer.pad_token_id)
-        text = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        _log(f"续写示例：{prompt} → {text[:80]}…")
-        return {"prompt": prompt, "text": text}
+        result["text"] = gen()
+        _log(f"续写示例（适配器）：{prompt} → {result['text'][:80]}…")
+        with model.disable_adapter():
+            result["baseText"] = gen()
+        _log(f"续写示例（基础模型对照）：{prompt} → {result['baseText'][:80]}…")
     except Exception as e:  # noqa: BLE001
+        result.update(status="failed", error=str(e)[:500])
         _log(f"续写示例失败（不影响适配器）：{e}")
-        return {"prompt": prompt, "text": "", "error": str(e)}
+    return result

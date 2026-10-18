@@ -12,7 +12,14 @@ from . import jobfiles
 def _runners():
     from . import download, training
 
-    return {("train", "local"): training.run, ("download", "local"): download.run}
+    runners = {("train", "local"): training.run, ("download", "local"): download.run}
+    try:
+        from ..remote import runner as remote_runner  # 远程执行（远程机器上的 worker 只用到本地执行器）
+
+        runners[("train", "remote")] = remote_runner.run
+    except ImportError:
+        pass
+    return runners
 
 
 def main(job_id: str) -> int:
