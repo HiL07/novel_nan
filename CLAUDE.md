@@ -48,7 +48,7 @@ nan_novel/
 │       ├── layout/     # App shell: Sidebar + AppMain
 │       ├── router/     # Lazy-loaded routes
 │       ├── views/file/ # upload.vue, manage.vue
-│       ├── views/novel/ # create.vue (workspace list), workspace.vue (设定 + 写作), extract.vue (extraction tasks & results)
+│       ├── views/novel/ # create.vue (workspace list), workspace.vue (设定 + 写作), extract.vue (extraction tasks & results), crawl.vue (网络小说抓取)
 │       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型), pyenv.vue (Python 环境 selection & check)
 │       ├── views/material/ # index.vue (素材库: keyword/tag + AI semantic search, 待确认 candidates)
 │       ├── components/material/ # ExtractOptionsDialog, CandidateReview, MaterialEditor, AttributeEditor, MaterialPicker
@@ -59,6 +59,7 @@ nan_novel/
 │   ├── app/            # main.py, extractor, llm_client, text_loader (extraction)
 │   ├── app/local/      # local models: settings, hardware, registry, inference, training, download, jobs, worker, router
 │   ├── app/generation/ # novel generation: backends, spec, context, prompts, chapter, store, defaults, router
+│   ├── app/crawler/    # web novel crawler: rules (presets / XPath), fetcher, parser (heuristics), service (jobs), router
 │   ├── models/         # git-ignored: base/<id>/model.json (+weights if downloaded), adapters/<id>/, jobs/<id>/
 │   ├── scripts/local_e2e.py  # end-to-end smoke test over HTTP
 │   ├── requirements.txt       # extraction service (no torch)
@@ -171,6 +172,21 @@ Reusable creative material extracted from novels or added by hand. **Nothing ent
 - Tag filters resolve material ids with a parameterized query on `material_tag` — never build SQL strings from user tags (`inSql`).
 - Extraction: `POST /api/novel/extract/{fileId}` takes optional `{materials: {enabled, categories, maxPerChunk, focus}}`; on success `NovelExtractService` calls `MaterialService.createCandidates(...)` and the task message says how many candidates await confirmation.
 
+### Novel crawl API (`NovelCrawlController`, `/api/novel/crawl/**`)
+
+Fetches one web novel (table-of-contents URL) and stores it as a normal **txt in file management**, so it can be extracted like an upload. Re-implementation of the idea in `copybook/` (scrapy spider for the now-dead quanshuwang.com: hardcoded XPath, whole-site crawl, writes Django's sqlite) — here: one book per task, configurable rules, rate-limited, Java is the only DB writer.
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET  /api/novel/crawl/presets` | Rule presets from Python (`auto` heuristics, `biquge`, `wikisource`, `quanshuwang` = copybook's original XPath) |
+| `POST /api/novel/crawl/preview {url, preset?, rule?, delayMs?, respectRobots?}` | Sync: parse TOC (+ pagination) and test-fetch chapter 1 → `{bookName, author, intro, chapters[{title,url}], chapterCount, tocPages, preset, rule, sample}` |
+| `POST /api/novel/crawl/submit {…preview fields, startIndex?, endIndex?}` | Async task (QUEUED); options whitelisted and stored as JSON in `options` |
+| `GET /list` · `GET /{id}` · `POST /{id}/cancel` · `POST /{id}/retry` | Tasks; retry = new task with the stored options |
+
+- `rule` = XPath overrides `{bookName, author, intro, chapterLinks, tocNext, content, contentNext, encoding, removePatterns[]}`; non-empty fields override the preset, empty → heuristics.
+- Table `novel_crawl` (`sql/novel_crawl.sql`, also in `init.sql`): `id`, `url`, `preset`, `options`, `book_name`, `author`, `status` (QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED), `progress`, `message`, `job_id`, `chapter_total/done/failed`, `word_count`, `file_id`, times. Full text is never stored in the DB.
+- `NovelCrawlService` (single thread) submits to Python `POST /api/crawl/jobs`, polls every 3 s, on success downloads `GET /api/crawl/jobs/{id}/text` → `FileService.saveBytes("<书名>.txt")` → `file_id`, then `POST /api/crawl/jobs/{id}/release`. Python 4xx messages are passed through as 400 (no API key involved).
+
 ### File storage rules
 
 - Root dir from `file.storage.path` in `application.yml` (`${app.data-dir}/upload`, i.e. `data/upload/`). Uploads are written to `<name>.part` then atomically renamed; if the DB insert fails the file is deleted. `read()` rejects storage paths that resolve outside the upload root.
@@ -253,6 +269,13 @@ Shared data dir: `DATA_DIR` (`app/config.py`, default `<repo>/data`); Python wri
 - All `httpx` calls to local services use `trust_env=False` — a system proxy (Clash etc.) otherwise turns `localhost` requests into 502.
 - **Material candidates** (`app/materials.py`): when `ExtractRequest.materials.enabled`, `prompt_fragment()` adds a `"materials"` field to each chunk's JSON (selected categories, ≤ `maxPerChunk`, optional `focus`, abstracted wording + ≤60-char excerpt; ~+600 max tokens per chunk). `merge_candidates()` dedupes by category + normalized title across chunks (attributes/tags unioned, chapters recorded) into `result.materials[]` with a stable `candidateId`. `POST /api/materials/expand` and `/api/materials/rerank` back the semantic search (model config passed from Java, never stored).
 - Pipeline: fetch bytes via Java `GET /api/file/preview/{id}` → decode (BOM → strict UTF-8 → strict GB18030 → fewest replacement chars) or parse docx/pdf → split chapters (`第X章/回/节/卷`, `Chapter 12/IV/One`, 楔子/尾声/后记/Prologue; fallback `1.标题` / `一、标题` only when ≥3 found) → chunk ≤ `CHUNK_CHARS` at paragraph boundaries → LLM JSON per chunk, `concurrency` requests in parallel (`response_format: json_object`, temperature 0.2) → merge (per-chapter summary/characters/events/foreshadowing, deduped characters, dialog ratio computed in code).
+
+### Web novel crawler (`app/crawler/`, `/api/crawl/**`, called by Java)
+
+- `POST /api/crawl/preview`, `POST /api/crawl/jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `GET /jobs/{id}/text` (UTF-8 txt), `POST /jobs/{id}/release`, `GET /presets`; responses `{code, message, data}`. Jobs are in memory, one at a time; ≤3 unreleased texts kept.
+- `fetcher.py`: http/https only, **public addresses only** (loopback/private rejected unless `CRAWL_ALLOW_PRIVATE=1`, for local fixture tests; domains resolving into `198.18.0.0/15` are allowed — Clash fake-ip/TUN mode), non-ASCII URLs percent-encoded, robots.txt respected by default, min delay 300 ms (default 1000), retries on 5xx/network, encoding from header/meta (gbk → gb18030) else `text_loader.decode_text`. Env `CRAWL_USER_AGENT`.
+- `parser.py` heuristics: chapter links = links matching `第X章/Chapter N/1.` in the container holding most of them, deduped keeping the **last** occurrence (drops the "最新章节" block); content = block with most direct text (id/class like content ×1.5); `下一页` pagination for TOC and in-chapter (`123.html → 123_2.html` only); default ad-line filters apply to lines ≤ 80 chars.
+- Failed chapters get a placeholder and the job continues; 10 consecutive failures or > 50 % failed → job fails. Output txt keeps chapter titles so `text_loader.split_chapters` works.
 
 ### Local models & style fine-tuning (`app/local/`, `/api/local/**`)
 

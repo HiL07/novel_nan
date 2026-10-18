@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -55,8 +56,25 @@ public class FileService {
             throw new IllegalArgumentException("文件不能为空");
         }
 
+        try (InputStream in = file.getInputStream()) {
+            return store(in, file.getOriginalFilename(), file.getSize(), file.getContentType());
+        } catch (IOException e) {
+            throw new RuntimeException("读取上传文件失败", e);
+        }
+    }
+
+    /**
+     * 保存服务端生成的内容（如抓取的小说全文）为一个文件，与上传走同一套落盘 + 写库流程。
+     */
+    public FileInfo saveBytes(String originalName, byte[] data, String contentType) {
+        if (data == null || data.length == 0) {
+            throw new IllegalArgumentException("文件内容不能为空");
+        }
+        return store(new ByteArrayInputStream(data), originalName, data.length, contentType);
+    }
+
+    private FileInfo store(InputStream source, String originalName, long size, String contentType) {
         // 2. 取扩展名（小写、不含点）
-        String originalName = file.getOriginalFilename();
         String fileExt = getExtension(originalName);
 
         // 3. 生成唯一文件名（防重名 + 防路径穿越）
@@ -76,9 +94,7 @@ public class FileService {
         Path tmpFile = targetDir.resolve(storedName + ".part");
         try {
             Files.createDirectories(targetDir);
-            try (InputStream in = file.getInputStream()) {
-                Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
-            }
+            Files.copy(source, tmpFile, StandardCopyOption.REPLACE_EXISTING);
             try {
                 Files.move(tmpFile, targetFile, StandardCopyOption.ATOMIC_MOVE);
             } catch (AtomicMoveNotSupportedException e) {
@@ -94,8 +110,8 @@ public class FileService {
         FileInfo info = new FileInfo();
         info.setFileName(originalName);
         info.setStoragePath(dateDir + "/" + storedName);
-        info.setFileSize(file.getSize());
-        info.setContentType(file.getContentType());
+        info.setFileSize(size);
+        info.setContentType(contentType);
         info.setFileExt(fileExt);
         info.setCreateTime(LocalDateTime.now());
         try {

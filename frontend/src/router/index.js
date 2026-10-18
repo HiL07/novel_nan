@@ -33,6 +33,12 @@ const routes = [
     meta: { title: '素材库', icon: 'Collection' }
   },
   {
+    path: '/novel/crawl',
+    name: 'novelCrawl',
+    component: () => import('@/views/novel/crawl.vue'),
+    meta: { title: '小说抓取', icon: 'Link' }
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),
