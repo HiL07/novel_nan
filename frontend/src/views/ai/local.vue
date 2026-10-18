@@ -192,14 +192,22 @@
             <el-table-column label="基础模型" min-width="180">
               <template #default="{ row }">
                 {{ row.baseModel.name }}
-                <el-tag :type="COMPAT[row.compat].type" size="small">{{ COMPAT[row.compat].label }}</el-tag>
+                <el-tag :type="compatOf(row).type" size="small">{{ compatOf(row).label }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="来源" width="110">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.source === 'remote'" :content="`${row.remote?.targetId || ''} · 任务 ${row.jobId}`" placement="top">
+                  <el-tag type="warning" size="small">远程训练</el-tag>
+                </el-tooltip>
+                <el-tag v-else type="info" size="small">本机训练</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="方法 / 步数" width="130">
               <template #default="{ row }">{{ row.method.toUpperCase() }} · {{ row.training.steps }} 步</template>
             </el-table-column>
-            <el-table-column label="最终 loss" width="90">
-              <template #default="{ row }">{{ row.metrics.finalLoss ?? '-' }}</template>
+            <el-table-column label="训练 / 验证 loss" width="150">
+              <template #default="{ row }">{{ lossText(row) }}</template>
             </el-table-column>
             <el-table-column label="样本" width="100">
               <template #default="{ row }">{{ row.dataset.chars }} 字</template>
@@ -207,7 +215,7 @@
             <el-table-column prop="createdAt" label="创建时间" width="160" />
             <el-table-column label="操作" width="230" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" :disabled="row.compat !== 'ok'" @click="goInfer(row.baseModel.id, row.id)">推理测试</el-button>
+                <el-button link type="primary" :disabled="row.compat !== 'ok'" @click="goInfer(row.matchedBaseId, row.id)">推理测试</el-button>
                 <el-button link type="primary" @click="adapterDetail = row">详情</el-button>
                 <el-button link type="primary" @click="onRenameAdapter(row)">重命名</el-button>
                 <el-button link type="danger" @click="onDeleteAdapter(row)">删除</el-button>
@@ -222,24 +230,44 @@
             <el-select v-model="infer.baseId" placeholder="基础模型" style="width: 240px" @change="infer.adapterId = ''">
               <el-option v-for="m in models.filter((x) => x.exists)" :key="m.id" :label="m.name" :value="m.id" />
             </el-select>
-            <el-select v-model="infer.adapterId" placeholder="不使用适配器（原始模型）" clearable style="width: 240px">
-              <el-option v-for="a in inferAdapters" :key="a.id" :label="a.name" :value="a.id" />
+            <el-select v-model="infer.adapterId" placeholder="不使用适配器（原始模型）" clearable style="width: 300px">
+              <el-option label="不使用适配器（原始基础模型）" value="" />
+              <el-option v-for="a in inferAdapters" :key="a.id" :label="`LoRA · ${a.name}`" :value="a.id">
+                <span>LoRA · {{ a.name }}</span>
+                <span class="opt-meta">{{ a.source === 'remote' ? '远程' : '本机' }} · {{ a.createdAt }}</span>
+              </el-option>
             </el-select>
             <el-select v-model="infer.quantization" style="width: 150px">
               <el-option label="自动（推荐）" value="auto" />
               <el-option label="4-bit 量化" value="4bit" />
               <el-option label="不量化（16-bit）" value="none" />
             </el-select>
-            <el-button type="primary" :loading="inferState?.status === 'loading'" :disabled="!infer.baseId || !!activeTrain" @click="onLoad">加载</el-button>
+            <el-button type="primary" :loading="inferState?.status === 'loading'" :disabled="!infer.baseId || !!activeTrain" @click="onLoad">{{ loadLabel }}</el-button>
             <el-button :disabled="inferState?.status !== 'loaded' && inferState?.status !== 'error'" @click="onUnload">卸载</el-button>
+          </div>
+          <div v-if="selectedAdapter" class="adapter-info">
+            <b>{{ selectedAdapter.name }}</b>
+            <el-tag :type="compatOf(selectedAdapter).type" size="small">{{ compatOf(selectedAdapter).label }}</el-tag>
+            <span>基础模型 {{ selectedAdapter.baseModel.name }}<template v-if="selectedAdapter.baseModel.revision">（revision {{ selectedAdapter.baseModel.revision.slice(0, 8) }}）</template></span>
+            <span>{{ selectedAdapter.source === 'remote' ? `远程训练 · ${selectedAdapter.remote?.targetId || ''}` : '本机训练' }} · 任务 {{ selectedAdapter.jobId }}</span>
+            <span>训练于 {{ selectedAdapter.createdAt }}<template v-if="selectedAdapter.metrics?.trainRuntime"> · 用时 {{ duration(Math.round(selectedAdapter.metrics.trainRuntime)) }}</template></span>
+            <span>{{ selectedAdapter.method.toUpperCase() }} · {{ selectedAdapter.training.steps }} 步 · seq {{ selectedAdapter.training.maxSeqLen }} · {{ lossText(selectedAdapter) }}</span>
+            <span>样本 {{ selectedAdapter.dataset.chars }} 字<template v-if="selectedAdapter.dataset.sources?.[0]">（{{ selectedAdapter.dataset.sources.map((s) => s.name).join('、') }}）</template></span>
           </div>
           <div class="infer-status">
             <template v-if="inferState?.status === 'loaded'">
               <el-tag type="success" size="small">已加载</el-tag>
-              {{ modelName(inferState.baseId) }}<template v-if="inferState.adapterId"> + {{ adapterName(inferState.adapterId) }}</template>
+              {{ modelName(inferState.baseId) }}
+              <template v-if="inferState.adapterId"> + <el-tag type="warning" size="small">LoRA</el-tag> {{ adapterName(inferState.adapterId) }}</template>
+              <template v-else-if="inferState.attachedAdapterId">（适配器 {{ adapterName(inferState.attachedAdapterId) }} 已挂载但停用 → 当前为原始基础模型）</template>
+              <template v-else>（原始基础模型）</template>
               · {{ inferState.quantization }} · 用时 {{ inferState.loadSeconds }}s<template v-if="inferState.vramAllocatedGB != null"> · 显存 {{ inferState.vramAllocatedGB }} GB</template>
             </template>
-            <template v-else-if="inferState?.status === 'loading'"><el-tag type="warning" size="small">加载中</el-tag> 首次加载需读取整个模型文件，可能需要 1~3 分钟</template>
+            <template v-else-if="inferState?.status === 'loading'">
+              <el-tag type="warning" size="small">加载中</el-tag>
+              <template v-if="inferState.loadedAt"> 正在挂载适配器（基础模型保持驻留，不重新加载）</template>
+              <template v-else> 首次加载需读取整个模型文件，可能需要 1~3 分钟</template>
+            </template>
             <template v-else-if="inferState?.status === 'error'"><el-tag type="danger" size="small">加载失败</el-tag> {{ inferState.error }}</template>
             <template v-else><el-tag type="info" size="small">未加载</el-tag><span v-if="activeTrain"> 训练进行中，GPU 被占用</span></template>
             <span v-if="inferEstimate" :class="['est-inline', inferEstimate.level]">资源评估：{{ inferEstimate.messages.join('；') }}</span>
@@ -254,11 +282,27 @@
             <span>最多生成 <el-input-number v-model="gen.maxNewTokens" :min="1" :max="1024" :step="50" size="small" /> tokens</span>
             <span>温度 <el-input-number v-model="gen.temperature" :min="0" :max="2" :step="0.1" :precision="1" size="small" /></span>
             <span>top_p <el-input-number v-model="gen.topP" :min="0.1" :max="1" :step="0.05" :precision="2" size="small" /></span>
-            <el-button type="primary" :icon="MagicStick" :loading="generating" :disabled="inferState?.status !== 'loaded' || !gen.prompt.trim()" @click="onGenerate">生成</el-button>
+            <span>种子 <el-input-number v-model="gen.seed" :min="0" :max="2147483647" :controls="false" size="small" style="width: 90px" /></span>
+            <el-button type="primary" :icon="MagicStick" :loading="generating === 'single'" :disabled="inferState?.status !== 'loaded' || !gen.prompt.trim() || !!generating" @click="onGenerate">生成</el-button>
+            <el-tooltip content="同一提示词、同一种子，依次用原始基础模型（停用适配器）和微调模型生成；基础模型只驻留一份" placement="top">
+              <el-button type="warning" :loading="generating === 'compare'" :disabled="inferState?.status !== 'loaded' || !inferState?.attachedAdapterId || !gen.prompt.trim() || !!generating" @click="onCompare">对照生成（基础 vs 微调）</el-button>
+            </el-tooltip>
           </div>
+          <div v-if="generating" class="hint">正在生成，{{ generating === 'compare' ? '对照需要生成两次，' : '' }}请稍候…</div>
           <div v-if="genResult" class="gen-output">
+            <div class="hint">{{ genResult.adapterId ? `微调模型（LoRA · ${adapterName(genResult.adapterId)}）` : '原始基础模型' }}</div>
             <div class="gen-text"><span class="gen-prompt">{{ genResult.prompt }}</span>{{ genResult.text }}</div>
-            <div class="hint">{{ genResult.newTokens }} tokens · {{ genResult.seconds }}s · {{ genResult.tokensPerSecond }} tokens/s</div>
+            <div class="hint">{{ genStats(genResult) }}</div>
+          </div>
+          <div v-if="compareResult" class="compare-grid">
+            <div v-for="side in ['base', 'adapter']" :key="side" class="gen-output">
+              <div class="compare-title">
+                <el-tag :type="side === 'base' ? 'info' : 'warning'" size="small">{{ side === 'base' ? '基础模型' : '微调模型' }}</el-tag>
+                {{ side === 'base' ? modelName(compareResult.base.baseId) : `LoRA · ${adapterName(compareResult.adapter.adapterId)}` }}
+              </div>
+              <div class="gen-text"><span class="gen-prompt">{{ compareResult.prompt }}</span>{{ compareResult[side].text }}</div>
+              <div class="hint">{{ genStats(compareResult[side]) }}</div>
+            </div>
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -333,7 +377,7 @@ import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, FolderAdd, MagicStick, Monitor, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import {
-  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, deleteAdapter, deleteModel, downloadModel, estimate, generate, getInference,
+  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, compareGenerate, deleteAdapter, deleteModel, downloadModel, estimate, generate, getInference,
   getJobLog, getSystem, listAdapters, listJobs, listModels, loadModel, registerModel, renameAdapter,
   startTraining, unloadModel
 } from '@/api/localModel'
@@ -356,8 +400,17 @@ const JOB_STATUS = {
 const COMPAT = {
   ok: { label: '匹配', type: 'success' },
   changed: { label: '基础模型已变更', type: 'warning' },
-  missing: { label: '基础模型缺失', type: 'danger' }
+  missing: { label: '基础模型缺失', type: 'danger' },
+  unverified: { label: '权重未校验', type: 'warning' },
+  'remote-only': { label: '本机无匹配基础模型', type: 'danger' }
 }
+const compatOf = (a) => COMPAT[a.compat] || { label: a.compat, type: 'info' }
+const lossText = (a) => {
+  const ev = a.evaluation || {}
+  const val = ev.status === 'ok' ? ` · 验证 ${ev.evalLossBefore} → ${ev.evalLossAfter}` : ''
+  return `训练 ${a.metrics?.finalLoss ?? '-'}${val}`
+}
+const genStats = (r) => `${r.newTokens} tokens · ${r.seconds}s · ${r.tokensPerSecond} tokens/s${r.seed != null ? ` · 种子 ${r.seed}` : ''}`
 const EST_TYPE = { ok: 'success', warn: 'warning', exceed: 'error' }
 const TEXT_EXTS = ['txt', 'md', 'docx', 'pdf']
 
@@ -597,17 +650,33 @@ async function onDeleteAdapter(row) {
 /* ---------------- 推理 ---------------- */
 const infer = reactive({ baseId: '', adapterId: '', quantization: 'auto' })
 const inferEstimate = ref(null)
-const inferAdapters = computed(() => adapters.value.filter((a) => a.baseModel.id === infer.baseId && a.compat === 'ok'))
-watch(() => [infer.baseId, infer.quantization], async () => {
-  inferEstimate.value = null
-  if (!infer.baseId) return
+// matchedBaseId：registry 校验出的可加载本地基础模型（远程训练的适配器按 config + 权重指纹匹配）
+const inferAdapters = computed(() => adapters.value.filter((a) => a.compat === 'ok' && a.matchedBaseId === infer.baseId))
+const selectedAdapter = computed(() => adapters.value.find((a) => a.id === infer.adapterId) || null)
+const loadLabel = computed(() => {
+  const s = inferState.value
+  if (s?.status !== 'loaded' || s.baseId !== infer.baseId) return '加载'
+  return (infer.adapterId || null) === (s.adapterId || null) ? '重新加载' : '切换'
+})
+// 资源评估随所选基础模型 / 适配器 / 量化，以及加载状态（加载完成、切换、卸载）刷新；序号防止旧请求覆盖新结果
+let estimateSeq = 0
+async function refreshInferEstimate() {
+  const seq = ++estimateSeq
+  if (!infer.baseId) {
+    inferEstimate.value = null
+    return
+  }
   try {
     const q = infer.quantization === 'none' ? 'none' : sys.value?.deps.qloraReady ? '4bit' : 'none'
-    inferEstimate.value = await call(estimate({ baseModelId: infer.baseId, mode: 'infer', quantization: q }), '评估失败')
+    const r = await call(estimate({ baseModelId: infer.baseId, mode: 'infer', quantization: q, adapterId: infer.adapterId || null }), '评估失败')
+    if (seq === estimateSeq) inferEstimate.value = r
   } catch {
-    /* 评估失败不影响使用 */
+    if (seq === estimateSeq) inferEstimate.value = null // 评估失败不影响使用
   }
-})
+}
+watch(() => [infer.baseId, infer.adapterId, infer.quantization], refreshInferEstimate)
+watch(() => [inferState.value?.status, inferState.value?.baseId, inferState.value?.adapterId, inferState.value?.attachedAdapterId],
+  (cur, prev) => { if (String(cur) !== String(prev) && cur[0] !== 'loading') refreshInferEstimate() })
 
 function goInfer(baseId, adapterId = '') {
   infer.baseId = baseId
@@ -621,7 +690,9 @@ function goTrain(baseId) {
 
 async function onLoad() {
   try {
-    inferState.value = await call(loadModel(infer.baseId, infer.adapterId || null, infer.quantization), '加载失败')
+    const s = await call(loadModel(infer.baseId, infer.adapterId || null, infer.quantization), '加载失败')
+    inferState.value = s
+    if (s.switched && s.status === 'loaded') ElMessage.success(s.adapterId ? '已启用适配器（未重新加载基础模型）' : '已切换为原始基础模型（适配器保持挂载、已停用）')
     schedule()
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 6000 })
@@ -636,18 +707,32 @@ async function onUnload() {
   }
 }
 
-const gen = reactive({ prompt: '', maxNewTokens: 200, temperature: 0.8, topP: 0.9, useChatTemplate: false })
-const generating = ref(false)
+const gen = reactive({ prompt: '', maxNewTokens: 200, temperature: 0.8, topP: 0.9, useChatTemplate: false, seed: 1234 })
+const generating = ref('') // '' | 'single' | 'compare'
 const genResult = ref(null)
+const compareResult = ref(null)
 async function onGenerate() {
-  generating.value = true
+  generating.value = 'single'
   try {
     const r = await call(generate({ ...gen, repetitionPenalty: 1.1 }), '生成失败')
     genResult.value = { ...r, prompt: gen.useChatTemplate ? '' : gen.prompt }
+    compareResult.value = null
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 6000 })
   } finally {
-    generating.value = false
+    generating.value = ''
+  }
+}
+async function onCompare() {
+  generating.value = 'compare'
+  try {
+    const r = await call(compareGenerate({ ...gen, repetitionPenalty: 1.1 }), '对照生成失败')
+    compareResult.value = { ...r, prompt: gen.useChatTemplate ? '' : gen.prompt }
+    genResult.value = null
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 6000 })
+  } finally {
+    generating.value = ''
   }
 }
 
@@ -779,6 +864,36 @@ onDeactivated(() => clearTimeout(timer))
 .gen-output,
 .sample-box {
   margin-top: 12px;
+}
+.compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+.compare-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.adapter-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.opt-meta {
+  float: right;
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .gen-text {
   padding: 12px 14px;

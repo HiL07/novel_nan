@@ -109,13 +109,26 @@ class EstimateReq(BaseModel):
     maxSeqLen: int = Field(default=512, ge=64, le=4096)
     batchSize: int = Field(default=1, ge=1, le=16)
     loraR: int = Field(default=16, ge=1, le=256)
+    adapterId: Optional[str] = None  # 推理：要加载的适配器（计入其权重大小）
 
 
 @router.post("/estimate")
 def estimate(req: EstimateReq):
     base = _guard(registry.get_base, req.baseModelId)
+    extra = {}
+    if req.mode == "infer":
+        # 按本服务当前驻留情况估算：同一基础模型已加载 → 只算适配器增量；驻留的是别的模型 → 加载前会释放，计入可用显存
+        st = inference.status()
+        resident = (st["status"] == "loaded" and st["baseId"] == req.baseModelId
+                    and st["quantization"] == req.quantization)
+        adapter_bytes = 0
+        if req.adapterId and not (resident and st["attachedAdapterId"] == req.adapterId):
+            f = _guard(registry.adapter_dir, req.adapterId) / "adapter_model.safetensors"
+            adapter_bytes = f.stat().st_size if f.exists() else 0
+        extra = {"adapter_bytes": adapter_bytes, "resident": resident,
+                 "reclaimable_gb": 0.0 if resident else inference.resident_vram_gb()}
     return ok(hardware.estimate(base, req.mode, quantization=req.quantization, seq_len=req.maxSeqLen,
-                                batch_size=req.batchSize, lora_r=req.loraR))
+                                batch_size=req.batchSize, lora_r=req.loraR, **extra))
 
 
 # ---------------------------------------------------------------- 适配器
@@ -142,7 +155,7 @@ def rename_adapter(adapter_id: str, req: RenameReq):
 @router.post("/adapters/{adapter_id}/delete")
 def delete_adapter(adapter_id: str):
     st = inference.status()
-    if st["adapterId"] == adapter_id and st["status"] in ("loaded", "loading"):
+    if adapter_id in (st["adapterId"], st["attachedAdapterId"]) and st["status"] in ("loaded", "loading"):
         raise LocalError(400, "该适配器正在使用中，请先卸载模型")
     _guard(registry.delete_adapter, adapter_id)
     return ok()
@@ -179,13 +192,24 @@ class GenerateReq(BaseModel):
     topP: float = Field(default=0.9, gt=0, le=1)
     repetitionPenalty: float = Field(default=1.1, ge=1, le=2)
     useChatTemplate: bool = False
+    useAdapter: Optional[bool] = None  # None = 按当前启用状态；true / false = 本次启用 / 停用已挂载的适配器
+    seed: Optional[int] = Field(default=None, ge=0, le=2**31 - 1)
+
+
+def _gen_kwargs(req: GenerateReq) -> dict:
+    return {"max_new_tokens": req.maxNewTokens, "temperature": req.temperature, "top_p": req.topP,
+            "repetition_penalty": req.repetitionPenalty, "use_chat_template": req.useChatTemplate}
 
 
 @router.post("/inference/generate")
 def inference_generate(req: GenerateReq):
-    return ok(_guard(inference.generate, req.prompt, max_new_tokens=req.maxNewTokens, temperature=req.temperature,
-                     top_p=req.topP, repetition_penalty=req.repetitionPenalty,
-                     use_chat_template=req.useChatTemplate))
+    return ok(_guard(inference.generate, req.prompt, use_adapter=req.useAdapter, seed=req.seed, **_gen_kwargs(req)))
+
+
+@router.post("/inference/compare")
+def inference_compare(req: GenerateReq):
+    """同一提示词 + 同一种子分别用基础模型（停用适配器）和微调模型生成；需已加载带适配器的模型。"""
+    return ok(_guard(inference.compare, req.prompt, seed=1234 if req.seed is None else req.seed, **_gen_kwargs(req)))
 
 
 # ---------------------------------------------------------------- 训练任务

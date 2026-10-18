@@ -150,7 +150,8 @@ def _remote_base(t: dict, m: dict, code_dir: str) -> dict:
         "import json, sys\nsys.path.insert(0, sys.argv[1])\nfrom app.local import registry\n"
         "print(json.dumps(registry.inspect_model_dir(sys.argv[2])))\n")
     rec = json.loads(_py(t, script, code_dir, m["path"], timeout=120).strip().splitlines()[-1])
-    rec.update(id=m["id"], name=m["name"], source="remote", origin=m.get("repoId"), targetId=t["id"])
+    rec.update(id=m["id"], name=m["name"], source="remote", origin=m.get("repoId"), targetId=t["id"],
+               configCanonicalHash=registry.canonical_config_hash(ssh.get_bytes(t, f"{m['path']}/config.json", timeout=60)))
     if m.get("manifest"):
         man = json.loads(ssh.get_bytes(t, m["manifest"], timeout=60))
         cfg = next((f for f in man if f["Path"] == "config.json"), {})
@@ -181,14 +182,34 @@ def _prepare_and_launch(job: dict, t: dict, m: dict, rjob: str) -> dict:
     ssh.put_bytes(t, json.dumps(rjob_json, ensure_ascii=False, indent=2).encode("utf-8"), f"{rjob}/job.json")
     _stage(job_id, "launching")
     q = shlex.quote
-    pid = ssh.text(t, f"cd {q(code_dir)} && setsid nohup env {_env(t)} {q(t['python'])} -m app.local.worker {q(job_id)} "
-                      f">> {q(rjob)}/job.log 2>&1 < /dev/null & echo $!", timeout=60).strip()
+    try:
+        pid = ssh.text(t, f"cd {q(code_dir)} && setsid nohup env {_env(t)} {q(t['python'])} -m app.local.worker {q(job_id)} "
+                          f">> {q(rjob)}/job.log 2>&1 < /dev/null & echo $!", timeout=60).strip()
+    except ssh.SSHError as e:
+        # 启动命令本身超时 / 断线时远程 worker 可能已经在跑：以远程 job.json 为准，确认已启动就接管，不能误判失败
+        pid = _confirm_started(t, rjob, job_id, e)
     state = {"targetId": t["id"], "host": t["host"], "remoteJobDir": rjob, "codeDir": code_dir,
              "codeSha": code_dir.rsplit("/", 1)[-1], "launcherPid": pid, "launched": True,
              "launchedAt": jobfiles.now(), "launchedTs": time.time(), "precheck": pre, "baseModel": base}
     jobfiles.update_job(job_id, remote=state)
     _log(f"远程训练已启动 pid={pid}，任务目录 {rjob}")
     return state
+
+
+def _confirm_started(t: dict, rjob: str, job_id: str, err: Exception) -> str:
+    _log(f"启动命令未正常返回（{err}），核对远程任务是否已启动…")
+    deadline = time.time() + START_GRACE_SECONDS
+    while time.time() < deadline:
+        try:
+            r = _poll(t, {"remoteJobDir": rjob}, job_id, 0)
+            rj = r["job"] or {}
+            if rj.get("pid") and (r["alive"] or rj.get("status") in ("succeeded", "failed", "cancelled")):
+                _log(f"远程 worker 已启动（pid {rj['pid']}，状态 {rj.get('status')}），继续跟随")
+                return str(rj["pid"])
+        except (ssh.SSHError, ValueError) as e:
+            _log(f"核对失败，稍后重试：{e}")
+        time.sleep(POLL_SECONDS)
+    raise RuntimeError(f"远程训练启动失败：{START_GRACE_SECONDS}s 内远程任务未启动（{err}），远程目录 {rjob}")
 
 
 # ---------------------------------------------------------------- 轮询 / 取消
@@ -275,7 +296,8 @@ def _register(job: dict, t: dict, state: dict, dl: dict) -> None:
     meta = json.loads((tmp / "meta.json").read_text(encoding="utf-8"))
     meta["source"] = "remote"
     base = state["baseModel"]
-    meta["baseModel"] = {k: base.get(k) for k in ("id", "name", "path", "configHash", "modelType", "architecture",
+    meta["baseModel"] = {k: base.get(k) for k in ("id", "name", "path", "configHash", "configCanonicalHash",
+                                                  "modelType", "architecture",
                                                   "numParams", "source", "origin", "revision", "weightsFingerprint",
                                                   "manifestSource", "targetId")}
     meta["remote"] = {"targetId": t["id"], "host": t["host"], "jobId": job["id"], "remoteAdapterDir": dl["remoteDir"],

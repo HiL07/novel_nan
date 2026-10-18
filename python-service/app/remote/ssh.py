@@ -44,7 +44,9 @@ def run(target: dict, command: str, *, input: bytes | None = None, timeout: floa
         ) -> subprocess.CompletedProcess:
     """在远程执行 bash 命令。返回 CompletedProcess（stdout/stderr 为 bytes）。"""
     try:
-        cp = subprocess.run(base_args(target) + [f"bash -c {shlex.quote(command)}"], input=input,
+        # 没有输入时显式给空 stdin：worker 子进程继承的 stdin 可能让 ssh.exe 一直不结束
+        stdin = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+        cp = subprocess.run(base_args(target) + [f"bash -c {shlex.quote(command)}"], **stdin,
                             capture_output=True, timeout=timeout,
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except subprocess.TimeoutExpired as e:

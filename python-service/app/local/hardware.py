@@ -106,22 +106,41 @@ def _arch(model: dict) -> dict:
 
 
 def estimate(model: dict, mode: str, *, quantization: str = "4bit", seq_len: int = 512, batch_size: int = 1,
-             lora_r: int = 16) -> dict:
+             lora_r: int = 16, adapter_bytes: int = 0, resident: bool = False, reclaimable_gb: float = 0.0) -> dict:
     """估算显存 / 内存需求并与当前可用量比较。
 
     mode: "infer" | "train"；quantization: "4bit"（QLoRA / 4-bit 推理）| "none"（bf16/fp16）
-    返回 {level: ok|warn|exceed, vramNeedGB, vramFreeGB, ramNeedGB, ramFreeGB, messages[]}
+    推理时：adapter_bytes = 要挂载的适配器权重大小（0 = 不用 / 已挂载）；resident = 同一基础模型 + 量化已在本服务中驻留
+    （切换只需适配器的增量）；reclaimable_gb = 本服务中驻留的其他模型占用的显存（加载新模型前会先卸载，计入可用）。
+    返回 {level: ok|warn|exceed, vramNeedGB, vramFreeGB, ramNeedGB, ramFreeGB, messages[], resident, adapterGB}
     """
     params = model.get("numParams") or 0
     a = _arch(model)
     gpu, ram = gpu_info(), ram_info()
+    if gpu and reclaimable_gb:
+        gpu = {**gpu, "freeGB": round(gpu["freeGB"] + reclaimable_gb, 2), "usedGB": round(max(0.0, gpu["usedGB"] - reclaimable_gb), 2)}
     msgs: list[str] = []
 
     weights = params * (0.6 if quantization == "4bit" else 2.0) / GB  # 4-bit 约 0.5 字节/参数 + 量化常量
     cuda_ctx = 0.6
+    adapter_gb = adapter_bytes * 1.1 / GB  # LoRA 权重以 bf16 常驻 + 少量额外结构
+    if mode == "infer" and resident:
+        # 基础模型已驻留：只需挂载适配器（已挂载 / 不用适配器时为 0）；剩余显存已扣除了驻留模型
+        vram_need, ram_need = adapter_gb, adapter_gb
+        level = "ok"
+        if gpu and vram_need > gpu["freeGB"] * settings.SAFETY_RATIO:
+            level = "exceed"
+            msgs.append(f"基础模型已加载；挂载适配器约需 {vram_need:.2f} GB 显存，当前可用约 {gpu['freeGB']:.1f} GB")
+        elif adapter_gb:
+            msgs.append(f"基础模型已加载，切换只需挂载适配器：约 {vram_need:.2f} GB 显存 / 可用 {gpu['freeGB'] if gpu else 0:.1f} GB")
+        else:
+            msgs.append("基础模型已加载，切换无需额外显存（只启用 / 停用已挂载的适配器）")
+        return {"level": level, "vramNeedGB": round(vram_need, 2), "vramFreeGB": gpu["freeGB"] if gpu else 0,
+                "ramNeedGB": round(ram_need, 2), "ramFreeGB": ram["freeGB"], "messages": msgs,
+                "resident": True, "adapterGB": round(adapter_gb, 2)}
     if mode == "infer":
         kv = 2 * a["layers"] * a["hidden"] * 2048 * 2 / GB  # 2k 上下文 KV cache（未考虑 GQA，偏保守）
-        vram_need = weights + cuda_ctx + kv + 0.3
+        vram_need = weights + cuda_ctx + kv + 0.3 + adapter_gb
     else:
         tokens = seq_len * batch_size
         # 梯度检查点下的激活 + fp32 logits（大词表模型的主要开销）+ LoRA 参数/梯度/优化器
@@ -156,6 +175,8 @@ def estimate(model: dict, mode: str, *, quantization: str = "4bit", seq_len: int
         msgs.append("未安装 bitsandbytes，无法使用 QLoRA（4-bit）；请安装或改用 LoRA")
     if not msgs:
         msgs.append(f"资源充足：预计显存 {vram_need:.1f} GB / 可用 {gpu['freeGB']:.1f} GB")
+    if reclaimable_gb:
+        msgs.append(f"已计入当前驻留模型加载前将释放的约 {reclaimable_gb:.1f} GB 显存")
     return {
         "level": level,
         "vramNeedGB": round(vram_need, 2),
@@ -163,4 +184,6 @@ def estimate(model: dict, mode: str, *, quantization: str = "4bit", seq_len: int
         "ramNeedGB": round(ram_need, 2),
         "ramFreeGB": ram["freeGB"],
         "messages": msgs,
+        "resident": False,
+        "adapterGB": round(adapter_gb, 2),
     }

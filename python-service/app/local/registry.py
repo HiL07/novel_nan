@@ -49,6 +49,22 @@ def config_hash(model_dir: Path) -> str:
     return hashlib.sha256((model_dir / "config.json").read_bytes()).hexdigest()[:16]
 
 
+def canonical_config_hash(data: bytes) -> str:
+    """config.json 的内容指纹（解析后排序键）：与换行符 / 缩进无关（Windows git 检出会把 LF 改成 CRLF）。"""
+    return hashlib.sha256(json.dumps(json.loads(data), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def _same_config(rec: dict, base: dict) -> bool:
+    if rec.get("configHash") == base.get("configHash"):
+        return True
+    if not base.get("configCanonicalHash"):
+        return False
+    try:
+        return canonical_config_hash((Path(rec["path"]) / "config.json").read_bytes()) == base["configCanonicalHash"]
+    except (OSError, ValueError):
+        return False
+
+
 def inspect_model_dir(path: str) -> dict:
     """校验并读取 Hugging Face 模型目录：config.json + 权重 + 分词器。"""
     p = Path(path).expanduser()
@@ -138,7 +154,13 @@ def is_managed(rec: dict) -> bool:
 
 # ---------------------------------------------------------------- 适配器
 
+_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")
+
+
 def adapter_dir(adapter_id: str) -> Path:
+    """只接受登记生成的 id 形式（字母数字与 - _），拒绝「..」、路径分隔符等，前端不能借此访问任意目录。"""
+    if not isinstance(adapter_id, str) or not _ID_RE.fullmatch(adapter_id):
+        raise RegistryError(f"非法的适配器 id：{adapter_id!r}")
     return settings.ADAPTER_DIR / adapter_id
 
 
@@ -184,13 +206,14 @@ def _with_compat(meta: dict) -> dict:
     """附加与本地基础模型的匹配状态与可加载的本地基础模型 matchedBaseId。
 
     - 本地训练的适配器：按基础模型 id 匹配；config.json 变了 → changed，基础模型不在 → missing
-    - 远程训练的适配器（baseModel.source == "remote"）：本地须有 configHash 与权重指纹（官方清单 sha256）都一致的模型
-      → ok；只有 configHash 一致、权重指纹未计算 → unverified（不允许加载，需先校验权重）；都没有 → remote-only
+    - 远程训练的适配器（baseModel.source == "remote"）：本地须有 config 一致（原始字节或内容指纹 configCanonicalHash）
+      且权重指纹（官方清单 sha256）一致的模型 → ok；config 一致、权重指纹未计算 → unverified（不允许加载，需先校验权重）；
+      都没有 → remote-only
     """
     base = meta.get("baseModel") or {}
     meta["matchedBaseId"] = None
     if base.get("source") == "remote":
-        same_cfg = [b for b in list_base() if b["exists"] and b.get("configHash") == base.get("configHash")]
+        same_cfg = [b for b in list_base() if b["exists"] and _same_config(b, base)]
         verified = [b for b in same_cfg if b.get("weightsFingerprint")
                     and b["weightsFingerprint"] == base.get("weightsFingerprint")]
         if verified:

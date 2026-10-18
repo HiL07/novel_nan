@@ -27,7 +27,8 @@ export const DOWNLOAD_SOURCES = [
 export const downloadModel = (repoId, name, source = 'auto') => post('/api/local/models/download', { repoId, name, source })
 export const getDownloadSources = () => get('/api/local/models/download/sources')
 export const deleteModel = (id) => post(`/api/local/models/${id}/delete`)
-/** 资源评估：{baseModelId, mode: infer|train, quantization: 4bit|none, maxSeqLen, batchSize, loraR} */
+/** 资源评估：{baseModelId, mode: infer|train, quantization: 4bit|none, maxSeqLen, batchSize, loraR, adapterId?}
+ *  推理时按服务当前驻留情况估算：同一基础模型已加载 → 只算适配器增量（resident: true） */
 export const estimate = (body) => post('/api/local/estimate', body)
 
 /* ---------- LoRA 适配器 ---------- */
@@ -39,8 +40,11 @@ export const deleteAdapter = (id) => post(`/api/local/adapters/${id}/delete`)
 export const getInference = () => get('/api/local/inference')
 export const loadModel = (baseId, adapterId, quantization = 'auto') => post('/api/local/inference/load', { baseId, adapterId, quantization })
 export const unloadModel = () => post('/api/local/inference/unload')
-/** {prompt, maxNewTokens, temperature, topP, repetitionPenalty, useChatTemplate} */
+/** {prompt, maxNewTokens, temperature, topP, repetitionPenalty, useChatTemplate, useAdapter?, seed?}
+ *  useAdapter：不传 = 按当前启用状态；true / false = 本次启用 / 停用已挂载的适配器 */
 export const generate = (body) => post('/api/local/inference/generate', body)
+/** 同一提示词 + 种子：基础模型（停用适配器）与微调模型各生成一次 → {base, adapter}；需已加载带适配器的模型 */
+export const compareGenerate = (body) => post('/api/local/inference/compare', body)
 
 /* ---------- 训练任务 ---------- */
 /** 见 python-service/app/local/router.py TrainReq；资源超限时返回 409（data 为评估结果），可带 force: true 强制开始 */
