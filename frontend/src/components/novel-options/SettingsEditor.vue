@@ -7,6 +7,16 @@
           编辑模式
           <el-switch v-model="editMode" />
         </span>
+        <AiFillSettings
+          v-if="aiEnabled"
+          :cfg="aiCfg"
+          :api-model="ai.apiModel"
+          :local-models="ai.localModels"
+          :adapters="ai.adapters"
+          :blocked-books="blockedBooks"
+          :suggest="aiSuggestHints"
+          @update:blocked-books="setBlockedBooks"
+        />
         <el-button :icon="Collection" @click="openPicker">从素材库添加</el-button>
         <el-button :icon="RefreshLeft" @click="resetAll">重置设定</el-button>
         <slot name="actions" />
@@ -55,6 +65,11 @@
             <div class="cat-title">{{ activeCategory.label }}</div>
             <div v-if="activeCategory.desc" class="cat-desc">{{ activeCategory.desc }}</div>
           </div>
+          <el-tooltip v-if="aiEnabled" content="让 AI 填写本分类中还没填的文本 / 标签 / 选择项（分组用各自的「AI 生成」；数字和滑块请自己定）" placement="top">
+            <el-button :icon="MagicStick" type="primary" plain size="small" :loading="aiBusy === `cat:${activeCategory.key}`" :disabled="!!aiBusy" @click="fillCategory(activeCategory)">
+              AI 补全本分类
+            </el-button>
+          </el-tooltip>
           <template v-if="activeCategory.custom">
             <el-button :icon="Edit" link @click="openCategoryEditor(activeCategory)">编辑</el-button>
             <el-button :icon="Delete" link type="danger" @click="removeCategory(activeCategory)">删除元素</el-button>
@@ -71,6 +86,7 @@
           :field="field"
           :container="values[activeCategory.key]"
           :siblings="activeCategory.fields"
+          :path="[activeCategory.label]"
         />
 
         <el-button
@@ -138,25 +154,33 @@
 <script setup>
 import { computed, onMounted, provide, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Collection, CopyDocument, Delete, Edit, Plus, RefreshLeft } from '@element-plus/icons-vue'
+import { Collection, CopyDocument, Delete, Edit, MagicStick, Plus, RefreshLeft } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import FieldEditor from './FieldEditor.vue'
 import CategoryEditor from './CategoryEditor.vue'
 import SpecTree from './SpecTree.vue'
+import AiFillSettings from './AiFillSettings.vue'
+import { generateIdeas } from '@/api/novelGen'
+import { errorMessage } from '@/api/request'
+import { aiFillable, applyValue, currentValues, fieldSchema } from '@/novel-options/aiFill'
 import { getOptionSchema } from '@/api/novelOptions'
 import { EDITOR_KEY } from '@/novel-options/editor'
 import { applyMaterial } from '@/novel-options/materialApply'
+import { useBlockedBooks } from '@/components/material/blockedBooks'
 import { recordMaterialUse } from '@/api/material'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
-import { buildSpec, clone, initValues, isFilled, specToJson, uid } from '@/novel-options/schema'
+import { buildSpec, clone, initValues, isFilled, newGroupItem, specToJson, uid, upgradeConfig } from '@/novel-options/schema'
 
 /**
  * 小说设定编辑器（原「小说创作」页），嵌在工作区中使用。
  * config：已保存的编辑器配置 {categories, values}，为空则使用默认选项结构。
+ * novelId + ai：开启「AI 填写」（ai = {apiModel, localModels, adapters, model: 工作区的模型配置}）。
  * 通过 ref 调用 getConfig() / getSpec() 取出当前配置与规范化设定；任何改动触发 change 事件。
  */
 const props = defineProps({
-  config: { type: Object, default: null }
+  config: { type: Object, default: null },
+  novelId: { type: String, default: '' },
+  ai: { type: Object, default: null }
 })
 const emit = defineEmits(['change'])
 
@@ -168,6 +192,7 @@ const genericSuggestions = ref([])
 const values = reactive({})
 const activeKey = ref('')
 const editMode = ref(false)
+const schemaVersion = ref(1)
 
 const builtinCategories = computed(() => categories.value.filter((c) => !c.custom))
 const customCategories = computed(() => categories.value.filter((c) => c.custom))
@@ -190,9 +215,10 @@ async function loadSchema(useSaved = true) {
       ElMessage.error(res.message || '加载选项失败')
       return
     }
+    schemaVersion.value = res.data.schemaVersion || 1
     templates.value = res.data.elementTemplates
     genericSuggestions.value = res.data.genericSuggestions
-    const saved = useSaved && props.config?.categories?.length ? clone(props.config) : null
+    const saved = useSaved && props.config?.categories?.length ? upgradeConfig(clone(props.config), res.data) : null
     categories.value = saved ? saved.categories : res.data.categories
     Object.keys(values).forEach((k) => delete values[k])
     categories.value.forEach((c) => (values[c.key] = saved?.values?.[c.key] || initValues(c.fields)))
@@ -206,7 +232,7 @@ async function loadSchema(useSaved = true) {
 watch([categories, values], () => ready && emit('change'), { deep: true })
 
 defineExpose({
-  getConfig: () => clone({ categories: categories.value, values }),
+  getConfig: () => clone({ schemaVersion: schemaVersion.value, categories: categories.value, values }),
   getSpec: () => clone(spec.value)
 })
 
@@ -266,7 +292,184 @@ function removeOption(field, value) {
   field.options = (field.options || []).filter((o) => o.value !== value)
 }
 
-provide(EDITOR_KEY, { editMode, addField, removeField, addOption, removeOption })
+/* ---------------- AI 填写：单个字段 / 分组新增若干项 / 整个分类的未填项 ---------------- */
+const aiEnabled = computed(() => !!props.novelId && !!props.ai)
+// 默认跟随工作区：本地工作区用它的基础模型 + 适配器，否则用大模型
+const aiCfg = reactive({ source: 'api', baseId: '', adapterId: '', hint: '', picked: [], autoMaterials: false })
+watch(() => props.ai?.model, (m) => {
+  if (!m) return
+  Object.assign(aiCfg, {
+    source: m.source === 'local' ? 'local' : 'api',
+    baseId: m.baseId || props.ai.localModels?.[0]?.id || '',
+    adapterId: m.source === 'local' ? m.adapterId || '' : ''
+  })
+}, { immediate: true })
+const aiBusy = ref('') // 正在进行的 AI 请求标识（同一时间只发一个）
+// 屏蔽的来源书（按工作区记住，与「AI 构思」共用）：这些书的素材不参与 AI 填写（保留的素材除外）
+const blockedBooks = useBlockedBooks(props.novelId)
+const setBlockedBooks = (v) => (blockedBooks.value = v)
+
+/** 模型 + 素材 + 屏蔽书：AI 填写 / 试聊 / 出主意共用的请求字段 */
+function aiModelBody() {
+  const local = aiCfg.source === 'local'
+  return {
+    source: aiCfg.source, baseId: local ? aiCfg.baseId : undefined, adapterId: local ? aiCfg.adapterId || null : undefined,
+    materialIds: aiCfg.picked.map((m) => m.id), excludeBooks: blockedBooks.value, spec: spec.value
+  }
+}
+
+function aiModelReady() {
+  if (aiCfg.source !== 'local' && !props.ai.apiModel) {
+    ElMessage.warning('没有可用的大模型：请在「模型配置」中启用，或在「AI 填写设置」里改用本地模型')
+    return false
+  }
+  if (aiCfg.source === 'local' && !aiCfg.baseId) {
+    ElMessage.warning('请在「AI 填写设置」里选择本地模型')
+    return false
+  }
+  return true
+}
+
+/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面 */
+async function aiCall(fill, busyKey, extraHint = '') {
+  if (aiBusy.value) {
+    ElMessage.warning('上一个 AI 请求还没完成')
+    return null
+  }
+  if (!aiModelReady()) return null
+  const hint = [extraHint.trim(), aiCfg.hint.trim()].filter(Boolean).join('；').slice(0, 500)
+  if (aiCfg.autoMaterials && !hint) {
+    ElMessage.warning('自动匹配素材需要在「AI 填写设置」里填写补充要求')
+    return null
+  }
+  aiBusy.value = busyKey
+  try {
+    const res = await generateIdeas(props.novelId, {
+      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: aiCfg.autoMaterials
+    })
+    if (res.code !== 0) throw new Error(res.message || 'AI 填写失败')
+    return res.data.result
+  } catch (e) {
+    ElMessage.error({ message: errorMessage(e, 'AI 填写失败'), duration: 8000 })
+    return null
+  } finally {
+    aiBusy.value = ''
+  }
+}
+
+const busyKeyOf = (path, field) => `${path.join('/')}|${field.key}`
+
+/** 填写单个字段（已有内容时先确认覆盖）；siblings：同一容器的字段，用来告诉模型已填的内容 */
+async function aiFillField(field, container, siblings, path) {
+  if (isFilled(field, container)) {
+    try {
+      await ElMessageBox.confirm(`「${field.label}」已有内容，用 AI 生成的内容覆盖？`, 'AI 填写', { type: 'warning' })
+    } catch {
+      return
+    }
+  }
+  const r = await aiCall({ mode: 'field', path, fields: [fieldSchema(field)], current: currentValues(siblings, container, field.key) },
+    busyKeyOf(path, field))
+  if (!r) return
+  if (applyValue(field, container, r.values?.[field.key], addOption)) ElMessage.success(`AI 已填写「${field.label}」`)
+  else ElMessage.warning('模型没有给出这个字段的内容，请重试')
+}
+
+/** 分组新增 count 项（如关键情节节点、角色），每项的文本 / 标签 / 选择字段都由 AI 填写；
+ *  concept：一句话构想（如「嘴硬心软的女剑客，主角的宿敌」），按它来设计 */
+async function aiGenItems(field, list, path, count, concept = '') {
+  const fields = (field.fields || []).filter(aiFillable)
+  if (!fields.length) {
+    ElMessage.warning(`「${field.label}」的字段都不能由 AI 填写`)
+    return
+  }
+  const nameField = (field.fields || []).find((f) => f.type === 'text')
+  const label = field.itemLabel || '项'
+  const r = await aiCall({
+    mode: 'items', path: [...path, field.label], itemLabel: label, count, fields: fields.map(fieldSchema),
+    existing: nameField ? list.map((it) => it[nameField.key]).filter(Boolean) : []
+  }, busyKeyOf(path, field), concept ? `${label}构想：${concept}` : '')
+  if (!r) return []
+  const added = []
+  for (const it of r.items || []) {
+    const item = newGroupItem(field)
+    fields.forEach((f) => applyValue(f, item, it[f.key], addOption))
+    list.push(item)
+    added.push(item)
+  }
+  ElMessage.success(`AI 新增了 ${added.length} 个${label}，可继续修改`)
+  return added
+}
+
+/** 补全分组中某一项（如某个角色）还没填的文本 / 标签 / 选择字段 */
+async function aiFillItem(field, item, path) {
+  const targets = (field.fields || []).filter((f) => aiFillable(f) && !isFilled(f, item))
+  if (!targets.length) {
+    ElMessage.info('这一项能由 AI 填写的字段都已填写')
+    return
+  }
+  const r = await aiCall({ mode: 'category', path, fields: targets.map(fieldSchema), current: currentValues(field.fields, item) },
+    `item:${item._id}`)
+  if (!r) return
+  const filled = targets.filter((f) => applyValue(f, item, r.values?.[f.key], addOption))
+  ElMessage.success(`AI 补全了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)
+}
+
+/**
+ * 角色试聊（character.ai 式）：character = {name, card: {字段名: 展示值}}，messages = [{role: user|assistant, content}]。
+ * 返回角色的回复文本；失败返回 null。试聊有自己的忙碌状态，不占用 AI 填写。
+ */
+async function aiChat(character, messages, { scene = '', userRole = '' } = {}) {
+  if (!aiModelReady()) return null
+  try {
+    const res = await generateIdeas(props.novelId, {
+      ...aiModelBody(), materialIds: [], kind: 'chat', chat: { character, messages, scene, userRole }
+    })
+    if (res.code !== 0) throw new Error(res.message || '试聊失败')
+    return res.data.result.reply
+  } catch (e) {
+    ElMessage.error({ message: errorMessage(e, '试聊失败'), duration: 8000 })
+    return null
+  }
+}
+
+/** 「AI 填写设置」里的补充要求：让 AI 给几个方向（已有内容时在其基础上细化） */
+async function aiSuggestHints(current) {
+  if (!aiModelReady()) return []
+  try {
+    const res = await generateIdeas(props.novelId, {
+      ...aiModelBody(), kind: 'direction', hint: (current || '').trim(), count: 5, purpose: '补全小说设定（世界观 / 角色 / 情节）时的补充要求'
+    })
+    if (res.code !== 0) throw new Error(res.message || 'AI 生成失败')
+    return res.data.result.directions || []
+  } catch (e) {
+    ElMessage.error({ message: errorMessage(e, 'AI 生成失败'), duration: 8000 })
+    return []
+  }
+}
+
+/** 补全分类中还没填写的文本 / 标签 / 选择字段 */
+async function fillCategory(cat) {
+  const container = values[cat.key]
+  const targets = cat.fields.filter((f) => aiFillable(f) && !isFilled(f, container))
+  if (!targets.length) {
+    ElMessage.info('本分类能由 AI 填写的项都已填写（分组请用各自的「AI 生成」，数字 / 滑块请自己设置）')
+    return
+  }
+  const r = await aiCall({ mode: 'category', path: [cat.label], fields: targets.map(fieldSchema), current: currentValues(cat.fields, container) },
+    `cat:${cat.key}`)
+  if (!r) return
+  const filled = targets.filter((f) => applyValue(f, container, r.values?.[f.key], addOption))
+  ElMessage.success(`AI 填写了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)
+}
+
+provide(EDITOR_KEY, {
+  editMode, addField, removeField, addOption, removeOption,
+  ai: {
+    enabled: aiEnabled, busy: aiBusy, busyKeyOf, fillField: aiFillField, genItems: aiGenItems, fillItem: aiFillItem,
+    chat: aiChat, cfg: aiCfg, apiModel: computed(() => props.ai?.apiModel)
+  }
+})
 
 function addCategoryField() {
   const cat = activeCategory.value

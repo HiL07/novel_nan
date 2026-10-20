@@ -69,3 +69,15 @@ def text(job_id: str):
 def release(job_id: str):
     service.release(job_id)
     return ok()
+
+
+@router.get("/checkpoints/{key}")
+def checkpoint_info(key: str):
+    """断点概况（已保存几章），供「继续抓取」前展示。"""
+    return ok(_guard(service.checkpoint_info, key))
+
+
+@router.post("/checkpoints/{key}/delete")
+def discard_checkpoint(key: str):
+    _guard(service.discard_checkpoint, key)
+    return ok()

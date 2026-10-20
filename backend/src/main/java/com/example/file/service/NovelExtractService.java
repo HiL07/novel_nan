@@ -150,6 +150,53 @@ public class NovelExtractService {
         return task;
     }
 
+    /**
+     * 手动修改提取结果（AI 生成的章节摘要 / 人物 / 事件等都可以改）：整体替换结果 JSON（须为对象且含 chapters 数组），
+     * 重写结果文件并更新 SHA-256 / 大小 / 章节数，结果里记 editedAt。数据库更新失败时把原文件写回。
+     */
+    public NovelExtract updateResult(Long id, Map<String, Object> result) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        if (!NovelExtract.SUCCEEDED.equals(task.getStatus()) || task.getResultPath() == null) {
+            throw new BizException(400, "只能修改已完成的提取结果");
+        }
+        if (result == null || !(result.get("chapters") instanceof List<?> chapters)) {
+            throw new BizException(400, "提取结果格式不正确（缺少 chapters）");
+        }
+        ExtractResultStore.Loaded old = resultStore.read(task.getResultPath(), task.getResultSha256());
+        if (old.json() == null) {
+            throw new BizException(400, "原提取结果无法读取：" + old.problem());
+        }
+        result.put("editedAt", LocalDateTime.now().withNano(0).toString().replace('T', ' '));
+        ExtractResultStore.Stored stored;
+        try {
+            stored = resultStore.write(id, objectMapper.writeValueAsString(result));
+        } catch (Exception e) {
+            log.error("保存修改后的提取结果失败，taskId={}", id, e);
+            throw new BizException(500, "保存失败：" + e.getMessage());
+        }
+        NovelExtract patch = new NovelExtract();
+        patch.setId(id);
+        patch.setResultPath(stored.relativePath());
+        patch.setResultSize(stored.size());
+        patch.setResultSha256(stored.sha256());
+        patch.setChapterCount(chapters.size());
+        patch.setUpdateTime(LocalDateTime.now());
+        try {
+            extractMapper.updateById(patch);
+        } catch (RuntimeException e) {
+            try {
+                resultStore.write(id, old.json()); // 与数据库里的 SHA-256 保持一致
+            } catch (Exception restoreError) {
+                log.error("回写原提取结果失败，taskId={}", id, restoreError);
+            }
+            throw e;
+        }
+        return getById(id);
+    }
+
     private void run(Long taskId, FileInfo file, String ext, AiModelConfig model, Map<String, Object> materials) {
         try {
             JsonNode job = aiClient.submitExtract(file.getId(), ext, model, materials);

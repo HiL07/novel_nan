@@ -90,7 +90,7 @@ public class NovelCrawlService {
         int n = crawlMapper.update(null, new LambdaUpdateWrapper<NovelCrawl>()
                 .in(NovelCrawl::getStatus, NovelCrawl.QUEUED, NovelCrawl.RUNNING)
                 .set(NovelCrawl::getStatus, NovelCrawl.FAILED)
-                .set(NovelCrawl::getMessage, "服务重启，任务中断，请重新抓取")
+                .set(NovelCrawl::getMessage, "服务重启，任务中断；已抓的章节已保存，可点「继续抓取」从断点接着抓")
                 .set(NovelCrawl::getUpdateTime, now));
         int books = bookMapper.update(null, new LambdaUpdateWrapper<NovelCrawlBook>()
                 .in(NovelCrawlBook::getStatus, NovelCrawlBook.QUEUED, NovelCrawlBook.RUNNING)
@@ -162,9 +162,9 @@ public class NovelCrawlService {
         Long taskId = task.getId();
         executor.submit(() -> {
             if (site) {
-                runSite(taskId, body);
+                runSite(taskId, body, null);
             } else {
-                run(taskId, body);
+                run(taskId, body, null);
             }
         });
         return decorate(task);
@@ -187,6 +187,117 @@ public class NovelCrawlService {
         } catch (JsonProcessingException e) {
             throw new BizException(400, "任务参数损坏，无法重新抓取");
         }
+    }
+
+    /**
+     * 从断点继续（同一任务，不新建）：失败 / 取消 / 服务重启中断的任务都可以继续。
+     * 每次抓取都带 resumeKey，Python 逐章把正文写入 data/crawl-cache/&lt;key&gt;/，所以已抓的章节不会重抓，
+     * 目录页失效也能用断点里的章节清单抓完剩下的；整站任务跳过已成功的书，其余逐本续抓。
+     *
+     * @param newOrigin 站点换了域名 / IP（路径不变）时填新的 http(s)://host[:port]，旧站点下的地址整体替换；可空
+     */
+    public NovelCrawl resume(Long id, String newOrigin) {
+        NovelCrawl task = getById(id);
+        boolean site = NovelCrawl.MODE_SITE.equals(task.getMode());
+        if (NovelCrawl.QUEUED.equals(task.getStatus()) || NovelCrawl.RUNNING.equals(task.getStatus())) {
+            throw new BizException(400, "任务正在进行中");
+        }
+        if (NovelCrawl.SUCCEEDED.equals(task.getStatus()) && (!site || task.getBookDone() >= task.getBookTotal())) {
+            throw new BizException(400, "任务已完成，无需继续");
+        }
+        String origin = normalizeOrigin(newOrigin);
+        Map<String, Object> body;
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> options = objectMapper.readValue(task.getOptions(), Map.class);
+            body = options;
+        } catch (JsonProcessingException e) {
+            throw new BizException(400, "任务参数损坏，无法继续，请改参数后重新抓取");
+        }
+        if (origin != null) {
+            String oldOrigin = originOf(task.getUrl());
+            String url = replaceOrigin(task.getUrl(), oldOrigin, origin);
+            body.put("url", url);
+            if (body.get("books") instanceof List<?> list) {
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> m && m.get("tocUrl") instanceof String toc) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> book = (Map<String, Object>) m;
+                        book.put("tocUrl", replaceOrigin(toc, oldOrigin, origin));
+                    }
+                }
+            }
+            NovelCrawl patch = patch(id, null, null, null);
+            patch.setUrl(url);
+            patch.setOptions(toJson(body));
+            crawlMapper.updateById(patch);
+            for (NovelCrawlBook book : listBooks(id)) {
+                if (!NovelCrawlBook.SUCCEEDED.equals(book.getStatus())) {
+                    NovelCrawlBook bp = new NovelCrawlBook();
+                    bp.setId(book.getId());
+                    bp.setTocUrl(replaceOrigin(book.getTocUrl(), oldOrigin, origin));
+                    bookMapper.updateById(bp);
+                }
+            }
+            log.info("抓取任务 {} 换站点地址续抓：{} → {}", id, oldOrigin, origin);
+        }
+        if (site) {
+            bookMapper.update(null, new LambdaUpdateWrapper<NovelCrawlBook>()
+                    .eq(NovelCrawlBook::getCrawlId, id)
+                    .ne(NovelCrawlBook::getStatus, NovelCrawlBook.SUCCEEDED)
+                    .set(NovelCrawlBook::getStatus, NovelCrawlBook.QUEUED)
+                    .set(NovelCrawlBook::getMessage, "排队中（继续抓取）")
+                    .set(NovelCrawlBook::getUpdateTime, LocalDateTime.now()));
+        }
+        update(id, NovelCrawl.QUEUED, null, "排队中（从断点继续）");
+        executor.submit(() -> {
+            if (site) {
+                runSite(id, body, origin);
+            } else {
+                run(id, body, origin);
+            }
+        });
+        return getById(id);
+    }
+
+    /**
+     * 断点概况：单本 → 该任务的断点；整站 → 未完成的书的断点汇总。
+     * → {chapterSaved, chapterTotal, booksWithCheckpoint, booksPending, url}
+     */
+    public Map<String, Object> checkpoint(Long id) {
+        NovelCrawl task = getById(id);
+        Map<String, Object> out = new LinkedHashMap<>();
+        int saved = 0, total = 0, withCp = 0, pending = 0;
+        List<String> keys = new ArrayList<>();
+        if (NovelCrawl.MODE_SITE.equals(task.getMode())) {
+            for (NovelCrawlBook book : listBooks(id)) {
+                if (!NovelCrawlBook.SUCCEEDED.equals(book.getStatus())) {
+                    pending++;
+                    keys.add(resumeKey(id, book.getId()));
+                }
+            }
+        } else {
+            keys.add(resumeKey(id, null));
+        }
+        for (String key : keys) {
+            JsonNode info = callPython(() -> aiClient.crawlCheckpoint(key));
+            if (info != null && info.path("exists").asBoolean()) {
+                withCp++;
+                saved += info.path("chapterSaved").asInt();
+                total += info.path("chapterTotal").asInt();
+                out.putIfAbsent("url", info.path("url").asText());
+            }
+        }
+        out.put("chapterSaved", saved);
+        out.put("chapterTotal", total);
+        out.put("booksWithCheckpoint", withCp);
+        out.put("booksPending", pending);
+        return out;
+    }
+
+    /** 断点 key：单本 c&lt;任务id&gt;，整站每本 c&lt;任务id&gt;b&lt;书籍id&gt;（Python 校验 [A-Za-z0-9_-]） */
+    private static String resumeKey(Long taskId, Long bookId) {
+        return bookId == null ? "c" + taskId : "c" + taskId + "b" + bookId;
     }
 
     /** 取消进行中的任务（Python 在当前章节结束后停止；已保存的 txt 保留） */
@@ -248,9 +359,15 @@ public class NovelCrawlService {
 
     // ---------------------------------------------------------------- 单本抓取
 
-    private void run(Long taskId, Map<String, Object> body) {
+    private void run(Long taskId, Map<String, Object> options, String newOrigin) {
         if (NovelCrawl.CANCELLED.equals(crawlMapper.selectById(taskId).getStatus())) {
             return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>(options);
+        body.remove("mode");
+        body.put("resumeKey", resumeKey(taskId, null));
+        if (newOrigin != null) {
+            body.put("newOrigin", newOrigin);
         }
         try {
             JsonNode job = aiClient.submitCrawl(body).path("data");
@@ -267,7 +384,7 @@ public class NovelCrawlService {
             poll(taskId, jobId);
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，crawlId={}", taskId, e);
-            update(taskId, NovelCrawl.FAILED, null, "AI 服务不可达，请确认 python-service 已启动");
+            update(taskId, NovelCrawl.FAILED, null, "AI 服务不可达，请确认 python-service 已启动后「继续抓取」");
         } catch (RestClientResponseException e) {
             log.error("AI 服务拒绝抓取任务，crawlId={}，HTTP {}", taskId, e.getStatusCode().value());
             update(taskId, NovelCrawl.FAILED, null, "AI 服务拒绝任务：" + pythonMessage(e));
@@ -286,7 +403,7 @@ public class NovelCrawlService {
                 job = aiClient.getCrawlJob(jobId).path("data");
                 unreachable = 0;
             } catch (HttpClientErrorException.NotFound e) {
-                update(taskId, NovelCrawl.FAILED, null, "AI 服务已重启，任务丢失，请重新抓取");
+                update(taskId, NovelCrawl.FAILED, null, "AI 服务已重启，任务中断；已抓的章节已保存，可「继续抓取」");
                 return;
             } catch (ResourceAccessException e) {
                 if (++unreachable >= MAX_UNREACHABLE) {
@@ -343,7 +460,7 @@ public class NovelCrawlService {
 
     // ---------------------------------------------------------------- 整站抓取（copybook 式）
 
-    private void runSite(Long taskId, Map<String, Object> body) {
+    private void runSite(Long taskId, Map<String, Object> body, String newOrigin) {
         NovelCrawl task = crawlMapper.selectById(taskId);
         if (task == null || NovelCrawl.CANCELLED.equals(task.getStatus())) {
             return;
@@ -358,10 +475,24 @@ public class NovelCrawlService {
         Integer cap = intOrNull(body.get("maxChaptersPerBook"));
         int total = books.size();
         int done = 0, failed = 0, chapters = 0, chapterFailed = 0, words = 0;
-        update(taskId, NovelCrawl.RUNNING, 0, "整站抓取：共 " + total + " 本，开始");
-        log.info("整站抓取开始 crawlId={} 共 {} 本", taskId, total);
+        // 继续抓取：已成功的书不再抓，统计直接计入
+        for (NovelCrawlBook book : books) {
+            if (NovelCrawlBook.SUCCEEDED.equals(book.getStatus())) {
+                done++;
+                chapters += nz(book.getChapterTotal());
+                chapterFailed += nz(book.getChapterFailed());
+                words += nz(book.getWordCount());
+            }
+        }
+        update(taskId, NovelCrawl.RUNNING, done * 100 / total, done > 0
+                ? "整站抓取：从断点继续，已完成 " + done + "/" + total + " 本"
+                : "整站抓取：共 " + total + " 本，开始");
+        log.info("整站抓取开始 crawlId={} 共 {} 本，已完成 {} 本", taskId, total, done);
         try {
             for (NovelCrawlBook book : books) {
+                if (NovelCrawlBook.SUCCEEDED.equals(book.getStatus())) {
+                    continue;
+                }
                 if (siteCancels.contains(taskId)) {
                     patchBook(book.getId(), NovelCrawlBook.CANCELLED, null, "已取消");
                     break;
@@ -371,6 +502,10 @@ public class NovelCrawlService {
                 patchBook(book.getId(), NovelCrawlBook.RUNNING, 0, "提交中…");
                 Map<String, Object> jobBody = new LinkedHashMap<>(base);
                 jobBody.put("url", book.getTocUrl());
+                jobBody.put("resumeKey", resumeKey(taskId, book.getId()));
+                if (newOrigin != null) {
+                    jobBody.put("newOrigin", newOrigin);
+                }
                 jobBody.put("startIndex", 1);
                 if (cap != null && cap > 0) {
                     jobBody.put("endIndex", cap);
@@ -402,7 +537,7 @@ public class NovelCrawlService {
                     releaseQuietly(jobId);
                 } catch (HttpClientErrorException.NotFound e) {
                     failed++;
-                    patchBook(book.getId(), NovelCrawlBook.FAILED, null, "AI 服务已重启，任务丢失");
+                    patchBook(book.getId(), NovelCrawlBook.FAILED, null, "AI 服务已重启，任务中断（进度已保存，可继续抓取）");
                 } catch (Exception e) {
                     failed++;
                     log.error("整站抓取《{}》失败，crawlId={}", label, taskId, e);
@@ -422,7 +557,7 @@ public class NovelCrawlService {
 
             if (siteCancels.contains(taskId)) {
                 update(taskId, NovelCrawl.CANCELLED, null,
-                        "已取消：完成 " + done + "/" + total + " 本（已抓到的书保留为文件）");
+                        "已取消：完成 " + done + "/" + total + " 本（已抓到的书保留为文件，进度已保存，可继续抓取）");
                 return;
             }
             int ok = countBooks(taskId, NovelCrawlBook.SUCCEEDED);
@@ -683,6 +818,43 @@ public class NovelCrawlService {
         } catch (JsonProcessingException e) {
             throw new BizException(400, "抓取参数无法序列化");
         }
+    }
+
+    private static int nz(Integer value) {
+        return value == null ? 0 : value;
+    }
+
+    /** 新站点地址 → scheme://host[:port]（小写 scheme），空 → null */
+    private static String normalizeOrigin(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String origin = originOf(value.trim());
+        if (origin == null) {
+            throw new BizException(400, "新站点地址请填 http(s)://域名[:端口]，如 https://www.example.net");
+        }
+        return origin;
+    }
+
+    private static String originOf(String url) {
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
+            if (!("http".equals(scheme) || "https".equals(scheme)) || uri.getRawAuthority() == null) {
+                return null;
+            }
+            return scheme + "://" + uri.getRawAuthority();
+        } catch (java.net.URISyntaxException e) {
+            return null;
+        }
+    }
+
+    /** url 在 oldOrigin 下时换成 newOrigin（路径、参数不变），否则原样返回 */
+    private static String replaceOrigin(String url, String oldOrigin, String newOrigin) {
+        if (url == null || oldOrigin == null || !oldOrigin.equalsIgnoreCase(originOf(url))) {
+            return url;
+        }
+        return newOrigin + url.substring(oldOrigin.length());
     }
 
     private static Integer intOrNull(Object value) {

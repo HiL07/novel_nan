@@ -11,6 +11,11 @@
       <el-form-item label="概括"><el-input v-model="form.summary" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" maxlength="300" show-word-limit /></el-form-item>
       <el-form-item label="属性"><AttributeEditor v-model="form.attributes" :category="form.category" style="width: 100%" /></el-form-item>
       <el-form-item label="标签"><el-input-tag v-model="form.tags" placeholder="回车添加" :max="12" /></el-form-item>
+      <el-form-item label="来源书">
+        <el-input v-model="form.sourceBook" placeholder="空 = 手动添加；填书名可按书筛选 / 屏蔽 / 删除" maxlength="100" style="width: 280px" />
+        <el-checkbox v-model="form.pinned" class="pin-check">保留</el-checkbox>
+        <div class="pin-tip">保留的素材不会被「按来源书删除」删掉，在 AI 生成中屏蔽它的来源书时也照常可用</div>
+      </el-form-item>
       <el-form-item label="详细">
         <el-input v-model="form.detail" type="textarea" :autosize="{ minRows: 4, maxRows: 12 }" placeholder="详细描述、备注、用法设想…" />
       </el-form-item>
@@ -46,7 +51,10 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'saved', 'deleted'])
 
-const blank = () => ({ id: null, category: props.defaultCategory || 'world', subtype: '', title: '', summary: '', attributes: {}, tags: [], detail: '', source: null })
+const blank = () => ({
+  id: null, category: props.defaultCategory || 'world', subtype: '', title: '', summary: '', attributes: {}, tags: [], detail: '',
+  source: null, sourceBook: '', pinned: false
+})
 const form = reactive(blank())
 const saving = ref(false)
 
@@ -62,7 +70,7 @@ async function onSave() {
   if (!form.title.trim()) return ElMessage.warning('请填写名称')
   saving.value = true
   try {
-    const res = await saveMaterial({ ...form, tags: form.tags || [] })
+    const res = await saveMaterial({ ...form, tags: form.tags || [], sourceBook: form.sourceBook || '', pinned: !!form.pinned })
     if (res.code !== 0) throw new Error(res.message)
     ElMessage.success('已保存')
     emit('saved', res.data)
@@ -96,6 +104,15 @@ async function onDelete() {
 .source {
   font-size: 13px;
   color: #606266;
+}
+.pin-check {
+  margin-left: 12px;
+}
+.pin-tip {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #909399;
 }
 .excerpt {
   margin-top: 4px;

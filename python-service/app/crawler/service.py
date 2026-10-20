@@ -1,10 +1,12 @@
-"""目录预览与抓取任务。任务只在内存中（同提取任务）：Java 轮询状态，成功后取走全文存入文件管理，再通知释放。
+"""目录预览与抓取任务。任务状态在内存中（同提取任务）：Java 轮询状态，成功后取走全文存入文件管理，再通知释放。
+带 resumeKey 的任务逐章写断点（checkpoint.py），进程关闭 / 断网 / 换域名后可从断点继续。
 
 与 copybook 的差异：copybook 用 scrapy 并发爬整站、每章一条记录直接写 sqlite；
 这里一次只抓一本、单线程限速、章节顺序天然有序，失败章节留占位继续，结果合成一份 txt。
 """
 import logging
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -13,8 +15,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
-from . import parser, rules
-from .fetcher import CrawlError, Fetcher, check_url
+from . import checkpoint, parser, rules
+from .fetcher import CrawlError, Fetcher, NetworkError, check_url
 from .rules import CrawlRule
 
 log = logging.getLogger("crawler")
@@ -24,6 +26,7 @@ MAX_SUB_PAGES = 20          # 一章内分页上限
 MAX_CHAPTERS = 5000         # 单任务章节上限
 MAX_CONSECUTIVE_FAILS = 10  # 连续失败这么多章即判定被封 / 规则不对，终止任务
 KEEP_TEXTS = 3              # 内存中最多保留几份未取走的全文
+NETWORK_WAITS = (10, 20, 30, 60, 60, 120)  # 断网 / 站点暂时不可达时，同一章的等待重试间隔（秒，共约 5 分钟）
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
@@ -39,6 +42,10 @@ class CrawlOptions(BaseModel):
 class CrawlRequest(CrawlOptions):
     startIndex: int = Field(default=1, ge=1)          # 抓取范围（目录中的序号，1 起，含两端）
     endIndex: Optional[int] = Field(default=None, ge=1)
+    # 断点 key（Java 生成，见 checkpoint.py）。有断点时沿用断点里的章节清单与范围，已抓的章节不再请求
+    resumeKey: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # 站点换了域名 / IP（路径不变）：把断点和入口里旧站点下的地址整体换到这个 scheme://host[:port]
+    newOrigin: Optional[str] = Field(default=None, max_length=300)
 
 
 class SiteOptions(BaseModel):
@@ -70,6 +77,8 @@ class CrawlJob(BaseModel):
     chapterFailed: int = 0
     failedChapters: list[str] = Field(default_factory=list)  # 前 50 个失败章节「标题：原因」
     wordCount: int = 0
+    resumeKey: Optional[str] = None
+    resumedChapters: int = 0   # 从断点直接复用的章节数
     createTime: datetime = Field(default_factory=datetime.now)
     finishTime: Optional[datetime] = None
 
@@ -240,12 +249,23 @@ def _strip_title(text: str, title: str) -> str:
 # ---------------------------------------------------------------- 任务
 
 def submit(req: CrawlRequest) -> CrawlJob:
-    url = check_url(req.url)
+    saved = checkpoint.load(req.resumeKey) if req.resumeKey else None
+    if req.newOrigin:
+        req.newOrigin = _origin_only(req.newOrigin)
+        req.url = checkpoint.rewrite_origin(req.url, checkpoint.origin_of(req.url), req.newOrigin)
     if req.endIndex is not None and req.endIndex < req.startIndex:
         raise ValueError("结束章节不能小于起始章节")
+    # 有断点时不依赖入口地址（目录页失效 / 域名解析失败也能续抓），地址问题留给具体章节处理
+    url = req.url.strip() if saved else check_url(req.url)
     preset_key, rule = rules.resolve(req.preset, req.rule, urlsplit(url).hostname or "")
-    job = CrawlJob(jobId=uuid.uuid4().hex, url=url, preset=preset_key, message="排队中")
     with _lock:
+        if req.resumeKey:
+            # Java 重启后再次续抓，而上一次的任务其实还在跑：直接接管它，避免同一断点被两个任务同时写
+            for old in _jobs.values():
+                if old.resumeKey == req.resumeKey and old.status in ("queued", "running"):
+                    return old
+        job = CrawlJob(jobId=uuid.uuid4().hex, url=url, preset=preset_key, message="排队中",
+                       resumeKey=req.resumeKey)
         _jobs[job.jobId] = job
         _evict()
     _executor.submit(_run, job, req, rule)
@@ -269,9 +289,39 @@ def cancel(job_id: str) -> Optional[CrawlJob]:
 
 
 def release(job_id: str) -> None:
-    """Java 已保存全文后调用，释放内存。"""
+    """Java 已保存全文后调用，释放内存；成功任务的断点随之删除。"""
     with _lock:
         _texts.pop(job_id, None)
+        job = _jobs.get(job_id)
+    if job and job.resumeKey and job.status == "succeeded":
+        checkpoint.remove(job.resumeKey)
+
+
+def checkpoint_info(key: str) -> dict:
+    """断点概况 → {exists, url, bookName, chapterTotal, chapterSaved}"""
+    saved = checkpoint.load(key)
+    if not saved:
+        return {"exists": False}
+    meta = saved["meta"]
+    return {"exists": True, "url": meta.get("url"), "bookName": meta.get("bookName"),
+            "chapterTotal": len(meta.get("chapters") or []), "chapterSaved": len(saved["done"])}
+
+
+def discard_checkpoint(key: str) -> None:
+    """放弃断点（从头重新抓取时）。正在使用该断点的任务结束前不删除。"""
+    with _lock:
+        if any(j.resumeKey == key and j.status in ("queued", "running") for j in _jobs.values()):
+            raise ValueError("该断点正在被抓取任务使用，请先取消任务")
+    checkpoint.remove(key)
+
+
+def _origin_only(value: str) -> str:
+    parts = urlsplit(value.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("新站点地址请填 http(s)://域名[:端口]，如 https://www.example.net")
+    origin = f"{parts.scheme}://{parts.netloc}"
+    check_url(origin + "/")
+    return origin
 
 
 def _evict() -> None:
@@ -285,36 +335,41 @@ def _evict() -> None:
 
 def _run(job: CrawlJob, req: CrawlRequest, rule: CrawlRule) -> None:
     job.status = "running"
+    chapter_log = None
     try:
         with Fetcher(req.delayMs, req.respectRobots, rule.encoding) as f:
             if job.jobId in _cancel:
                 raise _Cancelled()
-            job.message = "解析目录…"
-            toc = _load_toc(f, job.url, rule)
-            job.bookName, job.author = toc["bookName"] or "未命名小说", toc["author"]
-            chapters = toc["chapters"][req.startIndex - 1: req.endIndex]
-            if not chapters:
-                raise CrawlError(f"所选范围内没有章节（目录共 {len(toc['chapters'])} 章）")
-            if len(chapters) > MAX_CHAPTERS:
-                raise CrawlError(f"一次最多抓取 {MAX_CHAPTERS} 章，请缩小范围")
+            toc, chapters, done = _plan(job, req, f, rule)
+            if job.resumeKey:
+                chapter_log = checkpoint.ChapterLog(job.resumeKey)
             job.chapterTotal = len(chapters)
             body, streak = [], 0
             for i, ch in enumerate(chapters, 1):
                 if job.jobId in _cancel:
                     raise _Cancelled()
-                job.message = f"抓取第 {i}/{len(chapters)} 章：{ch['title']}"
-                try:
-                    text = _load_chapter(f, ch, rule, job.url)
-                    streak = 0
+                if (i - 1) in done:
+                    text = done[i - 1]
+                    job.resumedChapters += 1
                     job.wordCount += sum(1 for c in text if not c.isspace())
-                except (CrawlError, ValueError) as e:
-                    streak += 1
-                    job.chapterFailed += 1
-                    if len(job.failedChapters) < 50:
-                        job.failedChapters.append(f"{ch['title']}：{e}")
-                    text = f"（本章抓取失败：{e}）"
-                    if streak >= MAX_CONSECUTIVE_FAILS:
-                        raise CrawlError(f"连续 {streak} 章抓取失败，已终止（可能被站点限制，或正文规则不匹配）。最后错误：{e}")
+                else:
+                    job.message = f"抓取第 {i}/{len(chapters)} 章：{ch['title']}"
+                    try:
+                        text = _load_chapter_waiting(job, f, ch, rule, i, len(chapters))
+                        streak = 0
+                        job.wordCount += sum(1 for c in text if not c.isspace())
+                        if chapter_log:
+                            chapter_log.append(i - 1, text)
+                    except NetworkError:
+                        raise  # 等待重试后网络仍未恢复：整体暂停，断点保留
+                    except (CrawlError, ValueError) as e:
+                        streak += 1
+                        job.chapterFailed += 1
+                        if len(job.failedChapters) < 50:
+                            job.failedChapters.append(f"{ch['title']}：{e}")
+                        text = f"（本章抓取失败：{e}）"
+                        if streak >= MAX_CONSECUTIVE_FAILS:
+                            raise CrawlError(f"连续 {streak} 章抓取失败，已终止（可能被站点限制，或正文规则不匹配）。最后错误：{e}")
                 body.append(f"{ch['title']}\n\n{text}")
                 job.chapterDone = i
                 job.progress = min(99, i * 100 // len(chapters))
@@ -323,16 +378,74 @@ def _run(job: CrawlJob, req: CrawlRequest, rule: CrawlRule) -> None:
             _texts[job.jobId] = _compose(job, toc, body)
             job.progress, job.status = 100, "succeeded"
             job.message = f"抓取完成：{job.chapterDone} 章，{job.wordCount} 字" + \
+                (f"（其中 {job.resumedChapters} 章来自断点）" if job.resumedChapters else "") + \
                 (f"，{job.chapterFailed} 章失败（已留占位）" if job.chapterFailed else "")
     except _Cancelled:
-        job.status, job.message = "cancelled", f"已取消（已抓 {job.chapterDone} 章，未保存）"
+        job.status, job.message = "cancelled", f"已取消（已抓 {job.chapterDone} 章{_saved_hint(job)}）"
     except Exception as e:  # 任何异常都要落到 failed，供 Java 轮询拿到原因
         if not isinstance(e, (CrawlError, ValueError)):
             log.exception("抓取失败 jobId=%s url=%s", job.jobId, job.url)
-        job.status, job.error = "failed", str(e) or e.__class__.__name__
+        job.status, job.error = "failed", (str(e) or e.__class__.__name__) + _saved_hint(job, "；")
     finally:
+        if chapter_log:
+            chapter_log.close()
         _cancel.discard(job.jobId)
         job.finishTime = datetime.now()
+
+
+def _plan(job: CrawlJob, req: CrawlRequest, f: Fetcher, rule: CrawlRule) -> tuple[dict, list[dict], dict[int, str]]:
+    """确定本次要抓的章节：有断点用断点（不访问目录页），否则解析目录并写断点。→ (toc, chapters, done)"""
+    saved = checkpoint.load(job.resumeKey) if job.resumeKey else None
+    if saved:
+        meta = saved["meta"]
+        if req.newOrigin:
+            old = checkpoint.origin_of(meta["url"])
+            meta["url"] = checkpoint.rewrite_origin(meta["url"], old, req.newOrigin)
+            for ch in meta["chapters"]:
+                ch["url"] = checkpoint.rewrite_origin(ch["url"], old, req.newOrigin)
+            checkpoint.save_meta(job.resumeKey, meta)
+        job.url = meta["url"]
+        job.bookName, job.author = meta.get("bookName") or "未命名小说", meta.get("author", "")
+        job.message = f"从断点继续：已保存 {len(saved['done'])}/{len(meta['chapters'])} 章"
+        log.info("续抓 %s《%s》：断点已有 %s/%s 章", job.resumeKey, job.bookName, len(saved["done"]), len(meta["chapters"]))
+        return meta, meta["chapters"], saved["done"]
+
+    job.message = "解析目录…"
+    toc = _load_toc(f, job.url, rule)
+    job.bookName, job.author = toc["bookName"] or "未命名小说", toc["author"]
+    chapters = toc["chapters"][req.startIndex - 1: req.endIndex]
+    if not chapters:
+        raise CrawlError(f"所选范围内没有章节（目录共 {len(toc['chapters'])} 章）")
+    if len(chapters) > MAX_CHAPTERS:
+        raise CrawlError(f"一次最多抓取 {MAX_CHAPTERS} 章，请缩小范围")
+    meta = {"url": job.url, "bookName": job.bookName, "author": job.author, "intro": toc.get("intro", ""),
+            "startIndex": req.startIndex, "endIndex": req.endIndex, "chapters": chapters,
+            "createTime": datetime.now().isoformat(timespec="seconds")}
+    if job.resumeKey:
+        checkpoint.save_meta(job.resumeKey, meta)
+    return meta, chapters, {}
+
+
+def _load_chapter_waiting(job: CrawlJob, f: Fetcher, ch: dict, rule: CrawlRule, i: int, total: int) -> str:
+    """抓一章；遇到断网 / DNS 失败 / 5xx 等暂时性故障按 NETWORK_WAITS 等待后重试，等待期间响应取消。"""
+    for wait in (*NETWORK_WAITS, None):
+        try:
+            return _load_chapter(f, ch, rule, job.url)
+        except NetworkError as e:
+            if wait is None:
+                raise NetworkError(f"网络持续不可用（已等待约 {sum(NETWORK_WAITS) // 60} 分钟），已暂停。最后错误：{e}") from e
+            for left in range(wait, 0, -1):
+                if job.jobId in _cancel:
+                    raise _Cancelled()
+                job.message = f"网络异常，{left} 秒后重试第 {i}/{total} 章：{ch['title']}"
+                time.sleep(1)
+    raise AssertionError("unreachable")
+
+
+def _saved_hint(job: CrawlJob, sep: str = "，") -> str:
+    if not job.resumeKey:
+        return "，未保存" if sep == "，" else ""
+    return f"{sep}进度已保存，可「继续抓取」从断点接着抓"
 
 
 def _compose(job: CrawlJob, toc: dict, body: list[str]) -> str:

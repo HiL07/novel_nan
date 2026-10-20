@@ -63,8 +63,8 @@ def create_novel(title: str, model: dict, context_window: int) -> dict:
     novel_id = f"novel-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
     novel = {
         "id": novel_id, "title": title.strip() or "未命名小说", "createdAt": now(), "updatedAt": now(),
-        "model": model, "adapterId": None, "contextWindow": context_window,
-        "settings": {"config": None, "spec": None, "savedAt": None},
+        "model": model, "contextWindow": context_window,
+        "settings": {"config": None, "spec": None, "savedAt": None}, "outline": None,
         "params": dict(DEFAULT_PARAMS), "arcSummary": "", "arcUpTo": 0,
         "tokenTotals": {"promptTokens": 0, "completionTokens": 0, "calls": 0},
     }

@@ -13,6 +13,7 @@ Java（Spring Boot）与 Python（FastAPI）共用的数据根目录。**本目�
 | `upload/yyyy/MM/dd/<uuid>.<ext>` | 上传的原始文件 | Java（`FileService`） | Java；Python 只通过 Java 的 `/api/file/preview/{id}` 读取 | 暂无删除功能 | `file.storage_path` = 相对 `upload/` 的路径 |
 | `extract-results/<taskId>.json` | 小说提取的完整结果 JSON | Java（`ExtractResultStore`，提取任务成功时写入） | Java（`GET /api/novel/extract/{id}` 读出后原样返回） | 暂无 | `novel_extract.result_path`（相对 `data/`）、`result_size`、`result_sha256` |
 | `novels/<novelId>/novel.json`、`chapters/NNNN.json` | AI 生成的小说工作区与正文 | Python（`app/generation/store.py`） | Python；Java 按本约定只读（本轮无 Java 读取接口） | Python（删除工作区 / 最后一章） | 不入数据库 |
+| `crawl-cache/<resumeKey>/meta.json`、`chapters.jsonl` | 小说抓取断点：章节清单 + 已抓章节正文（逐章追加），用于「继续抓取」 | Python（`app/crawler/checkpoint.py`） | Python | Python（Java 保存 txt 后 release 时删除；失败 / 取消的保留） | `resumeKey` 由任务 id 推出：单本 `c<novel_crawl.id>`，整站 `c<novel_crawl.id>b<novel_crawl_book.id>` |
 
 ## 格式约定
 

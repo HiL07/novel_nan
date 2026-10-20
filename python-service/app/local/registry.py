@@ -104,7 +104,8 @@ def _base_record_path(model_id: str) -> Path:
 
 
 def register_base(name: str, path: str, *, source: str = "local", origin: str | None = None,
-                  model_id: str | None = None) -> dict:
+                  model_id: str | None = None, owns_files: bool = False) -> dict:
+    """owns_files：权重是本服务下载到外部目录的（删除登记时一并删除）；手动登记的目录永远不删。"""
     info = inspect_model_dir(path)
     for m in list_base():
         if m["path"] == info["path"]:
@@ -112,6 +113,8 @@ def register_base(name: str, path: str, *, source: str = "local", origin: str | 
     model_id = model_id or new_id(name)
     record = {"id": model_id, "name": name.strip() or Path(path).name, "source": source,
               "origin": origin, "createdAt": _now(), **info}
+    if owns_files:
+        record["ownsFiles"] = True
     (settings.BASE_DIR / model_id).mkdir(parents=True, exist_ok=True)
     _write_json(_base_record_path(model_id), record)
     return record
@@ -136,15 +139,21 @@ def list_base() -> list[dict]:
 
 
 def delete_base(model_id: str) -> None:
-    """删除登记。只会删除 models/base/<id>/ 目录（含下载到这里的权重）；外部目录的模型文件不受影响。"""
+    """删除登记与 models/base/<id>/ 目录（含下载到这里的权重）；本服务下载到外部目录的权重（ownsFiles）也一并删除。
+    手动登记的外部目录不受影响。"""
     d = settings.BASE_DIR / model_id
     if not (d / "model.json").exists():
         raise RegistryError(f"基础模型不存在：{model_id}")
+    rec = _read_json(_base_record_path(model_id)) or {}
+    if rec.get("ownsFiles") and rec.get("path") and Path(rec["path"]).is_dir():
+        shutil.rmtree(rec["path"])
     shutil.rmtree(d)
 
 
 def is_managed(rec: dict) -> bool:
-    """权重是否存放在 models/ 下（下载的），删除登记会一并删除。"""
+    """权重是否由本服务管理（下载到 models/ 下，或下载到自选目录），删除登记会一并删除。"""
+    if rec.get("ownsFiles"):
+        return True
     try:
         Path(rec["path"]).resolve().relative_to(settings.BASE_DIR.resolve())
         return True
@@ -234,6 +243,11 @@ def _with_compat(meta: dict) -> dict:
             meta["matchedBaseId"] = cur["id"] if meta["compat"] == "ok" else None
     except (RegistryError, OSError):
         meta["compat"] = "missing"
+    if meta["compat"] == "missing":
+        # 训练时的登记已删除（如重新登记 / 重新下载同一模型）：同一目录或 config.json 字节相同的本地模型仍可加载
+        same = [b for b in list_base() if b["exists"] and (b["path"] == base.get("path") or _same_config(b, base))]
+        if same:
+            meta["compat"], meta["matchedBaseId"] = "ok", same[0]["id"]
     return meta
 
 

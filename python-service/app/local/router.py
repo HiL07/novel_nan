@@ -1,6 +1,9 @@
 """本地模型 API（前缀 /api/local），响应统一为 {code, message, data}，code=0 表示成功。"""
 import logging
+import os
 import re
+import string
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter
@@ -73,6 +76,8 @@ class DownloadReq(BaseModel):
     # auto / modelscope / hf-mirror / huggingface；不传则用服务配置 MODEL_DOWNLOAD_SOURCE（默认 auto）
     source: Literal["auto", "modelscope", "hf-mirror", "huggingface"] | None = None
     useMirror: bool | None = None  # 旧参数：仅在未传 source 时生效（True → hf-mirror，False → huggingface）
+    # 保存位置（绝对路径的上级目录，实际写入 <targetDir>/<仓库名>）；空 = models/base/<id>/weights
+    targetDir: str | None = Field(default=None, max_length=500)
 
 
 @router.get("/models/download/sources")
@@ -90,7 +95,52 @@ def download_model(req: DownloadReq):
     if source not in download.SOURCES:
         raise LocalError(500, f"服务配置 MODEL_DOWNLOAD_SOURCE 无效：{source}（可选 {', '.join(download.SOURCES)}）")
     cfg = {"repoId": req.repoId, "name": name, "modelId": registry.new_id(name), "source": source}
+    if req.targetDir and req.targetDir.strip():
+        try:
+            target = download.resolve_target(req.targetDir, req.repoId, cfg["modelId"])
+        except ValueError as e:
+            raise LocalError(400, str(e)) from e
+        for m in registry.list_base():
+            if Path(m["path"]).resolve() == target.resolve():
+                raise LocalError(400, f"{target} 已登记为「{m['name']}」")
+        cfg["targetDir"] = str(target)
     return ok(_guard(jobs.create, "download", cfg))
+
+
+class DownloadCheckReq(BaseModel):
+    repoId: str = Field(pattern=r"^[\w.-]+/[\w.-]+$")
+    source: Literal["auto", "modelscope", "hf-mirror", "huggingface"] | None = None
+    targetDir: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/models/download/check")
+def download_check(req: DownloadCheckReq):
+    """下载前检查（同步，需联网几秒）：可用的下载源、模型大小、保存位置所在磁盘的剩余空间。"""
+    try:
+        return ok(download.check(req.repoId, req.source or settings.DOWNLOAD_SOURCE, req.targetDir))
+    except (ValueError, RuntimeError) as e:
+        raise LocalError(400, str(e)) from e
+
+
+@router.get("/fs/dirs")
+def list_dirs(path: str = ""):
+    """「保存位置」的目录浏览（只列目录，只读）：path 为空时列出各磁盘。→ {path, parent, dirs[{name, path}], freeGb}"""
+    if not path.strip():
+        drives = [f"{c}:\\" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")] if os.name == "nt" else ["/"]
+        return ok({"path": "", "parent": None, "freeGb": None,
+                   "dirs": [{"name": d, "path": d, "freeGb": hardware.disk_free_gb(d)} for d in drives]})
+    p = Path(path.strip().strip('"'))
+    if not p.is_absolute() or not p.is_dir():
+        raise LocalError(400, f"目录不存在：{path}")
+    p = p.resolve()
+    try:
+        children = sorted((c for c in p.iterdir() if c.is_dir() and not c.name.startswith(("$", "."))),
+                          key=lambda c: c.name.lower())
+    except OSError as e:
+        raise LocalError(400, f"无法读取目录：{e}") from e
+    parent = str(p.parent) if p.parent != p else ""
+    return ok({"path": str(p), "parent": parent, "freeGb": hardware.disk_free_gb(p),
+               "dirs": [{"name": c.name, "path": str(c)} for c in children[:500]]})
 
 
 @router.post("/models/{model_id}/delete")
@@ -210,6 +260,17 @@ def inference_generate(req: GenerateReq):
 def inference_compare(req: GenerateReq):
     """同一提示词 + 同一种子分别用基础模型（停用适配器）和微调模型生成；需已加载带适配器的模型。"""
     return ok(_guard(inference.compare, req.prompt, seed=1234 if req.seed is None else req.seed, **_gen_kwargs(req)))
+
+
+class EvaluateReq(BaseModel):
+    text: str = Field(min_length=20, max_length=50000)
+    maxTokens: int = Field(default=4096, ge=64, le=16384)
+
+
+@router.post("/inference/evaluate")
+def inference_evaluate(req: EvaluateReq):
+    """同一文本在停用 / 启用适配器时的 loss 与困惑度对比（定量验证适配器是否生效）；需已加载带适配器的模型。"""
+    return ok(_guard(inference.evaluate, req.text, max_tokens=req.maxTokens))
 
 
 # ---------------------------------------------------------------- 训练任务

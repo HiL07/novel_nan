@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 网络小说抓取接口：规则预设 / 目录预览 / 整站发现 / 提交任务 / 任务列表 / 详情 / 书籍明细 / 取消 / 重新抓取。
+ * 网络小说抓取接口：规则预设 / 目录预览 / 整站发现 / 提交任务 / 任务列表 / 详情 / 书籍明细 / 取消 / 断点续抓 / 重新抓取。
  *
  * 两种采集模式：
  * - 单本（mode=book，默认）：参数 {url（目录页）, preset?, rule?, delayMs?, respectRobots?, startIndex?, endIndex?}；
@@ -93,6 +93,21 @@ public class NovelCrawlController {
     @PostMapping("/{id}/cancel")
     public ResponseEntity<Result<NovelCrawl>> cancel(@PathVariable Long id) {
         return ResultResponses.handle(() -> crawlService.cancel(id), log, "取消抓取任务失败，id=" + id);
+    }
+
+    /** POST /api/novel/crawl/{id}/resume {newOrigin?}：从断点继续（同一任务；整站跳过已完成的书） */
+    @PostMapping("/{id}/resume")
+    public ResponseEntity<Result<NovelCrawl>> resume(@PathVariable Long id,
+                                                     @RequestBody(required = false) Map<String, Object> body) {
+        Object origin = body == null ? null : body.get("newOrigin");
+        return ResultResponses.handle(() -> crawlService.resume(id, origin == null ? null : String.valueOf(origin)),
+                log, "继续抓取失败，id=" + id);
+    }
+
+    /** GET /api/novel/crawl/{id}/checkpoint：断点概况 {chapterSaved, chapterTotal, booksWithCheckpoint, booksPending, url} */
+    @GetMapping("/{id}/checkpoint")
+    public ResponseEntity<Result<Map<String, Object>>> checkpoint(@PathVariable Long id) {
+        return ResultResponses.handle(() -> crawlService.checkpoint(id), log, "查询抓取断点失败，id=" + id);
     }
 
     /** POST /api/novel/crawl/{id}/retry：按原参数新建任务 */

@@ -15,6 +15,28 @@
                 <span>{{ c.label }}</span><span class="count">{{ c.count }}</span>
               </div>
               <el-button class="new-btn" type="primary" plain :icon="Plus" @click="openEditor(null)">新建素材</el-button>
+
+              <!-- 来源书：按书筛选 / 按书删除 -->
+              <div class="side-title">来源书</div>
+              <div class="cat-item" :class="{ 'is-active': !sourceBook && !pinnedOnly }" @click="setSource('')">
+                <el-icon><Reading /></el-icon><span>全部来源</span>
+              </div>
+              <div class="cat-item" :class="{ 'is-active': pinnedOnly }" @click="setPinnedOnly">
+                <el-icon><StarFilled /></el-icon><span>保留的</span><span class="count">{{ pinnedCount }}</span>
+              </div>
+              <div
+                v-for="s in sources"
+                :key="s.book ?? MANUAL_BOOK"
+                class="cat-item source-item"
+                :class="{ 'is-active': sourceBook === (s.book ?? MANUAL_BOOK) }"
+                :title="s.book ? `《${s.book}》：${s.count} 条，保留 ${s.pinned} 条${s.pending ? `，待确认候选 ${s.pending} 条` : ''}` : '手动添加的素材'"
+                @click="setSource(s.book ?? MANUAL_BOOK)"
+              >
+                <el-icon><Notebook /></el-icon>
+                <span class="source-name">{{ s.book ? `《${s.book}》` : '手动添加' }}</span>
+                <span class="count">{{ s.count }}</span>
+                <el-icon v-if="s.book" class="source-del" title="按来源书删除" @click.stop="openSourceDelete(s)"><Delete /></el-icon>
+              </div>
             </div>
 
             <div class="main-col">
@@ -78,6 +100,14 @@
                       <el-tag size="small" effect="plain">{{ categoryOf(r.material.category)?.label }}</el-tag>
                       <span class="mat-title">{{ r.material.title }}</span>
                       <span v-if="r.score != null" class="score" :title="r.reason">{{ r.score }}</span>
+                      <el-icon
+                        class="pin"
+                        :class="{ 'is-pinned': r.material.pinned }"
+                        :title="r.material.pinned ? '已保留（点击取消）：按书删除 / 屏蔽来源书都不影响它' : '保留：按书删除 / 屏蔽来源书时不受影响'"
+                        @click.stop="togglePin(r.material)"
+                      >
+                        <StarFilled v-if="r.material.pinned" /><Star v-else />
+                      </el-icon>
                     </div>
                     <div v-if="r.reason" class="reason">匹配理由：{{ r.reason }}</div>
                     <div class="mat-summary">{{ r.material.summary || '（无概括）' }}</div>
@@ -86,7 +116,11 @@
                     </div>
                     <div class="mat-foot">
                       <el-tag v-for="t in (r.material.tags || []).slice(0, 5)" :key="t" size="small" type="info">{{ t }}</el-tag>
-                      <span class="muted">{{ r.material.subtype }}<template v-if="r.material.useCount"> · 已用 {{ r.material.useCount }} 次</template></span>
+                      <span class="muted">
+                        {{ r.material.sourceBook ? `《${r.material.sourceBook}》` : '手动' }}
+                        <template v-if="r.material.subtype"> · {{ r.material.subtype }}</template>
+                        <template v-if="r.material.useCount"> · 已用 {{ r.material.useCount }} 次</template>
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -105,7 +139,8 @@
         </el-tab-pane>
 
         <!-- ===================== 待确认 ===================== -->
-        <el-tab-pane name="pending">
+        <!-- lazy：首次切到「待确认」才渲染候选列表，进入素材库页面不必等它 -->
+        <el-tab-pane name="pending" lazy>
           <template #label>
             待确认<el-badge v-if="pending" :value="pending" class="pending-badge" />
           </template>
@@ -118,6 +153,22 @@
       </el-tabs>
     </el-card>
 
+    <el-dialog v-model="sourceDel.visible" title="按来源书删除素材" width="460px">
+      <p>
+        删除来自《{{ sourceDel.source?.book }}》的素材：共 {{ sourceDel.source?.count }} 条，
+        其中<b>保留的 {{ sourceDel.source?.pinned || 0 }} 条不会删除</b>，将删除
+        <b class="danger">{{ (sourceDel.source?.count || 0) - (sourceDel.source?.pinned || 0) }}</b> 条。
+      </p>
+      <el-checkbox v-if="sourceDel.source?.pending" v-model="sourceDel.withCandidates">
+        同时忽略这本书的 {{ sourceDel.source.pending }} 条待确认候选
+      </el-checkbox>
+      <p class="muted-tip">已应用到工作区设定的内容是复制过去的，不受影响。删除后无法恢复。</p>
+      <template #footer>
+        <el-button @click="sourceDel.visible = false">取消</el-button>
+        <el-button type="danger" :loading="sourceDel.loading" @click="doSourceDelete">删除</el-button>
+      </template>
+    </el-dialog>
+
     <MaterialEditor v-model="editor.visible" :material="editor.material" :default-category="category || 'world'" @saved="refreshAll" @deleted="refreshAll" />
   </div>
 </template>
@@ -125,11 +176,12 @@
 <script setup>
 import { computed, onActivated, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Collection, MagicStick, Plus, Search } from '@element-plus/icons-vue'
+import { Collection, Delete, MagicStick, Notebook, Plus, Reading, Search, Star, StarFilled } from '@element-plus/icons-vue'
 import CandidateReview from '@/components/material/CandidateReview.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
 import {
-  categoryOf, getMaterialCategories, getMaterialTags, pendingCandidateCount, searchMaterials, semanticSearch
+  MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterialCategories, getMaterialSources, getMaterialTags,
+  pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch
 } from '@/api/material'
 import { errorMessage } from '@/api/request'
 
@@ -155,6 +207,11 @@ const semanticLoading = ref(false)
 
 const reviewRef = ref()
 const editor = reactive({ visible: false, material: null })
+const sources = ref([])
+const sourceBook = ref('')
+const pinnedOnly = ref(false)
+const sourceDel = reactive({ visible: false, source: null, withCandidates: true, loading: false })
+const pinnedCount = computed(() => sources.value.reduce((s, x) => s + (x.pinned || 0), 0))
 
 const totalCount = computed(() => categories.value.reduce((s, c) => s + c.count, 0))
 const displayList = computed(() =>
@@ -174,13 +231,14 @@ async function call(promise, fallback) {
 
 async function loadMeta() {
   try {
-    const [c, t, p] = await Promise.all([
+    const [c, t, p, s] = await Promise.all([
       call(getMaterialCategories(), '加载分类失败'), call(getMaterialTags(category.value || undefined), '加载标签失败'),
-      call(pendingCandidateCount(), '加载候选失败')
+      call(pendingCandidateCount(), '加载候选失败'), call(getMaterialSources(), '加载来源失败')
     ])
     categories.value = c
     tagCloud.value = t
     pending.value = p
+    sources.value = s.filter((x) => x.count)
   } catch (e) {
     ElMessage.error(errorMessage(e, '加载素材库失败'))
   }
@@ -192,7 +250,8 @@ async function search(p = 1) {
   try {
     const data = await call(searchMaterials({
       category: category.value || undefined, tags: selectedTags.value, tagMode: tagMode.value,
-      keyword: keyword.value.trim() || undefined, page: p, size: pageSize
+      keyword: keyword.value.trim() || undefined, sourceBook: sourceBook.value || undefined,
+      pinned: pinnedOnly.value || undefined, page: p, size: pageSize
     }), '检索失败')
     records.value = data.records
     total.value = data.total
@@ -223,6 +282,53 @@ function setCategory(code) {
   getMaterialTags(code || undefined).then((r) => r.code === 0 && (tagCloud.value = r.data))
   if (mode.value === 'keyword') search(1)
   else if (semantic.value) runSemantic()
+}
+
+function setSource(book) {
+  sourceBook.value = book
+  pinnedOnly.value = false
+  mode.value = 'keyword'
+  search(1)
+}
+
+function setPinnedOnly() {
+  sourceBook.value = ''
+  pinnedOnly.value = true
+  mode.value = 'keyword'
+  search(1)
+}
+
+async function togglePin(m) {
+  try {
+    const data = await call(pinMaterial(m.id, !m.pinned), '操作失败')
+    m.pinned = data.pinned
+    ElMessage.success(m.pinned ? `已保留「${m.title}」：按书删除 / 屏蔽来源书都不影响它` : `已取消保留「${m.title}」`)
+    getMaterialSources().then((r) => r.code === 0 && (sources.value = r.data.filter((x) => x.count)))
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '操作失败'))
+  }
+}
+
+function openSourceDelete(s) {
+  Object.assign(sourceDel, { visible: true, source: s, withCandidates: true, loading: false })
+}
+
+async function doSourceDelete() {
+  sourceDel.loading = true
+  try {
+    const book = sourceDel.source.book
+    const data = await call(deleteMaterialSource(book, sourceDel.withCandidates), '删除失败')
+    ElMessage.success(`已删除《${book}》的 ${data.deleted} 条素材` + (data.kept ? `，保留 ${data.kept} 条` : '') +
+      (data.candidatesIgnored ? `，忽略候选 ${data.candidatesIgnored} 条` : ''))
+    sourceDel.visible = false
+    if (sourceBook.value === book && !data.kept) sourceBook.value = ''
+    await refreshAll()
+    reviewRef.value?.reload()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '删除失败'))
+  } finally {
+    sourceDel.loading = false
+  }
 }
 
 function toggleTag(tag) {
@@ -297,6 +403,43 @@ onActivated(async () => {
 .new-btn {
   width: 100%;
   margin-top: 10px;
+}
+.side-title {
+  margin: 18px 0 6px;
+  padding-left: 10px;
+  font-size: 12px;
+  color: #909399;
+}
+.source-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-del {
+  display: none;
+  color: var(--el-color-danger);
+}
+.source-item:hover .source-del {
+  display: inline-flex;
+}
+.source-item:hover .count {
+  display: none;
+}
+.pin {
+  font-size: 16px;
+  color: #c0c4cc;
+  cursor: pointer;
+}
+.pin:hover,
+.pin.is-pinned {
+  color: var(--el-color-warning);
+}
+.danger {
+  color: var(--el-color-danger);
+}
+.muted-tip {
+  font-size: 12px;
+  color: #909399;
 }
 .search-bar {
   display: flex;

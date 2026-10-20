@@ -287,8 +287,14 @@
             <el-tooltip content="同一提示词、同一种子，依次用原始基础模型（停用适配器）和微调模型生成；基础模型只驻留一份" placement="top">
               <el-button type="warning" :loading="generating === 'compare'" :disabled="inferState?.status !== 'loaded' || !inferState?.attachedAdapterId || !gen.prompt.trim() || !!generating" @click="onCompare">对照生成（基础 vs 微调）</el-button>
             </el-tooltip>
+            <el-tooltip content="把输入框里的文字当作评估文本（建议粘贴一两千字目标风格的原文），分别计算停用 / 启用适配器时的困惑度；越低说明模型越「像」这段文字" placement="top">
+              <el-button :loading="generating === 'evaluate'" :disabled="inferState?.status !== 'loaded' || !inferState?.attachedAdapterId || gen.prompt.trim().length < 20 || !!generating" @click="onEvaluate">困惑度评估</el-button>
+            </el-tooltip>
           </div>
-          <div v-if="generating" class="hint">正在生成，{{ generating === 'compare' ? '对照需要生成两次，' : '' }}请稍候…</div>
+          <div v-if="generating" class="hint">{{ generating === 'evaluate' ? '正在评估' : '正在生成' }}，{{ generating === 'compare' ? '对照需要生成两次，' : '' }}请稍候…</div>
+          <el-alert v-if="evalResult" :type="evalResult.lossDelta < -0.05 ? 'success' : 'info'" :closable="false" show-icon class="gen-output"
+            :title="`困惑度：基础模型 ${evalResult.base.ppl} → 微调模型 ${evalResult.adapter.ppl}（${evalResult.pplChangePct > 0 ? '+' : ''}${evalResult.pplChangePct}%，${evalResult.tokens} tokens）`"
+            :description="evalResult.lossDelta < -0.05 ? '适配器让模型更贴近这段文字的风格。可再用一段风格无关的文字对照：差距小或变高，说明学到的是该风格本身' : '适配器对这段文字没有明显帮助：文字与训练风格不同，或适配器训练不足'" />
           <div v-if="genResult" class="gen-output">
             <div class="hint">{{ genResult.adapterId ? `微调模型（LoRA · ${adapterName(genResult.adapterId)}）` : '原始基础模型' }}</div>
             <div class="gen-text"><span class="gen-prompt">{{ genResult.prompt }}</span>{{ genResult.text }}</div>
@@ -324,10 +330,11 @@
     </el-dialog>
 
     <!-- 下载模型 -->
-    <el-dialog v-model="downloadDlg.visible" title="从 Hugging Face 下载模型" width="600px">
+    <el-dialog v-model="downloadDlg.visible" title="下载模型" width="660px">
       <div class="rec-list">
-        <div v-for="r in RECOMMENDED_MODELS" :key="r.repoId" class="rec-item" :class="{ 'is-active': downloadDlg.repoId === r.repoId }" @click="downloadDlg.repoId = r.repoId">
-          <b>{{ r.repoId }}</b> <span class="hint">{{ r.size }} · {{ r.note }}</span>
+        <div v-for="r in RECOMMENDED_MODELS" :key="r.repoId" class="rec-item" :class="{ 'is-active': downloadDlg.repoId === r.repoId }" @click="pickRecommended(r)">
+          <b>{{ r.repoId }}</b> <el-tag v-if="r.big" size="small" type="warning" effect="plain">大模型</el-tag>
+          <span class="hint">{{ r.size }} · {{ r.note }}</span>
         </div>
       </div>
       <el-form label-width="80px" class="dl-form">
@@ -339,11 +346,51 @@
           </el-select>
           <span class="hint">{{ DOWNLOAD_SOURCES.find((s) => s.value === downloadDlg.source)?.note }}</span>
         </el-form-item>
+        <el-form-item label="保存位置">
+          <el-radio-group v-model="downloadDlg.where" @change="downloadDlg.check = null">
+            <el-radio value="default">默认（python-service/models/base/，所在盘剩余 {{ cDiskFree }}）</el-radio>
+            <el-radio value="custom">自选目录</el-radio>
+          </el-radio-group>
+          <div v-if="downloadDlg.where === 'custom'" class="dl-target">
+            <el-input v-model="downloadDlg.targetDir" placeholder="如 D:\models（会新建 <仓库名> 子目录）" clearable @input="downloadDlg.check = null" />
+            <el-button :icon="FolderOpened" @click="openDirPicker">浏览</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="空间检查">
+          <el-button size="small" :loading="downloadDlg.checking" :disabled="!downloadDlg.repoId" @click="onCheckDownload">检查大小与剩余空间</el-button>
+          <span v-if="downloadDlg.check" class="hint" :class="{ 'text-danger': !downloadDlg.check.enough }">
+            {{ downloadDlg.check.sourceLabel }}：约 {{ downloadDlg.check.sizeGb }} GB → {{ downloadDlg.check.target }}，
+            该盘剩余 {{ downloadDlg.check.freeGb }} GB{{ downloadDlg.check.enough ? '，足够' : '，空间不足（需另留 2 GB），请换个位置' }}
+          </span>
+        </el-form-item>
       </el-form>
-      <div class="hint">下载到 python-service/models/base/ 下，完成后自动登记；进度见「风格微调 → 任务记录」的日志。</div>
+      <el-alert v-if="isBigRepo" type="warning" :closable="false" show-icon class="dl-warn"
+        title="7B 及以上模型约 15 GB：建议保存到空间充足的盘；本机 8GB 显存只能 4bit 推理（加载前先卸载其他模型），本机 QLoRA 训练会超出资源（可在远程 GPU 训练后加载适配器）" />
+      <div class="hint">完成后自动登记；进度见「风格微调 → 任务记录」的日志。自选目录下载的模型在删除登记时会一并删除文件。</div>
       <template #footer>
         <el-button @click="downloadDlg.visible = false">取消</el-button>
-        <el-button type="primary" :disabled="!downloadDlg.repoId" @click="onDownload">开始下载</el-button>
+        <el-button type="primary" :disabled="!downloadDlg.repoId || (downloadDlg.where === 'custom' && !downloadDlg.targetDir.trim())" @click="onDownload">开始下载</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 选择保存位置 -->
+    <el-dialog v-model="dirDlg.visible" title="选择保存位置" width="560px" append-to-body>
+      <div class="dir-bar">
+        <el-button size="small" :disabled="dirDlg.path === ''" @click="loadDirs(dirDlg.parent ?? '')">上一级</el-button>
+        <span class="dir-path">{{ dirDlg.path || '此电脑' }}</span>
+        <span v-if="dirDlg.freeGb != null" class="hint">剩余 {{ dirDlg.freeGb }} GB</span>
+      </div>
+      <div v-loading="dirDlg.loading" class="dir-list">
+        <div v-for="d in dirDlg.dirs" :key="d.path" class="dir-item" @dblclick="loadDirs(d.path)" @click="loadDirs(d.path)">
+          <el-icon><Folder /></el-icon>
+          <span>{{ d.name }}</span>
+          <span v-if="d.freeGb != null" class="hint">剩余 {{ d.freeGb }} GB</span>
+        </div>
+        <el-empty v-if="!dirDlg.loading && !dirDlg.dirs.length" description="没有子目录" :image-size="60" />
+      </div>
+      <template #footer>
+        <el-button @click="dirDlg.visible = false">取消</el-button>
+        <el-button type="primary" :disabled="!dirDlg.path" @click="chooseDir">选择「{{ dirDlg.path || '…' }}」</el-button>
       </template>
     </el-dialog>
 
@@ -375,9 +422,9 @@
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download, FolderAdd, MagicStick, Monitor, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { Download, Folder, FolderAdd, FolderOpened, MagicStick, Monitor, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import {
-  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, compareGenerate, deleteAdapter, deleteModel, downloadModel, estimate, generate, getInference,
+  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, checkDownload, listDirs, compareGenerate, deleteAdapter, evaluateAdapter, deleteModel, downloadModel, estimate, generate, getInference,
   getJobLog, getSystem, listAdapters, listJobs, listModels, loadModel, registerModel, renameAdapter,
   startTraining, unloadModel
 } from '@/api/localModel'
@@ -497,10 +544,75 @@ async function onRegister() {
   }
 }
 
-const downloadDlg = reactive({ visible: false, repoId: RECOMMENDED_MODELS[0].repoId, name: '', source: 'auto' })
-async function onDownload() {
+const DOWNLOAD_DIR_KEY = 'nan_novel.local.downloadDir'
+const downloadDlg = reactive({
+  visible: false, repoId: RECOMMENDED_MODELS[0].repoId, name: '', source: 'auto',
+  where: 'default', targetDir: readDownloadDir(), check: null, checking: false
+})
+const isBigRepo = computed(() => /(^|[^\d.])([7-9]|[1-9]\d+)(\.\d+)?B/i.test(downloadDlg.repoId))
+const cDiskFree = computed(() => (sys.value?.diskFreeGB != null ? `${sys.value.diskFreeGB.toFixed(1)} GB` : '未知'))
+
+function readDownloadDir() {
   try {
-    await call(downloadModel(downloadDlg.repoId.trim(), downloadDlg.name.trim(), downloadDlg.source), '启动下载失败')
+    return localStorage.getItem(DOWNLOAD_DIR_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function pickRecommended(r) {
+  downloadDlg.repoId = r.repoId
+  downloadDlg.check = null
+  // 大模型默认放到自选目录（C 盘通常放不下）
+  if (r.big && downloadDlg.where === 'default') downloadDlg.where = 'custom'
+}
+
+async function onCheckDownload() {
+  downloadDlg.checking = true
+  downloadDlg.check = null
+  try {
+    downloadDlg.check = await call(checkDownload(downloadDlg.repoId.trim(), downloadDlg.source,
+      downloadDlg.where === 'custom' ? downloadDlg.targetDir.trim() : ''), '检查失败')
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 8000 })
+  } finally {
+    downloadDlg.checking = false
+  }
+}
+
+const dirDlg = reactive({ visible: false, path: '', parent: null, freeGb: null, dirs: [], loading: false })
+async function loadDirs(path) {
+  dirDlg.loading = true
+  try {
+    const data = await call(listDirs(path), '读取目录失败')
+    Object.assign(dirDlg, { path: data.path, parent: data.parent, freeGb: data.freeGb, dirs: data.dirs })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    dirDlg.loading = false
+  }
+}
+function openDirPicker() {
+  dirDlg.visible = true
+  loadDirs(downloadDlg.targetDir.trim())
+}
+function chooseDir() {
+  downloadDlg.targetDir = dirDlg.path
+  downloadDlg.check = null
+  dirDlg.visible = false
+}
+
+async function onDownload() {
+  const targetDir = downloadDlg.where === 'custom' ? downloadDlg.targetDir.trim() : ''
+  try {
+    await call(downloadModel(downloadDlg.repoId.trim(), downloadDlg.name.trim(), downloadDlg.source, targetDir), '启动下载失败')
+    if (targetDir) {
+      try {
+        localStorage.setItem(DOWNLOAD_DIR_KEY, targetDir)
+      } catch {
+        // 记不住也不影响下载
+      }
+    }
     ElMessage.success('已开始下载，可在「风格微调 → 任务记录」查看进度')
     downloadDlg.visible = false
     await refreshAll()
@@ -511,7 +623,7 @@ async function onDownload() {
 }
 
 async function onDeleteModel(row) {
-  const extra = row.managed ? '该模型文件位于 models/ 下，将一并删除。' : '只删除登记，不会删除原目录中的模型文件。'
+  const extra = row.managed ? `该模型由本服务下载（${row.path}），文件将一并删除。` : '只删除登记，不会删除原目录中的模型文件。'
   try {
     await ElMessageBox.confirm(`删除基础模型「${row.name}」？${extra}基于它训练的适配器会显示「基础模型缺失」。`, '删除', { type: 'warning' })
   } catch {
@@ -708,9 +820,10 @@ async function onUnload() {
 }
 
 const gen = reactive({ prompt: '', maxNewTokens: 200, temperature: 0.8, topP: 0.9, useChatTemplate: false, seed: 1234 })
-const generating = ref('') // '' | 'single' | 'compare'
+const generating = ref('') // '' | 'single' | 'compare' | 'evaluate'
 const genResult = ref(null)
 const compareResult = ref(null)
+const evalResult = ref(null)
 async function onGenerate() {
   generating.value = 'single'
   try {
@@ -729,6 +842,16 @@ async function onCompare() {
     const r = await call(compareGenerate({ ...gen, repetitionPenalty: 1.1 }), '对照生成失败')
     compareResult.value = { ...r, prompt: gen.useChatTemplate ? '' : gen.prompt }
     genResult.value = null
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 6000 })
+  } finally {
+    generating.value = ''
+  }
+}
+async function onEvaluate() {
+  generating.value = 'evaluate'
+  try {
+    evalResult.value = await call(evaluateAdapter({ text: gen.prompt }), '评估失败')
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 6000 })
   } finally {
@@ -922,6 +1045,46 @@ onDeactivated(() => clearTimeout(timer))
 }
 .rec-item.is-active {
   border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+.dl-target {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+}
+.dl-warn {
+  margin-bottom: 8px;
+}
+.text-danger {
+  color: var(--el-color-danger);
+}
+.dir-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.dir-path {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.dir-list {
+  height: 320px;
+  overflow-y: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+.dir-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.dir-item:hover {
   background: var(--el-color-primary-light-9);
 }
 .log-error {

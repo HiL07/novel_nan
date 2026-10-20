@@ -26,6 +26,36 @@ export function initValues(fields) {
   return container
 }
 
+/**
+ * 旧版本保存的设定升级到当前结构（只在版本号变化时做一次，避免把用户在编辑模式下删掉的字段又加回来）：
+ * 内置分类里的分组字段（如「主要角色」）补上新增的子字段、同步展示方式（display / section / desc），
+ * 子字段按默认顺序排列，用户自定义的子字段保持在后面。已填的值不动，新字段的值由 ensureValue 按需初始化。
+ */
+export function upgradeConfig(saved, defaults) {
+  const from = saved.schemaVersion || 1
+  const to = defaults.schemaVersion || 1
+  if (from >= to) return saved
+  for (const defCat of defaults.categories || []) {
+    const cat = (saved.categories || []).find((c) => c.key === defCat.key && !c.custom)
+    if (!cat) continue
+    for (const defField of defCat.fields || []) {
+      if (defField.type !== 'group') continue
+      const field = cat.fields.find((f) => f.key === defField.key)
+      if (!field || field.type !== 'group') continue
+      if (defField.display) field.display = defField.display
+      if (defField.desc) field.desc = defField.desc
+      const children = field.fields || []
+      const merged = defField.fields.map((d) => {
+        const old = children.find((c) => c.key === d.key)
+        return old ? { ...old, section: d.section } : clone(d)
+      })
+      field.fields = [...merged, ...children.filter((c) => !defField.fields.some((d) => d.key === c.key))]
+    }
+  }
+  saved.schemaVersion = to
+  return saved
+}
+
 /** 新建分组中的一项 */
 export function newGroupItem(field) {
   return { _id: uid('item'), ...initValues(field.fields || []) }

@@ -48,23 +48,50 @@ public class MaterialController {
         return ResultResponses.handle(() -> materialService.tags(category), log, "查询标签失败");
     }
 
-    /** GET /api/material/list?category=&tags=a,b&tagMode=all|any&keyword=&page=&size=：关键词 + 标签检索 */
+    /**
+     * GET /api/material/list?category=&tags=a,b&tagMode=all|any&keyword=&sourceBook=&excludeBooks=a,b&pinned=&page=&size=
+     * 关键词 + 标签检索；sourceBook = 只看某本书（__manual__ = 手动添加），excludeBooks = 屏蔽来源书（保留的素材除外），
+     * pinned=true 只看保留的
+     */
     @GetMapping("/list")
     public ResponseEntity<Result<Page<Material>>> list(@RequestParam(required = false) String category,
                                                        @RequestParam(required = false) List<String> tags,
                                                        @RequestParam(defaultValue = "all") String tagMode,
                                                        @RequestParam(required = false) String keyword,
+                                                       @RequestParam(required = false) String sourceBook,
+                                                       @RequestParam(required = false) List<String> excludeBooks,
+                                                       @RequestParam(required = false) Boolean pinned,
                                                        @RequestParam(defaultValue = "1") int page,
                                                        @RequestParam(defaultValue = "20") int size) {
-        return ResultResponses.handle(() -> materialService.search(category, tags, tagMode, keyword, page, size),
-                log, "检索素材失败");
+        return ResultResponses.handle(() -> materialService.search(category, tags, tagMode, keyword,
+                sourceBook, excludeBooks, pinned, page, size), log, "检索素材失败");
     }
 
-    /** POST /api/material/semantic-search {query, category?, tags?, limit?}：AI 语义检索（使用启用的模型） */
+    /** GET /api/material/sources：来源书 [{book（null = 手动添加）, count, pinned, pending}] */
+    @GetMapping("/sources")
+    public ResponseEntity<Result<List<Map<String, Object>>>> sources() {
+        return ResultResponses.handle(materialService::sources, log, "查询素材来源失败");
+    }
+
+    /** POST /api/material/sources/delete {book, withCandidates?}：删除该书未保留的素材 → {deleted, kept, candidatesIgnored} */
+    @PostMapping("/sources/delete")
+    public ResponseEntity<Result<Map<String, Object>>> deleteSource(@RequestBody SourceDeleteReq req) {
+        return ResultResponses.handle(() -> materialService.deleteBySource(req.getBook(),
+                Boolean.TRUE.equals(req.getWithCandidates())), log, "按来源删除素材失败");
+    }
+
+    /** POST /api/material/{id}/pin {pinned}：保留 / 取消保留 */
+    @PostMapping("/{id}/pin")
+    public ResponseEntity<Result<Material>> pin(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> materialService.setPinned(id, Boolean.TRUE.equals(body.get("pinned"))),
+                log, "保留素材失败，id=" + id);
+    }
+
+    /** POST /api/material/semantic-search {query, category?, tags?, excludeBooks?, limit?}：AI 语义检索（使用启用的模型） */
     @PostMapping("/semantic-search")
     public ResponseEntity<Result<Map<String, Object>>> semantic(@RequestBody SemanticReq req) {
         return ResultResponses.handle(() -> materialService.semanticSearch(req.getQuery(), req.getCategory(), req.getTags(),
-                req.getLimit() == null ? 20 : req.getLimit()), log, "语义检索失败");
+                req.getExcludeBooks(), req.getLimit() == null ? 20 : req.getLimit()), log, "语义检索失败");
     }
 
     @GetMapping("/{id}")
@@ -125,7 +152,14 @@ public class MaterialController {
         private String query;
         private String category;
         private List<String> tags;
+        private List<String> excludeBooks;
         private Integer limit;
+    }
+
+    @Data
+    public static class SourceDeleteReq {
+        private String book;
+        private Boolean withCandidates;
     }
 
     @Data

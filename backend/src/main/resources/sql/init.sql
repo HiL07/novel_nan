@@ -134,12 +134,15 @@ CREATE TABLE IF NOT EXISTS material (
     detail      TEXT,
     tags        TEXT,                              -- JSON 数组（检索走 material_tag）
     source      TEXT,                              -- JSON：{type, extractId, fileId, fileName, chapters, excerpt}
+    source_book TEXT,                              -- 来源书名（文件名去扩展名；手动添加可自填），按书筛选 / 屏蔽 / 删除
+    pinned      INTEGER NOT NULL DEFAULT 0,        -- 1 = 保留：按书删除、屏蔽来源书都不影响它
     use_count   INTEGER NOT NULL DEFAULT 0,
     create_time TEXT    NOT NULL,
     update_time TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_material_category ON material (category);
 CREATE INDEX IF NOT EXISTS idx_material_update_time ON material (update_time);
+CREATE INDEX IF NOT EXISTS idx_material_source_book ON material (source_book);
 
 CREATE TABLE IF NOT EXISTS material_tag (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

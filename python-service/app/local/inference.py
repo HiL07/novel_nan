@@ -170,20 +170,22 @@ def check_adapter(adapter_id: str, base_id: str) -> dict:
             raise RuntimeError(f"适配器「{adapter['name']}」是基于「{trained_on.get('name')}」训练的，"
                                f"只能与已校验一致的本地模型 {adapter['matchedBaseId']} 一起加载")
         return adapter
-    if trained_on.get("id") != base_id:
-        raise RuntimeError(f"适配器「{adapter['name']}」是基于「{trained_on.get('name')}」训练的，不能用于当前基础模型")
     if compat == "changed":
         raise RuntimeError("基础模型的 config.json 已与训练时不同，适配器可能不兼容")
     if compat == "missing":
         raise RuntimeError("适配器训练时使用的基础模型已不存在")
+    if adapter["matchedBaseId"] != base_id:
+        raise RuntimeError(f"适配器「{adapter['name']}」是基于「{trained_on.get('name')}」训练的，不能用于当前基础模型")
     return adapter
 
 
-def load(base_id: str, adapter_id: str | None = None, quantization: str = "auto") -> dict:
-    """异步加载；立即返回当前状态。同一基础模型 + 量化已加载时只切换适配器，不重载基础模型。"""
+def load(base_id: str, adapter_id: str | None = None, quantization: str = "auto", *,
+         from_generation: bool = False) -> dict:
+    """异步加载；立即返回当前状态。同一基础模型 + 量化已加载时只切换适配器，不重载基础模型。
+    from_generation=True：由正在运行的章节任务自己调用（如生成后润色），跳过「章节生成中」的拦截。"""
     if _gpu_busy_check():
         raise RuntimeError("有训练任务正在使用 GPU，请等待完成或取消后再加载模型")
-    if _generation_busy_check():
+    if not from_generation and _generation_busy_check():
         raise RuntimeError("小说章节正在生成，请等待完成或取消后再切换模型")
     if not hardware.deps_info()["ready"]:
         raise RuntimeError("未安装本地模型依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")
@@ -209,7 +211,7 @@ def load(base_id: str, adapter_id: str | None = None, quantization: str = "auto"
             _state.update(status="loading", adapterId=adapter_id, attachedAdapterId=adapter_id, error=None)
             threading.Thread(target=_do_attach, args=(adapter,), daemon=True, name="adapter-attach").start()
             return {**status(), "switched": True}
-        unload()
+        unload(from_generation=from_generation)
         _state.update(status="loading", baseId=base_id, adapterId=adapter_id, attachedAdapterId=adapter_id,
                       quantization=quant, error=None, loadedAt=None, loadSeconds=None)
     threading.Thread(target=_do_load, args=(base, adapter, quant), daemon=True, name="model-load").start()
@@ -226,8 +228,8 @@ def _free() -> None:
         torch.cuda.empty_cache()
 
 
-def unload() -> None:
-    if _generation_busy_check():
+def unload(*, from_generation: bool = False) -> None:
+    if not from_generation and _generation_busy_check():
         raise RuntimeError("小说章节正在生成，请等待完成或取消后再卸载模型 / 开始训练")
     with _lock:
         if _state["status"] == "loading":
@@ -303,6 +305,67 @@ def compare(prompt: str, *, seed: int = 1234, **kw) -> dict:
             "adapter": generate(prompt, use_adapter=True, seed=seed, **kw)}
 
 
+def evaluate(text: str, *, max_tokens: int = 4096, block: int = 512) -> dict:
+    """同一段文本分别在停用 / 启用适配器时计算平均 token 交叉熵与困惑度（不采样，结果确定）。
+
+    风格适配器有效的表现：在目标风格文本上 adapter 的 loss 明显低于 base；在无关文本上差距小得多（或变高）。
+    文本按 block 个 token 切块、整块计算，最多取前 max_tokens 个 token。"""
+    import math
+
+    import torch
+
+    with _lock:
+        if _state["status"] != "loaded" or _model is None:
+            raise RuntimeError("请先加载模型")
+        if not _state["attachedAdapterId"]:
+            raise RuntimeError("评估需要先加载带适配器的模型")
+        model, tokenizer, adapter_id = _model, _tokenizer, _state["attachedAdapterId"]
+    ids = tokenizer(text, add_special_tokens=False)["input_ids"][:max_tokens]
+    if len(ids) < 16:
+        raise RuntimeError("评估文本太短（至少约 16 个 token）")
+    chunks = [ids[i:i + block] for i in range(0, len(ids), block) if len(ids[i:i + block]) >= 16]
+
+    def run(use_adapter: bool) -> dict:
+        total_loss, total_tokens = 0.0, 0
+        with torch.inference_mode(), _adapter_scope(model, use_adapter):
+            for c in chunks:
+                x = torch.tensor([c], device=model.device)
+                loss = model(input_ids=x, labels=x).loss.float().item()  # 预测 len(c)-1 个 token 的平均损失
+                total_loss += loss * (len(c) - 1)
+                total_tokens += len(c) - 1
+        mean = total_loss / total_tokens
+        return {"loss": round(mean, 4), "ppl": round(math.exp(mean), 2)}
+
+    start = time.monotonic()
+    with _gen_lock:
+        try:
+            base, adapted = run(False), run(True)
+        except torch.cuda.OutOfMemoryError as e:
+            torch.cuda.empty_cache()
+            raise RuntimeError("评估时显存不足：请缩短评估文本") from e
+    return {"adapterId": adapter_id, "tokens": sum(len(c) - 1 for c in chunks), "chunks": len(chunks),
+            "base": base, "adapter": adapted, "lossDelta": round(adapted["loss"] - base["loss"], 4),
+            "pplChangePct": round((adapted["ppl"] / base["ppl"] - 1) * 100, 1),
+            "seconds": round(time.monotonic() - start, 1)}
+
+
+
+def wait_loaded(timeout: float = 900, stop_event: threading.Event | None = None) -> dict:
+    """等待后台加载结束（供后台任务使用）；失败 / 超时 / 取消时抛 RuntimeError。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        s = status()
+        if s["status"] == "loaded":
+            return s
+        if s["status"] == "error":
+            raise RuntimeError(f"本地模型加载失败：{s['error']}")
+        if s["status"] == "idle":
+            raise RuntimeError("本地模型未在加载")
+        if stop_event and stop_event.is_set():
+            raise RuntimeError("已取消")
+        time.sleep(1)
+    raise RuntimeError("本地模型加载超时")
+
 
 def loaded_model() -> dict | None:
     """当前已加载的模型信息（未加载返回 None）。"""
@@ -313,8 +376,10 @@ def loaded_model() -> dict | None:
 
 
 def chat_generate(messages: list[dict], *, max_new_tokens: int, temperature: float = 0.7, top_p: float = 0.8,
-                  top_k: int = 20, repetition_penalty: float = 1.1, stop_event: threading.Event | None = None) -> dict:
+                  top_k: int = 20, repetition_penalty: float = 1.1, stop_event: threading.Event | None = None,
+                  use_adapter: bool | None = None) -> dict:
     """按聊天模板生成（支持 system 消息）。stop_event 被置位时在下一个 token 处停止。
+    use_adapter：None = 按当前启用状态；False = 本次停用已挂载的适配器（如摘要调用只用基础模型）。
 
     返回 {text, promptTokens, completionTokens, finishReason: stop|length|cancelled, seconds}
     """
@@ -325,7 +390,7 @@ def chat_generate(messages: list[dict], *, max_new_tokens: int, temperature: flo
         if _state["status"] != "loaded" or _model is None:
             raise RuntimeError("请先加载模型")
         model, tokenizer = _model, _tokenizer
-        use_adapter = _state["adapterId"] is not None
+        use_adapter = _state["adapterId"] is not None and use_adapter is not False
 
     class _Cancel(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):

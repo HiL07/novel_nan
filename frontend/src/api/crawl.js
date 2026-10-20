@@ -62,3 +62,16 @@ export function cancelCrawl(id) {
 export function retryCrawl(id) {
   return request.post(`/api/novel/crawl/${id}/retry`).then((res) => res.data)
 }
+
+/**
+ * 从断点继续（同一任务；已抓章节不重抓，整站跳过已完成的书），POST /api/novel/crawl/{id}/resume
+ * newOrigin：站点换了域名 / IP（路径不变）时填 http(s)://新域名[:端口]，可空
+ */
+export function resumeCrawl(id, newOrigin) {
+  return request.post(`/api/novel/crawl/${id}/resume`, newOrigin ? { newOrigin } : {}).then((res) => res.data)
+}
+
+/** 断点概况 {chapterSaved, chapterTotal, booksWithCheckpoint, booksPending, url}，GET /api/novel/crawl/{id}/checkpoint */
+export function getCrawlCheckpoint(id) {
+  return request.get(`/api/novel/crawl/${id}/checkpoint`).then((res) => res.data)
+}

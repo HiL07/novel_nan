@@ -49,6 +49,12 @@ public class Material {
     @TableField(typeHandler = JacksonTypeHandler.class)
     private Map<String, Object> source;
 
+    /** 来源书名（提取素材 = 文件名去扩展名；手动添加可自填，空 = 手动）。用于按书筛选 / 屏蔽 / 删除 */
+    private String sourceBook;
+
+    /** 保留：按来源书删除、在 AI 生成中屏蔽来源书时，保留的素材都不受影响 */
+    private Boolean pinned;
+
     /** 被应用到工作区的次数 */
     private Integer useCount;
 

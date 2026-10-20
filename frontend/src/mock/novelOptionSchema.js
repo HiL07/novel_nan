@@ -126,30 +126,67 @@ const world = {
 }
 
 /* ============================== 角色 ============================== */
+// 角色卡（参考 character.ai 的角色创建）：section 决定在卡片里的分页——
+// basic 基本信息 / persona 性格与说话方式（含开场白、示例对话，可「试聊」检验口吻）/ inner 内心 / story 经历与能力
 const characterFields = [
-  { key: 'name', label: '姓名', type: 'text', placeholder: '留空则由 AI 起名' },
+  { key: 'name', label: '姓名', type: 'text', section: 'basic', placeholder: '留空则由 AI 起名' },
+  { key: 'tagline', label: '一句话人设', type: 'text', section: 'basic', placeholder: '如：嘴硬心软、欠了一屁股债的落魄剑客' },
   {
     key: 'role',
+    section: 'basic',
     label: '角色定位',
     type: 'single',
     options: [opt('protagonist', '主角'), opt('heroine', '女主 / 男主'), opt('villain', '反派'), opt('mentor', '导师'), opt('partner', '伙伴'), opt('rival', '宿敌'), opt('support', '配角')]
   },
-  { key: 'gender', label: '性别', type: 'single', options: [opt('male', '男'), opt('female', '女'), opt('other', '其他 / 不设定')] },
+  { key: 'gender', label: '性别', type: 'single', section: 'basic', options: [opt('male', '男'), opt('female', '女'), opt('other', '其他 / 不设定')] },
   {
     key: 'age',
+    section: 'basic',
     label: '年龄段',
     type: 'single',
     options: [opt('child', '少年'), opt('youth', '青年'), opt('middle', '中年'), opt('old', '老年'), opt('immortal', '不老 / 长生')]
   },
+  { key: 'appearance', label: '外貌特征', type: 'textarea', section: 'basic', placeholder: '让人一眼记住的样子：身形、衣着、标志性细节' },
   {
     key: 'personality',
     label: '性格',
     type: 'multi',
+    section: 'persona',
     max: 4,
     options: [opt('calm', '冷静'), opt('hot', '热血'), opt('cunning', '腹黑'), opt('kind', '善良'), opt('arrogant', '高傲'), opt('humor', '幽默'), opt('cold', '冷漠'), opt('stubborn', '执拗')]
   },
+  { key: 'personalityDetail', label: '性格详述', type: 'textarea', section: 'persona', placeholder: '性格的矛盾面、对不同人的不同态度、行为习惯' },
+  {
+    key: 'speech',
+    label: '说话风格',
+    type: 'single',
+    section: 'persona',
+    options: [opt('terse', '简短冷淡'), opt('chatty', '话多跳脱'), opt('elegant', '文雅古风'), opt('blunt', '粗犷直率'), opt('gentle', '温柔细腻'), opt('sarcastic', '毒舌嘲讽'), opt('formal', '一板一眼')]
+  },
+  { key: 'catchphrases', label: '口头禅 / 常用语', type: 'tags', section: 'persona', placeholder: '如：「麻烦。」「有意思。」，回车添加' },
+  {
+    key: 'greeting',
+    label: '开场白',
+    type: 'textarea',
+    section: 'persona',
+    desc: '试聊时角色说的第一句话',
+    placeholder: '（靠在墙边擦剑，头也不抬）又是来讨债的？我说过，剑在人在，钱……没有。'
+  },
+  {
+    key: 'dialogue',
+    label: '示例对话',
+    type: 'textarea',
+    section: 'persona',
+    desc: '几段典型对话，定下角色的口吻（试聊满意的回合可一键存到这里）',
+    placeholder: '对方：你为什么要帮我？\n角色：（别过脸）谁帮你了，我只是顺路。'
+  },
+  { key: 'goal', label: '核心目标 / 动机', type: 'text', section: 'inner', placeholder: '如：为家族复仇、找回失踪的妹妹' },
+  { key: 'fear', label: '弱点与恐惧', type: 'text', section: 'inner', placeholder: '如：怕水；最怕再次失去亲人' },
+  { key: 'secret', label: '秘密', type: 'textarea', section: 'inner', placeholder: '角色藏着、读者稍后才知道的事' },
+  { key: 'bottomLine', label: '价值观 / 底线', type: 'text', section: 'inner', placeholder: '如：绝不对妇孺出手' },
   {
     key: 'cheat',
+    section: 'story',
     label: '金手指',
     type: 'single',
     desc: '主角的特殊优势（配角可不选）',
@@ -172,9 +209,14 @@ const characterFields = [
       opt('none', '无金手指', '纯靠自身')
     ]
   },
-  { key: 'goal', label: '核心目标 / 动机', type: 'text', placeholder: '如：为家族复仇、找回失踪的妹妹' },
-  { key: 'background', label: '背景故事', type: 'textarea' }
+  { key: 'abilities', label: '能力 / 特长', type: 'tags', section: 'story', placeholder: '如：拔剑术、过目不忘，回车添加' },
+  { key: 'relationToLead', label: '与主角的关系', type: 'text', section: 'story', placeholder: '如：青梅竹马，后来立场对立' },
+  { key: 'background', label: '背景故事', type: 'textarea', section: 'story' },
+  { key: 'arc', label: '成长弧光', type: 'textarea', section: 'story', placeholder: '开篇是什么样的人，经历什么，最后变成什么样' }
 ]
+
+/** 设定结构版本：保存的工作区设定低于此版本时，在加载时补上新增的内置字段（见 novel-options/schema.js#upgradeConfig） */
+export const SCHEMA_VERSION = 2
 
 const characters = {
   key: 'characters',
@@ -186,8 +228,9 @@ const characters = {
       key: 'cast',
       label: '主要角色',
       type: 'group',
+      display: 'characterCards',
       itemLabel: '角色',
-      desc: '可添加任意多个角色，每个角色独立设定',
+      desc: '角色卡：一句话让 AI 创建角色，填好性格与说话方式后可以「试聊」检验口吻',
       fields: characterFields
     },
     {
@@ -462,6 +505,7 @@ const genericSuggestions = [
 ]
 
 export default {
+  schemaVersion: SCHEMA_VERSION,
   categories: [world, characters, plot, style],
   elementTemplates,
   genericSuggestions

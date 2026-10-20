@@ -33,6 +33,10 @@ class CrawlError(Exception):
     pass
 
 
+class NetworkError(CrawlError):
+    """断网 / DNS 失败 / 超时 / 5xx 等暂时性故障（重试已用完）。抓取任务遇到它会等待后重试同一章，而不是记为失败。"""
+
+
 def quote_url(url: str) -> str:
     """只编码非 ASCII 等不安全字符，已编码的 %XX 保持不变。"""
     return quote(url, safe=":/?#[]@!$&'()*+,;=%~")
@@ -56,7 +60,7 @@ def check_url(url: str) -> str:
         try:
             infos = socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
         except socket.gaierror:
-            raise CrawlError(f"无法解析域名：{parts.hostname}")
+            raise NetworkError(f"无法解析域名：{parts.hostname}（网络断开，或站点域名已失效）")
         is_domain = not _is_ip_literal(parts.hostname)
         for info in infos:
             ip = ipaddress.ip_address(info[4][0].split("%")[0])
@@ -119,7 +123,7 @@ class Fetcher:
                 last_err = e
                 log.info("抓取失败（第 %d 次）%s：%s", attempt + 1, url, e)
                 time.sleep(min(2 ** attempt, 5))
-        raise CrawlError(f"请求失败：{url}（{last_err}）")
+        raise NetworkError(f"请求失败：{url}（{last_err}）")
 
     def _throttle(self) -> None:
         with self._lock:

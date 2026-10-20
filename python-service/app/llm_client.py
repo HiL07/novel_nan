@@ -89,17 +89,8 @@ def _raise_for_status(resp: httpx.Response) -> None:
     raise LLMError(f"请求被拒绝（{code}）：{detail}", fatal=code in (400, 422))
 
 
-def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: bool = True,
-         retries: int = 2, timeout: float | None = None) -> str:
-    """发送一次对话，返回文本。429/5xx/超时自动重试；不支持 json_object 的服务自动降级。"""
-    payload = {
-        "model": cfg.model,
-        "messages": messages,
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-    }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
+def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | None) -> dict:
+    """POST /chat/completions，返回响应 JSON。429/5xx/超时自动重试；不支持 json_object 的服务自动降级。"""
     headers = {"Authorization": f"Bearer {cfg.apiKey}"} if cfg.apiKey else {}
     timeout = timeout or config.LLM_TIMEOUT
 
@@ -113,7 +104,9 @@ def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: boo
                 resp = httpx.post(_endpoint(cfg), json=payload, headers=headers,
                                   timeout=timeout, trust_env=_trust_env(cfg))
             _raise_for_status(resp)
-            return resp.json()["choices"][0]["message"]["content"] or ""
+            data = resp.json()
+            data["choices"][0]["message"]  # 校验结构
+            return data
         except LLMError as e:
             if e.fatal or attempt == retries:
                 raise
@@ -127,6 +120,37 @@ def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: boo
             raise LLMError("模型返回格式不符合 OpenAI 兼容接口", fatal=True)
         time.sleep(2 * (attempt + 1))
     raise LLMError("模型调用失败")
+
+
+def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: bool = True,
+         retries: int = 2, timeout: float | None = None) -> str:
+    """发送一次对话，返回文本（提取 / 校验用：低温度，默认 JSON 模式）。"""
+    payload = {
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    return _post_chat(cfg, payload, retries, timeout)["choices"][0]["message"]["content"] or ""
+
+
+def complete(cfg: ModelConfig, messages: list[dict], *, max_tokens: int, temperature: float, top_p: float,
+             json_mode: bool = False, retries: int = 2, timeout: float | None = None) -> dict:
+    """创作用的一次对话：返回 {text, promptTokens, completionTokens, finishReason: stop|length}。
+    token 数取服务端 usage（没有时为 0，由调用方估算）。"""
+    payload = {"model": cfg.model, "messages": messages, "max_tokens": max_tokens,
+               "temperature": temperature, "top_p": top_p}
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    data = _post_chat(cfg, payload, retries, timeout)
+    choice = data["choices"][0]
+    usage = data.get("usage") or {}
+    return {"text": choice["message"].get("content") or "",
+            "promptTokens": int(usage.get("prompt_tokens") or 0),
+            "completionTokens": int(usage.get("completion_tokens") or 0),
+            "finishReason": "length" if choice.get("finish_reason") == "length" else "stop"}
 
 
 def verify(cfg: ModelConfig) -> dict:

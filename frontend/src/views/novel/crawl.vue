@@ -19,12 +19,21 @@
       <el-form label-width="104px" @submit.prevent>
         <el-form-item :label="mode === 'book' ? '目录页地址' : '站点地址'">
           <div class="url-row">
-            <el-input
+            <el-autocomplete
               v-model="form.url"
+              class="url-input"
+              :fetch-suggestions="suggestUrls"
               :placeholder="mode === 'book' ? 'https://example.com/book/123/' : 'https://example.com/（站点首页或分类列表页）'"
               clearable
               @keyup.enter="mode === 'book' ? doPreview() : doDiscover()"
-            />
+            >
+              <template #default="{ item }">
+                <div class="url-option">
+                  <span>{{ item.label }}</span>
+                  <span class="meta">{{ item.value }}</span>
+                </div>
+              </template>
+            </el-autocomplete>
             <el-button v-if="mode === 'book'" type="primary" :loading="previewing" :disabled="!form.url" @click="doPreview">
               解析目录
             </el-button>
@@ -251,13 +260,14 @@
         </el-table-column>
         <el-table-column prop="message" label="说明" min-width="220" show-overflow-tooltip />
         <el-table-column prop="createTime" label="创建时间" width="170" />
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
             <el-button v-if="isActive(row)" link type="danger" @click="doCancel(row)">取消</el-button>
             <template v-else>
               <el-button v-if="row.mode === 'site'" link type="primary" @click="openBooks(row)">书籍明细</el-button>
               <el-button v-else-if="row.fileId" link type="primary" @click="openExtract(row)">小说提取</el-button>
-              <el-button link @click="doRetry(row)">重新抓取</el-button>
+              <el-button v-if="canResume(row)" link type="warning" @click="openResume(row)">继续抓取</el-button>
+              <el-button link @click="doRetry(row)">从头重抓</el-button>
               <el-button link @click="reuseOptions(row)">改参数</el-button>
             </template>
           </template>
@@ -296,22 +306,62 @@
       </el-table>
     </el-dialog>
 
+    <!-- 断点续抓 -->
+    <el-dialog v-model="resumeDlg.visible" title="从断点继续抓取" width="560px">
+      <el-descriptions :column="1" border size="small">
+        <el-descriptions-item label="任务">{{ resumeDlg.task?.bookName || resumeDlg.task?.url }}</el-descriptions-item>
+        <el-descriptions-item label="当前地址">{{ resumeDlg.task?.url }}</el-descriptions-item>
+        <el-descriptions-item label="已保存进度">
+          <span v-if="resumeDlg.loading">查询中…</span>
+          <span v-else-if="!resumeDlg.info">（AI 服务未启动，暂时查不到断点；继续抓取时会自动使用）</span>
+          <template v-else-if="resumeDlg.task?.mode === 'site'">
+            已完成 {{ resumeDlg.task.bookDone || 0 }}/{{ resumeDlg.task.bookTotal || 0 }} 本；
+            未完成的 {{ resumeDlg.info.booksPending }} 本中 {{ resumeDlg.info.booksWithCheckpoint }} 本有断点，
+            共已保存 {{ resumeDlg.info.chapterSaved }} 章
+          </template>
+          <template v-else-if="resumeDlg.info.chapterTotal">
+            已保存 {{ resumeDlg.info.chapterSaved }}/{{ resumeDlg.info.chapterTotal }} 章（这些章节不会重抓）
+          </template>
+          <span v-else>还没有断点（目录尚未解析成功），将从目录页开始</span>
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-form label-width="112px" class="resume-form" @submit.prevent>
+        <el-form-item label="站点换地址了？">
+          <el-input
+            v-model="resumeDlg.newOrigin"
+            placeholder="可空。如 https://www.new-domain.com（协议 + 域名 / IP[:端口]）"
+            clearable
+          />
+          <div class="meta">
+            站点换了域名或 IP、但页面路径不变时填写：任务地址和断点里的章节地址会整体换到新站点。
+            断点里存有完整章节清单，即使目录页已经打不开，也能把剩下的章节抓完。
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="resumeDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="resumeDlg.submitting" @click="doResume">继续抓取</el-button>
+      </template>
+    </el-dialog>
+
     <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.fileName" @confirm="doExtract" />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onDeactivated, reactive, ref } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import {
   cancelCrawl,
   discoverCrawl,
+  getCrawlCheckpoint,
   listCrawlBooks,
   listCrawlPresets,
   listCrawls,
   previewCrawl,
+  resumeCrawl,
   retryCrawl,
   submitCrawl,
   submitSiteCrawl
@@ -361,7 +411,68 @@ const loading = ref(false)
 const tasks = ref([])
 const booksDlg = reactive({ visible: false, crawl: null, title: '', books: [], loading: false })
 const extractDlg = reactive({ visible: false, fileId: null, fileName: '' })
+const resumeDlg = reactive({ visible: false, task: null, info: null, loading: false, newOrigin: '', submitting: false })
 let timer = null
+
+// 本机浏览器里记住表单草稿与最近用过的地址（刷新 / 关页面后还在）；已提交任务的地址另存在数据库的任务表里
+const DRAFT_KEY = 'nan_novel.crawl.draft'
+const RECENT_KEY = 'nan_novel.crawl.recentUrls'
+const MAX_RECENT = 30
+const recentUrls = ref(readJson(RECENT_KEY, []))
+
+function readJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // 隐私模式 / 存储被禁用：不影响使用
+  }
+}
+
+/** 记住用过的地址（解析 / 发现时），最近的在前 */
+function rememberUrl(url, label) {
+  if (!url) return
+  const rest = recentUrls.value.filter((r) => r.url !== url)
+  const old = recentUrls.value.find((r) => r.url === url)
+  recentUrls.value = [{ url, label: label || old?.label || '', mode: mode.value }, ...rest].slice(0, MAX_RECENT)
+  writeJson(RECENT_KEY, recentUrls.value)
+}
+
+/** 地址框候选：本机最近用过的 + 数据库里所有抓取任务的地址（含失败 / 中断的） */
+function suggestUrls(query, cb) {
+  const seen = new Set()
+  const items = []
+  const push = (url, label) => {
+    if (!url || seen.has(url)) return
+    seen.add(url)
+    items.push({ value: url, label })
+  }
+  recentUrls.value.forEach((r) => push(r.url, r.label || (r.mode === 'site' ? '整站 · 最近使用' : '最近使用')))
+  tasks.value.forEach((t) =>
+    push(t.url, `${t.bookName || (t.mode === 'site' ? '整站' : '任务')} · ${STATUS[t.status]?.label || t.status}`)
+  )
+  const q = (query || '').trim().toLowerCase()
+  cb(q ? items.filter((i) => i.value.toLowerCase().includes(q) || i.label.toLowerCase().includes(q)) : items)
+}
+
+function restoreDraft() {
+  const d = readJson(DRAFT_KEY, null)
+  if (!d) return
+  if (d.mode === 'site' || d.mode === 'book') mode.value = d.mode
+  if (d.form) {
+    Object.assign(form, emptyForm(), d.form, { rule: { ...emptyForm().rule, ...(d.form.rule || {}) } })
+    if (Object.values(form.rule).some(Boolean) || form.removeText) advancedOpen.value = ['adv']
+  }
+  if (d.site) Object.assign(site, emptySite(), d.site)
+}
 
 function emptyForm() {
   return {
@@ -377,6 +488,9 @@ function emptyForm() {
 function emptySite() {
   return { maxBooks: 20, maxCategories: 10, maxListPages: 5, maxChaptersPerBook: 0, verify: true, categoriesText: '' }
 }
+
+restoreDraft()
+watch([mode, form, site], () => writeJson(DRAFT_KEY, { mode: mode.value, form, site }), { deep: true })
 
 const tipText = computed(() =>
   mode.value === 'book'
@@ -437,6 +551,7 @@ async function loadPresets() {
 
 async function doPreview() {
   if (!form.url) return
+  rememberUrl(form.url.trim())
   previewing.value = true
   preview.value = null
   try {
@@ -446,6 +561,7 @@ async function doPreview() {
       return
     }
     preview.value = res.data
+    rememberUrl(form.url.trim(), res.data.bookName)
     range.start = 1
     range.end = res.data.chapterCount
   } catch (e) {
@@ -477,6 +593,7 @@ async function doSubmit() {
 /** 整站：发现书籍（首页 → 分类 → 列表翻页 → 书籍详情 → 目录），同步返回清单 */
 async function doDiscover() {
   if (!form.url) return
+  rememberUrl(form.url.trim())
   discovering.value = true
   siteResult.value = null
   selectedBooks.value = []
@@ -487,6 +604,7 @@ async function doDiscover() {
       return
     }
     siteResult.value = res.data
+    rememberUrl(form.url.trim(), res.data.siteName ? `整站 · ${res.data.siteName}` : '整站')
     const books = res.data.books || []
     ElMessage.success(`发现 ${books.length} 本书，已默认全选（可取消勾选）`)
     await nextTick()
@@ -584,6 +702,43 @@ async function doCancel(row) {
     await loadTasks()
   } catch (e) {
     ElMessage.error(errorMessage(e, '取消失败'))
+  }
+}
+
+/** 失败 / 取消 / 中断的任务，以及还有书没抓完的整站任务，可以从断点继续 */
+function canResume(row) {
+  if (row.status === 'FAILED' || row.status === 'CANCELLED') return true
+  return row.mode === 'site' && row.status === 'SUCCEEDED' && (row.bookDone || 0) < (row.bookTotal || 0)
+}
+
+async function openResume(row) {
+  Object.assign(resumeDlg, { visible: true, task: row, info: null, loading: true, newOrigin: '', submitting: false })
+  try {
+    const res = await getCrawlCheckpoint(row.id)
+    if (res.code === 0) resumeDlg.info = res.data
+  } catch {
+    // AI 服务没启动时查不到断点，不影响继续
+  } finally {
+    resumeDlg.loading = false
+  }
+}
+
+async function doResume() {
+  resumeDlg.submitting = true
+  try {
+    const res = await resumeCrawl(resumeDlg.task.id, resumeDlg.newOrigin.trim())
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '继续抓取失败')
+      return
+    }
+    ElMessage.success('已从断点继续抓取')
+    resumeDlg.visible = false
+    await loadTasks()
+    schedulePoll()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '继续抓取失败'))
+  } finally {
+    resumeDlg.submitting = false
   }
 }
 
@@ -709,6 +864,18 @@ onDeactivated(stopPoll)
   display: flex;
   gap: 8px;
   width: 100%;
+}
+.url-input {
+  flex: 1;
+}
+.url-option {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  line-height: 1.4;
+}
+.resume-form {
+  margin-top: 16px;
 }
 .unit {
   margin-left: 6px;

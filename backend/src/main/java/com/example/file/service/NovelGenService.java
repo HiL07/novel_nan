@@ -1,0 +1,252 @@
+package com.example.file.service;
+
+import com.example.file.common.BizException;
+import com.example.file.entity.AiModelConfig;
+import com.example.file.entity.Material;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientResponseException;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+
+/**
+ * 小说生成（大模型工作区）：前端把「开始生成」发到这里，附上「模型配置」中启用且已验证的模型（含 API Key）后转发给
+ * Python /api/gen/novels/{id}/chapters。Key 只经过 Java → Python，Python 只在本次任务内存中使用。
+ * AI 构思（书名 / 大纲 / 下一章）也经这里：Java 另外附上从素材库取出的素材（选中的 + 可选的 AI 语义匹配）。
+ * 其余生成接口（工作区、预览、任务进度、润色）不涉及 Key，前端直接调用 Python。
+ */
+@Service
+public class NovelGenService {
+
+    private static final Logger log = LoggerFactory.getLogger(NovelGenService.class);
+    private static final Pattern NOVEL_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
+    private static final List<String> CHAPTER_FIELDS = List.of("goal", "title", "targetChars");
+    private static final List<String> POLISH_FIELDS = List.of("enabled", "baseId", "adapterId");
+    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "chat");
+    private static final int MAX_MATERIALS = 20;
+    private static final int AUTO_MATERIALS = 8;
+    private static final int AUTO_MIN_SCORE = 50;
+    private static final int DETAIL_CHARS = 300;
+
+    private final AiModelConfigService modelService;
+    private final MaterialService materialService;
+    private final AiServiceClient aiClient;
+    private final ObjectMapper objectMapper;
+
+    public NovelGenService(AiModelConfigService modelService, MaterialService materialService,
+                           AiServiceClient aiClient, ObjectMapper objectMapper) {
+        this.modelService = modelService;
+        this.materialService = materialService;
+        this.aiClient = aiClient;
+        this.objectMapper = objectMapper;
+    }
+
+    /** 返回 Python 的任务对象（data）。只转发白名单字段。 */
+    public JsonNode startChapter(String novelId, Map<String, Object> req) {
+        checkNovelId(novelId);
+        AiModelConfig cfg = modelService.requireActive();
+        Map<String, Object> body = new HashMap<>();
+        for (String k : CHAPTER_FIELDS) {
+            if (req.get(k) != null) {
+                body.put(k, req.get(k));
+            }
+        }
+        if (req.get("polish") instanceof Map<?, ?> polish) {
+            Map<String, Object> p = new HashMap<>();
+            for (String k : POLISH_FIELDS) {
+                if (polish.get(k) != null) {
+                    p.put(k, polish.get(k));
+                }
+            }
+            body.put("polish", p);
+        }
+        return callPython(() -> aiClient.startGenChapter(novelId, body, cfg), "章节生成");
+    }
+
+    /**
+     * AI 构思 / AI 填写设定 / 构思方向建议 / 角色试聊。
+     * req: {kind: title|outline|chapter|fill|direction|chat, source?: api|local, baseId?, adapterId?, hint?, count?, purpose?,
+     *       materialIds?[], autoMaterials?, query?, excludeBooks?[], fill?{mode, path, fields, current, itemLabel, count, existing},
+     *       chat?{character:{name, card}, messages[], scene?, userRole?}, spec?}
+     * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）。
+     * autoMaterials：用 query（为空时用 hint）在素材库做 AI 语义检索（总是用大模型），取相关度 ≥ 50 的前 8 条，与选中的合并。
+     * excludeBooks：屏蔽这些来源书的素材（选中的和自动匹配的都去掉；「保留」的素材不受影响）。
+     * 返回 Python 的结果 + usedMaterials（实际提供给模型的素材）+ blockedMaterials（因屏蔽被去掉的选中素材数）。
+     */
+    public Map<String, Object> ideas(String novelId, Map<String, Object> req) {
+        checkNovelId(novelId);
+        String kind = Objects.toString(req.get("kind"), "");
+        if (!IDEA_KINDS.contains(kind)) {
+            throw new BizException(400, "kind 只能是 " + IDEA_KINDS);
+        }
+        String source = Objects.toString(req.get("source"), "api");
+        if ("remote".equals(source)) {
+            throw new BizException(400, "远程模型（远程 GPU 上的模型 + 适配器）暂未接入");
+        }
+        boolean local = "local".equals(source);
+        String baseId = Objects.toString(req.get("baseId"), "");
+        if (local && baseId.isBlank()) {
+            throw new BizException(400, "请选择本地基础模型");
+        }
+        AiModelConfig cfg = local ? null : modelService.requireActive();
+        String hint = Objects.toString(req.get("hint"), "").trim();
+
+        List<String> excludeBooks = new ArrayList<>();
+        if (req.get("excludeBooks") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o != null && !String.valueOf(o).isBlank()) {
+                    excludeBooks.add(String.valueOf(o).trim());
+                }
+            }
+        }
+        Map<Long, Map<String, Object>> used = new LinkedHashMap<>();
+        List<Long> ids = new ArrayList<>();
+        if (req.get("materialIds") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Number n) {
+                    ids.add(n.longValue());
+                }
+            }
+        }
+        List<Material> picked = materialService.listByIds(ids.stream().limit(MAX_MATERIALS).toList());
+        List<Material> allowed = materialService.withoutBlocked(picked, excludeBooks);
+        for (Material m : allowed) {
+            used.put(m.getId(), usedEntry(m, null, "", false));
+        }
+        if (Boolean.TRUE.equals(req.get("autoMaterials"))) {
+            String query = Objects.toString(req.get("query"), "").trim();
+            if (query.isEmpty()) {
+                query = hint;
+            }
+            if (query.isEmpty()) {
+                throw new BizException(400, "自动匹配素材需要填写构思方向（用它在素材库中检索）");
+            }
+            Object results = materialService.semanticSearch(query, null, null, excludeBooks, AUTO_MATERIALS).get("results");
+            if (results instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> r && r.get("material") instanceof Material m && used.size() < MAX_MATERIALS
+                            && r.get("score") instanceof Integer score && score >= AUTO_MIN_SCORE) {
+                        used.putIfAbsent(m.getId(), usedEntry(m, score, Objects.toString(r.get("reason"), ""), true));
+                    }
+                }
+            }
+        }
+        List<Map<String, Object>> materials = new ArrayList<>();
+        for (Material m : materialService.listByIds(new ArrayList<>(used.keySet()))) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", m.getId());
+            item.put("category", m.getCategory());
+            item.put("subtype", Objects.requireNonNullElse(m.getSubtype(), ""));
+            item.put("title", m.getTitle());
+            String summary = Objects.requireNonNullElse(m.getSummary(), "");
+            String detail = Objects.requireNonNullElse(m.getDetail(), "");
+            item.put("summary", detail.isBlank() ? summary
+                    : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
+            item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
+            item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
+            materials.add(item);
+        }
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("kind", kind);
+        body.put("hint", hint);
+        if (req.get("count") instanceof Number n) {
+            body.put("count", n.intValue());
+        }
+        body.put("materials", materials);
+        if (req.get("purpose") instanceof String purpose && !purpose.isBlank()) {
+            body.put("purpose", purpose.length() > 60 ? purpose.substring(0, 60) : purpose);
+        }
+        // 设定编辑器当前（可能未保存的）设定，原样交给 Python 校验
+        if (req.get("spec") instanceof List<?> spec) {
+            body.put("spec", spec);
+        }
+        if ("fill".equals(kind)) {
+            // 要填写的字段结构与位置
+            if (!(req.get("fill") instanceof Map<?, ?> fill)) {
+                throw new BizException(400, "缺少要填写的字段");
+            }
+            body.put("fill", fill);
+        }
+        if ("chat".equals(kind)) {
+            if (!(req.get("chat") instanceof Map<?, ?> chat)) {
+                throw new BizException(400, "缺少试聊内容");
+            }
+            body.put("chat", chat);
+        }
+        if (local) {
+            Map<String, Object> localModel = new HashMap<>();
+            localModel.put("baseId", baseId);
+            localModel.put("adapterId", req.get("adapterId") instanceof String a && !a.isBlank() ? a : null);
+            body.put("local", localModel);
+        }
+        JsonNode data = callPython(() -> aiClient.genIdeas(novelId, body, cfg), "AI 构思");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> out = objectMapper.convertValue(data, LinkedHashMap.class);
+        out.put("usedMaterials", new ArrayList<>(used.values()));
+        out.put("blockedMaterials", picked.size() - allowed.size());
+        return out;
+    }
+
+    private static Map<String, Object> usedEntry(Material m, Integer score, String reason, boolean auto) {
+        Map<String, Object> e = new LinkedHashMap<>();
+        e.put("id", m.getId());
+        e.put("category", m.getCategory());
+        e.put("title", m.getTitle());
+        e.put("score", score);
+        e.put("reason", reason);
+        e.put("auto", auto);
+        return e;
+    }
+
+    private static void checkNovelId(String novelId) {
+        if (novelId == null || !NOVEL_ID.matcher(novelId).matches()) {
+            throw new BizException(400, "非法的工作区 id");
+        }
+    }
+
+    /** 调 Python 生成接口：连接失败 → 503；Python 拒绝 → 400 + 它的 message；返回 data */
+    private JsonNode callPython(Supplier<JsonNode> call, String what) {
+        JsonNode res;
+        try {
+            res = call.get();
+        } catch (ResourceAccessException e) {
+            throw new BizException(503, "AI 服务不可达或响应超时，请确认 python-service 已启动");
+        } catch (RestClientResponseException e) {
+            // 不记录响应体：FastAPI 的 422 会回显请求（含 API Key）
+            log.warn("AI 服务拒绝{}请求，HTTP {}", what, e.getStatusCode().value());
+            throw new BizException(400, pythonMessage(e));
+        }
+        if (res == null || res.path("code").asInt(-1) != 0) {
+            throw new BizException(400, res == null ? "AI 服务无响应" : res.path("message").asText(what + "失败"));
+        }
+        return res.path("data");
+    }
+
+    /** 只取我们自己的 {message}；校验错误（422）的 detail 可能回显 Key，不透传 */
+    private String pythonMessage(RestClientResponseException e) {
+        if (e.getStatusCode().value() != 422) {
+            try {
+                JsonNode body = objectMapper.readTree(e.getResponseBodyAsString(StandardCharsets.UTF_8));
+                if (body.hasNonNull("message")) {
+                    return body.get("message").asText();
+                }
+            } catch (Exception ignored) {
+                // 非 JSON 响应
+            }
+        }
+        return "AI 服务拒绝请求（HTTP " + e.getStatusCode().value() + "）";
+    }
+}

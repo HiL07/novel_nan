@@ -34,6 +34,9 @@ import java.util.stream.Collectors;
 /**
  * 创作素材库：分类 / 标签 / 关键词检索、AI 语义检索、素材增删改，以及 AI 提取候选的确认流程。
  * 分类代码与 python-service/app/materials.py、前端 api/material.js 保持一致。
+ *
+ * 来源书（source_book）与保留（pinned）：素材按来源书筛选、按书批量删除；AI 生成时可屏蔽某些来源书。
+ * 保留的素材不受「按书删除」和「屏蔽来源书」影响。
  */
 @Service
 public class MaterialService {
@@ -54,6 +57,8 @@ public class MaterialService {
     }
 
     private static final int SEMANTIC_POOL = 150;
+    /** 按来源书筛选时代表「手动添加（无来源书）」 */
+    public static final String MANUAL_BOOK = "__manual__";
 
     private final MaterialMapper materialMapper;
     private final MaterialTagMapper tagMapper;
@@ -110,12 +115,26 @@ public class MaterialService {
      * 关键词 + 标签检索。tagMode = all：须包含全部所选标签；any：包含任一。
      */
     public Page<Material> search(String category, List<String> tags, String tagMode, String keyword, int page, int size) {
+        return search(category, tags, tagMode, keyword, null, null, null, page, size);
+    }
+
+    /**
+     * @param sourceBook   只看某本书的素材（{@link #MANUAL_BOOK} = 手动添加的）；空 = 全部
+     * @param excludeBooks 屏蔽这些来源书的素材（保留的素材除外）
+     * @param pinnedOnly   true = 只看保留的素材
+     */
+    public Page<Material> search(String category, List<String> tags, String tagMode, String keyword,
+                                 String sourceBook, List<String> excludeBooks, Boolean pinnedOnly, int page, int size) {
         Page<Material> pg = new Page<>(Math.max(page, 1), Math.min(Math.max(size, 1), 100));
         List<Long> tagIds = idsWithTags(tags, !"any".equalsIgnoreCase(tagMode));
         if (tagIds != null && tagIds.isEmpty()) {
             return pg;
         }
         LambdaQueryWrapper<Material> q = baseQuery(category, tagIds);
+        applyBooks(q, sourceBook, excludeBooks);
+        if (Boolean.TRUE.equals(pinnedOnly)) {
+            q.eq(Material::getPinned, true);
+        }
         if (keyword != null && !keyword.isBlank()) {
             for (String word : keyword.trim().split("\\s+")) {
                 q.and(w -> w.like(Material::getTitle, word).or().like(Material::getSummary, word)
@@ -138,6 +157,40 @@ public class MaterialService {
         return q;
     }
 
+    /** 来源书筛选 + 屏蔽（屏蔽的书里「保留」的素材仍然可见 / 可用） */
+    private void applyBooks(LambdaQueryWrapper<Material> q, String sourceBook, List<String> excludeBooks) {
+        if (sourceBook != null && !sourceBook.isBlank()) {
+            if (MANUAL_BOOK.equals(sourceBook)) {
+                q.isNull(Material::getSourceBook);
+            } else {
+                q.eq(Material::getSourceBook, sourceBook.trim());
+            }
+        }
+        List<String> excluded = cleanBooks(excludeBooks);
+        if (!excluded.isEmpty()) {
+            q.and(w -> w.isNull(Material::getSourceBook).or().notIn(Material::getSourceBook, excluded)
+                    .or().eq(Material::getPinned, true));
+        }
+    }
+
+    private static List<String> cleanBooks(List<String> books) {
+        if (books == null) {
+            return List.of();
+        }
+        return books.stream().filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty()).distinct().toList();
+    }
+
+    /** 去掉被屏蔽来源书的素材（保留的素材不去掉），保持顺序 */
+    public List<Material> withoutBlocked(List<Material> materials, List<String> excludeBooks) {
+        Set<String> excluded = new LinkedHashSet<>(cleanBooks(excludeBooks));
+        if (excluded.isEmpty()) {
+            return materials;
+        }
+        return materials.stream()
+                .filter(m -> Boolean.TRUE.equals(m.getPinned()) || m.getSourceBook() == null || !excluded.contains(m.getSourceBook()))
+                .toList();
+    }
+
     /** 带有所选标签的素材 id（all = 必须全部包含）；未选标签返回 null 表示不按标签筛选。参数化查询，无拼接 SQL */
     private List<Long> idsWithTags(List<String> tags, boolean all) {
         List<String> clean = normalizeTags(tags);
@@ -158,6 +211,12 @@ public class MaterialService {
      * → ③ 模型按需求打分排序并给出理由。使用「模型配置」中启用的模型。
      */
     public Map<String, Object> semanticSearch(String query, String category, List<String> tags, int limit) {
+        return semanticSearch(query, category, tags, null, limit);
+    }
+
+    /** @param excludeBooks 不参与检索的来源书（其中保留的素材仍参与） */
+    public Map<String, Object> semanticSearch(String query, String category, List<String> tags,
+                                              List<String> excludeBooks, int limit) {
         if (query == null || query.isBlank()) {
             throw new BizException(400, "请输入要查找的内容");
         }
@@ -170,14 +229,19 @@ public class MaterialService {
         expansion.path("tags").forEach(n -> expTags.add(n.asText()));
 
         List<Long> tagIds = idsWithTags(tags, false);
-        long total = tagIds != null && tagIds.isEmpty() ? 0 : materialMapper.selectCount(baseQuery(category, tagIds));
+        LambdaQueryWrapper<Material> countQ = baseQuery(category, tagIds);
+        applyBooks(countQ, null, excludeBooks);
+        long total = tagIds != null && tagIds.isEmpty() ? 0 : materialMapper.selectCount(countQ);
         List<Material> pool;
         if (total == 0) {
             pool = List.of();
         } else if (total <= SEMANTIC_POOL) {
-            pool = materialMapper.selectList(baseQuery(category, tagIds));
+            LambdaQueryWrapper<Material> q = baseQuery(category, tagIds);
+            applyBooks(q, null, excludeBooks);
+            pool = materialMapper.selectList(q);
         } else {
             LambdaQueryWrapper<Material> q = baseQuery(category, tagIds);
+            applyBooks(q, null, excludeBooks);
             List<String> all = new ArrayList<>(words);
             all.addAll(expTags);
             q.and(w -> {
@@ -235,6 +299,16 @@ public class MaterialService {
 
     // ------------------------------------------------------------------ 素材增删改
 
+    /** 按 id 批量取素材（不存在的 id 忽略），保持传入顺序 */
+    public List<Material> listByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        Map<Long, Material> byId = materialMapper.selectBatchIds(ids).stream()
+                .collect(Collectors.toMap(Material::getId, m -> m));
+        return ids.stream().distinct().map(byId::get).filter(Objects::nonNull).toList();
+    }
+
     public Material get(Long id) {
         Material m = materialMapper.selectById(id);
         if (m == null) {
@@ -259,8 +333,21 @@ public class MaterialService {
         m.setAttributes(req.getAttributes() == null ? Map.of() : req.getAttributes());
         m.setDetail(req.getDetail());
         m.setTags(normalizeTags(req.getTags()));
+        if (req.getSourceBook() != null) {
+            String book = req.getSourceBook().trim();
+            m.setSourceBook(book.isEmpty() || MANUAL_BOOK.equals(book) ? null : trimTo(book, 100));
+        }
+        if (req.getPinned() != null) {
+            m.setPinned(req.getPinned());
+        }
         if (req.getId() == null) {
             m.setSource(req.getSource() == null ? Map.of("type", "manual") : req.getSource());
+            if (m.getSourceBook() == null && m.getSource().get("fileName") != null) {
+                m.setSourceBook(bookOf(String.valueOf(m.getSource().get("fileName"))));
+            }
+            if (m.getPinned() == null) {
+                m.setPinned(false);
+            }
             m.setUseCount(0);
             m.setCreateTime(now);
             m.setUpdateTime(now);
@@ -268,9 +355,90 @@ public class MaterialService {
         } else {
             m.setUpdateTime(now);
             materialMapper.updateById(m);
+            if (req.getSourceBook() != null && m.getSourceBook() == null) {
+                // updateById 跳过 null 字段：清空来源书（改为手动）要显式更新
+                materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getId, m.getId())
+                        .set(Material::getSourceBook, null));
+            }
         }
         syncTags(m.getId(), m.getTags());
         return m;
+    }
+
+    /** 保留 / 取消保留 */
+    public Material setPinned(Long id, boolean pinned) {
+        get(id);
+        materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getId, id)
+                .set(Material::getPinned, pinned).set(Material::getUpdateTime, LocalDateTime.now()));
+        return get(id);
+    }
+
+    /**
+     * 来源书列表 [{book, count, pinned}]：book 为 null 表示手动添加；按素材数倒序。
+     * 待确认候选也按书统计（pending），方便看到「这本书还有多少候选没处理」。
+     */
+    public List<Map<String, Object>> sources() {
+        Map<String, long[]> stats = new LinkedHashMap<>();
+        for (Map<String, Object> row : materialMapper.selectMaps(new QueryWrapper<Material>()
+                .select("source_book", "COUNT(*) AS cnt", "SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) AS pinned_cnt")
+                .groupBy("source_book").orderByDesc("cnt"))) {
+            Object book = row.get("source_book");
+            stats.put(book == null ? null : String.valueOf(book),
+                    new long[]{((Number) row.get("cnt")).longValue(), row.get("pinned_cnt") == null ? 0 : ((Number) row.get("pinned_cnt")).longValue(), 0});
+        }
+        for (MaterialCandidate c : candidateMapper.selectList(new LambdaQueryWrapper<MaterialCandidate>()
+                .select(MaterialCandidate::getFileName).eq(MaterialCandidate::getStatus, MaterialCandidate.PENDING))) {
+            String book = bookOf(c.getFileName());
+            if (book != null) {
+                stats.computeIfAbsent(book, k -> new long[3])[2]++;
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        stats.forEach((book, s) -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("book", book);
+            item.put("count", s[0]);
+            item.put("pinned", s[1]);
+            item.put("pending", s[2]);
+            out.add(item);
+        });
+        return out;
+    }
+
+    /**
+     * 按来源书删除：删除该书所有<b>未保留</b>的素材；withCandidates = true 时同时忽略该书的待确认候选。
+     * → {deleted, kept（保留而未删的）, candidatesIgnored}
+     */
+    @Transactional
+    public Map<String, Object> deleteBySource(String book, boolean withCandidates) {
+        String name = book == null ? "" : book.trim();
+        if (name.isEmpty() || MANUAL_BOOK.equals(name)) {
+            throw new BizException(400, "请选择要删除的来源书（手动添加的素材请逐条删除）");
+        }
+        List<Long> ids = materialMapper.selectObjs(new LambdaQueryWrapper<Material>().select(Material::getId)
+                        .eq(Material::getSourceBook, name).and(w -> w.isNull(Material::getPinned).or().eq(Material::getPinned, false)))
+                .stream().map(o -> ((Number) o).longValue()).toList();
+        if (!ids.isEmpty()) {
+            materialMapper.deleteBatchIds(ids);
+            tagMapper.delete(new LambdaQueryWrapper<MaterialTag>().in(MaterialTag::getMaterialId, ids));
+            candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>()
+                    .in(MaterialCandidate::getMaterialId, ids).set(MaterialCandidate::getMaterialId, null));
+        }
+        long kept = materialMapper.selectCount(new LambdaQueryWrapper<Material>().eq(Material::getSourceBook, name));
+        int ignored = 0;
+        if (withCandidates) {
+            List<Long> pending = candidateMapper.selectList(new LambdaQueryWrapper<MaterialCandidate>()
+                            .select(MaterialCandidate::getId, MaterialCandidate::getFileName)
+                            .eq(MaterialCandidate::getStatus, MaterialCandidate.PENDING))
+                    .stream().filter(c -> name.equals(bookOf(c.getFileName()))).map(MaterialCandidate::getId).toList();
+            ignored = ignoreCandidates(pending);
+        }
+        log.info("按来源书《{}》删除素材 {} 条，保留 {} 条，忽略候选 {} 条", name, ids.size(), kept, ignored);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("deleted", ids.size());
+        out.put("kept", kept);
+        out.put("candidatesIgnored", ignored);
+        return out;
     }
 
     @Transactional
@@ -419,6 +587,35 @@ public class MaterialService {
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /** 文件名里的网站标记，如「[lunarora.com]」「【www.xx.net】」 */
+    private static final java.util.regex.Pattern SITE_TAG =
+            java.util.regex.Pattern.compile("[\\[【(（][^\\]】)）]*\\.[A-Za-z]{2,}[^\\]】)）]*[\\]】)）]");
+    /** 重复上传 / 下载产生的副本后缀，如「 (1)」「（2）」「 - 副本」 */
+    private static final java.util.regex.Pattern COPY_SUFFIX =
+            java.util.regex.Pattern.compile("(\\s*[(（]\\d{1,3}[)）]|\\s*-\\s*副本)+$");
+
+    /**
+     * 文件名 → 来源书名：去掉目录、扩展名、书名号、网站标记与副本后缀，空白返回 null。
+     * 如「三体.txt」→「三体」、「三体全集[lunarora.com].txt」→「三体全集」、「谋杀案 (1) (1).txt」→「谋杀案」。
+     */
+    public static String bookOf(String fileName) {
+        if (fileName == null || fileName.isBlank()) {
+            return null;
+        }
+        String name = fileName.replace('\\', '/');
+        name = name.substring(name.lastIndexOf('/') + 1);
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        String cleaned = COPY_SUFFIX.matcher(SITE_TAG.matcher(name).replaceAll("")).replaceAll("").trim();
+        name = cleaned.isEmpty() ? name.trim() : cleaned;
+        if (name.startsWith("《") && name.endsWith("》") && name.length() > 2) {
+            name = name.substring(1, name.length() - 1).trim();
+        }
+        return name.isEmpty() ? null : trimTo(name, 100);
+    }
 
     private static String checkCategory(String category) {
         if (category == null || !CATEGORIES.containsKey(category)) {

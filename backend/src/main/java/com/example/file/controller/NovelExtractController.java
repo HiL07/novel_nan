@@ -59,7 +59,15 @@ public class NovelExtractController {
         return ResultResponses.handle(() -> extractService.getById(id), log, "查询提取任务失败，id=" + id);
     }
 
-    /** 提取选项：materials = {enabled, categories: [world, monster, …], maxPerChunk, focus}（素材候选的提取范围） */
+    /**
+     * POST /api/novel/extract/{id}/result {chapters: [...], characters: [...], style, ...}：保存手动修改后的提取结果（整体替换）。
+     */
+    @PostMapping("/{id}/result")
+    public ResponseEntity<Result<NovelExtract>> updateResult(@PathVariable Long id, @RequestBody Map<String, Object> result) {
+        return ResultResponses.handle(() -> extractService.updateResult(id, result), log, "保存提取结果失败，id=" + id);
+    }
+
+    /** 提取选项：materials ={enabled, categories: [world, monster, …], maxPerChunk, focus}（素材候选的提取范围） */
     @Data
     public static class ExtractOptions {
         private Map<String, Object> materials;

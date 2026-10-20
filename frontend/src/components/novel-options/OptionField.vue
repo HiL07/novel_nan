@@ -6,6 +6,19 @@
       <el-tag v-if="field.custom" size="small" type="warning" effect="plain">自定义</el-tag>
       <span v-if="field.desc" class="field-desc">{{ field.desc }}</span>
       <el-button
+        v-if="ai?.enabled.value && aiFillable(field)"
+        class="ai-btn"
+        link
+        type="primary"
+        size="small"
+        :icon="MagicStick"
+        :loading="ai.busy.value === ai.busyKeyOf(path, field)"
+        :disabled="!!ai.busy.value"
+        @click="ai.fillField(field, container, siblings || [], path)"
+      >
+        AI 生成
+      </el-button>
+      <el-button
         v-if="editMode && siblings"
         class="field-remove"
         link
@@ -29,6 +42,7 @@
           :field="child"
           :container="subContainer(o)"
           :siblings="o.children"
+          :path="[...path, field.label, o.label]"
           :depth="depth + 1"
         />
         <el-button v-if="editMode" class="add-btn" size="small" :icon="Plus" @click="addSubField(o)">
@@ -36,6 +50,9 @@
         </el-button>
       </div>
     </template>
+
+    <!-- 角色卡视图（「主要角色」：一句话 AI 创建、分页编辑、试聊） -->
+    <CharacterCards v-else-if="field.type === 'group' && field.display === 'characterCards'" :field="field" :value="value" :path="path" :depth="depth" />
 
     <!-- 可重复分组：如角色列表、怪物列表 -->
     <template v-else-if="field.type === 'group'">
@@ -56,6 +73,7 @@
           :field="child"
           :container="item"
           :siblings="field.fields"
+          :path="[...path, field.label, `${field.itemLabel || '项'} ${i + 1}${itemName(item) ? '：' + itemName(item) : ''}`]"
           :depth="depth + 1"
         />
       </div>
@@ -63,6 +81,24 @@
         <el-button size="small" type="primary" plain :icon="Plus" @click="value.push(newGroupItem(field))">
           添加{{ field.itemLabel || '项' }}
         </el-button>
+        <el-dropdown
+          v-if="ai?.enabled.value"
+          split-button
+          size="small"
+          type="primary"
+          :disabled="!!ai.busy.value"
+          @click="ai.genItems(field, value, path, 3)"
+          @command="(n) => ai.genItems(field, value, path, n)"
+        >
+          <el-icon v-if="ai.busy.value !== ai.busyKeyOf(path, field)"><MagicStick /></el-icon>
+          <el-icon v-else class="is-loading"><Loading /></el-icon>
+          AI 生成 3 个{{ field.itemLabel || '项' }}
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="n in [1, 2, 5]" :key="n" :command="n">AI 生成 {{ n }} 个</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button v-if="editMode" size="small" :icon="Plus" @click="addGroupField">
           为每个{{ field.itemLabel || '项' }}添加字段
         </el-button>
@@ -76,26 +112,30 @@
 
 <script setup>
 import { computed } from 'vue'
-import { CopyDocument, Delete, Plus } from '@element-plus/icons-vue'
+import { CopyDocument, Delete, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
 import ChoiceWidget from './ChoiceWidget.vue'
 import InputWidget from './InputWidget.vue'
+import CharacterCards from './CharacterCards.vue'
 import { FIELD_TYPES, isChoice } from '@/novel-options/fieldTypes'
 import { clone, ensureValue, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
+import { aiFillable } from '@/novel-options/aiFill'
 
 /**
  * 递归渲染一个选项项。
  * container：本字段所在的取值容器（响应式对象），本字段的值为 container[field.key]
- * siblings：本字段所在的字段数组（编辑模式下用于删除）
+ * siblings：本字段所在的字段数组（编辑模式下用于删除；AI 填写时告诉模型同一位置已填的内容）
+ * path：从分类到本字段所在位置的标签路径（AI 填写时说明位置，如 情节推进 › 关键情节节点 › 节点 2：宗门大比）
  */
 const props = defineProps({
   field: { type: Object, required: true },
   container: { type: Object, required: true },
   siblings: { type: Array, default: null },
+  path: { type: Array, default: () => [] },
   depth: { type: Number, default: 0 }
 })
 
-const { editMode, addField, removeField } = useOptionEditor()
+const { editMode, addField, removeField, ai } = useOptionEditor()
 
 ensureValue(props.container, props.field)
 const value = computed(() => ensureValue(props.container, props.field))
@@ -168,6 +208,9 @@ function duplicateItem(i) {
 .field-remove {
   margin-left: auto;
 }
+.ai-btn {
+  margin-left: 4px;
+}
 .sub-block {
   margin-top: 12px;
   padding: 4px 14px 8px;
@@ -203,5 +246,11 @@ function duplicateItem(i) {
 .group-actions,
 .add-btn {
   margin-top: 8px;
+}
+.group-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 </style>

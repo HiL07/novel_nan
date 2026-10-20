@@ -23,12 +23,25 @@ export const getMaterialCategories = () => get('/api/material/categories')
 /** 标签云 [{tag, count}] */
 export const getMaterialTags = (category) => get('/api/material/tags', { category })
 /**
- * 关键词 + 标签检索（分页）：{category, tags: [], tagMode: 'all'|'any', keyword, page, size}
+ * 关键词 + 标签检索（分页）：{category, tags: [], tagMode: 'all'|'any', keyword, sourceBook?, excludeBooks?: [], pinned?, page, size}
+ * sourceBook：只看某本书（MANUAL_BOOK = 手动添加的）；excludeBooks：屏蔽这些来源书（保留的素材除外）；pinned=true 只看保留的
  * 返回 MyBatis-Plus Page：{records, total, current, size}
  */
-export const searchMaterials = ({ tags = [], ...rest } = {}) =>
-  get('/api/material/list', { ...rest, tags: tags.length ? tags.join(',') : undefined })
-/** AI 语义检索（使用「模型配置」中启用的模型）：{query, category?, tags?, limit?} → {expansion, considered, results: [{material, score, reason}]} */
+export const searchMaterials = ({ tags = [], excludeBooks = [], ...rest } = {}) =>
+  get('/api/material/list', {
+    ...rest,
+    tags: tags.length ? tags.join(',') : undefined,
+    excludeBooks: excludeBooks.length ? excludeBooks.join(',') : undefined
+  })
+/** 「手动添加」（无来源书）在按书筛选时的取值 */
+export const MANUAL_BOOK = '__manual__'
+/** 来源书 [{book（null = 手动添加）, count, pinned（保留数）, pending（待确认候选数）}] */
+export const getMaterialSources = () => get('/api/material/sources')
+/** 按来源书删除未保留的素材：{book, withCandidates?} → {deleted, kept, candidatesIgnored} */
+export const deleteMaterialSource = (book, withCandidates = false) => post('/api/material/sources/delete', { book, withCandidates })
+/** 保留 / 取消保留（保留的素材不会被「按书删除」删掉，屏蔽来源书时也照常可用） */
+export const pinMaterial = (id, pinned) => post(`/api/material/${id}/pin`, { pinned })
+/** AI 语义检索（使用「模型配置」中启用的模型）：{query, category?, tags?, excludeBooks?, limit?} → {expansion, considered, results: [{material, score, reason}]} */
 export const semanticSearch = (body) => post('/api/material/semantic-search', body, { timeout: 150000 })
 export const getMaterial = (id) => get(`/api/material/${id}`)
 /** 新增（无 id）或修改 */

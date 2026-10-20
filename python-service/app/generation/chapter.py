@@ -2,7 +2,10 @@
 
 每段一次模型调用：上下文只带「本章此前内容的末尾」+ 分层设定/前情，不重复处理整章正文。
 停止条件：达到目标字数 / 最后一段模型自然结束 / 用户取消 / 段数上限。
-完成后用同一模型写章节摘要（供后续章节的 L2 前情），摘要过多时合并为前情概要。
+完成后用同一基础模型写章节摘要（停用 LoRA 风格适配器：续写式微调会削弱指令遵循），供后续章节的 L2 前情；
+摘要过多时合并为前情概要。
+可选「润色」：生成后（或对已有章节单独发起）用本地基础模型 + LoRA 适配器逐段改写，原文保存在 originalText，可恢复；
+长度变化过大 / 被截断的段落保留原文，避免小模型改坏情节。
 每次调用的 token 明细（分层用量、实际 prompt/输出 token、结束原因）写入章节 JSON。
 """
 import logging
@@ -12,17 +15,19 @@ import threading
 import time
 import uuid
 
-from ..local import jobs as local_jobs
+from ..local import inference, jobs as local_jobs, registry
 from . import context, prompts, spec as spec_mod, store
-from .backends import GenerationError, GenParams, TextGenerator, get_generator
+from .backends import GenerationError, GenParams, LocalHFGenerator, TextGenerator, get_generator
 
 log = logging.getLogger("generation")
 
 CHARS_PER_TOKEN = 1.6          # 初始估计（实测 Qwen2.5 中文正文约 1.6~1.7 字/token），生成中按实际比例修正
 MERGE_THRESHOLD, MERGE_COUNT = 8, 5
 # 模型偶尔自带的章节标题，含 Markdown 形式：**第1章《退婚》** / # 第1章 …
-HEADING = re.compile(r"^\s*[#*\s]*(第[零〇一二三四五六七八九十百千\d]+章[^\n]{0,30}?|《[^》\n]{1,30}》)[*\s]*\n")
+HEADING = re.compile(r"^\s*[#*【\s]*(第[零〇一二三四五六七八九十百千\d]+章[^\n]{0,30}?|《[^》\n]{1,30}》)[*】\s]*\n")
 SENTENCE_END = "。！？!?…」”』）)"
+# 小模型偶尔把提示词的分节标题连同内容复述出来：从第一个这样的标题起截断
+PROMPT_ECHO = re.compile(r"【(本次任务|核心设定|相关设定|本章此前内容|已设定的角色|尚未设定|前情|上一章结尾)[^】\n]{0,8}】")
 # 正文中途出现的 Markdown 小标题（### xxx），整行去掉
 MD_HEADING_LINE = re.compile(r"^[ \t]*#{1,6}[ \t]+[^\n]*\n?", re.MULTILINE)
 
@@ -34,7 +39,9 @@ def _trim_incomplete(text: str) -> str:
         return text
     cut = max(body.rfind(ch) for ch in SENTENCE_END)
     return body[: cut + 1] + "\n" if cut >= len(body) - 300 else text
-PREAMBLE = re.compile(r"^\s*(好的|以下是|下面是|当然)[^\n]{0,40}[：:]\s*\n")
+PREAMBLE = re.compile(r"^\s*(?:[^\n]{0,12}[！!。]\s*)?(好的|以下是|下面是|当然|润色后)[^\n]{0,40}[：:]\s*\n")
+POLISH_CHUNK_CHARS = 300       # 每次润色的原文长度：小模型一次改写太长容易丢内容
+POLISH_RATIO = (0.7, 1.4)      # 润色结果与原文的字数比超出此范围视为改坏，保留原文
 
 _jobs: dict[str, dict] = {}
 _events: dict[str, threading.Event] = {}
@@ -66,6 +73,9 @@ def cancel(job_id: str) -> dict:
 def _clean(piece: str, written: str) -> str:
     """去掉模型偶尔加的开场白 / 章节标题，以及与前文末尾的重复。"""
     piece = PREAMBLE.sub("", piece, count=1)
+    echo = PROMPT_ECHO.search(piece)
+    if echo:
+        piece = piece[:echo.start()]
     piece = HEADING.sub("", piece, count=1)
     piece = MD_HEADING_LINE.sub("", piece)
     if written:
@@ -109,7 +119,7 @@ def _summarize(gen: TextGenerator, novel: dict, chapter: dict, stop: threading.E
     msgs = [{"role": "system", "content": prompts.SUMMARY_SYSTEM},
             {"role": "user", "content": prompts.summary_user(chapter["index"], chapter["title"], text)}]
     r = gen.generate(msgs, GenParams(max_new_tokens=300, temperature=0.3, top_p=0.8, top_k=20,
-                                     repetition_penalty=1.05, stop_event=stop))
+                                     repetition_penalty=1.05, use_adapter=False, stop_event=stop))
     chapter["summary"] = r.text.strip()
     _record(chapter, novel["id"], {"type": "summary", "promptTokens": r.prompt_tokens,
                                    "completionTokens": r.completion_tokens, "finishReason": r.finish_reason,
@@ -125,7 +135,8 @@ def _merge_arc(gen: TextGenerator, novel: dict, chapter: dict, stop: threading.E
     msgs = [{"role": "system", "content": prompts.SUMMARY_SYSTEM},
             {"role": "user", "content": prompts.arc_user(novel["arcSummary"],
                                                          [f"第{c['index']}章：{c['summary']}" for c in batch])}]
-    r = gen.generate(msgs, GenParams(max_new_tokens=450, temperature=0.3, repetition_penalty=1.05, stop_event=stop))
+    r = gen.generate(msgs, GenParams(max_new_tokens=450, temperature=0.3, repetition_penalty=1.05, use_adapter=False,
+                                     stop_event=stop))
     if r.finish_reason == "cancelled":
         return
     store.update_novel(novel["id"], arcSummary=r.text.strip(), arcUpTo=batch[-1]["index"])
@@ -136,7 +147,10 @@ def _merge_arc(gen: TextGenerator, novel: dict, chapter: dict, stop: threading.E
 
 def _run(job: dict, req: dict) -> None:
     try:
-        _write_chapter(job, req)
+        if job["kind"] == "polish":
+            _polish_only(job, req)
+        else:
+            _write_chapter(job, req)
     except Exception as e:  # noqa: BLE001 —— 任何异常都落到 failed，已写的正文保留
         log.exception("章节生成失败 novel=%s chapter=%s", job["novelId"], job["chapterIndex"])
         try:  # 已写的正文保留，章节标记为失败
@@ -154,7 +168,7 @@ def _write_chapter(job: dict, req: dict) -> None:
     stop = _events[job["id"]]
     novel = store.get_novel(job["novelId"])
     p = novel["params"]
-    gen = get_generator(novel["model"])
+    gen = get_generator(novel["model"], req.get("api"))
     cons = spec_mod.build(novel["settings"].get("spec"))
     index, target = job["chapterIndex"], req["targetChars"]
     seg_tokens = min(p["segmentTokens"], novel["contextWindow"] // 4)
@@ -163,6 +177,7 @@ def _write_chapter(job: dict, req: dict) -> None:
     prev_tail = store.get_chapter(novel["id"], prev[-1]["index"])["text"] if prev else ""
     chapter = {"index": index, "title": req["title"], "goal": req["goal"], "targetChars": target, "text": "",
                "summary": "", "status": "generating", "error": None, "createdAt": store.now(),
+               "model": _model_record(novel["model"], gen),
                "calls": [], "totals": {"promptTokens": 0, "completionTokens": 0, "calls": 0}}
     store.save_chapter(novel["id"], chapter)
     job["status"] = "running"
@@ -215,36 +230,203 @@ def _write_chapter(job: dict, req: dict) -> None:
     if chapter["status"] == "done":
         _merge_arc(gen, store.get_novel(novel["id"]), chapter, stop)
         store.save_chapter(novel["id"], chapter)
+    if chapter["status"] == "done" and (req.get("polish") or {}).get("enabled"):
+        _polish(job, store.get_novel(novel["id"]), chapter, req["polish"], stop)
     job["status"] = chapter["status"] if chapter["status"] == "cancelled" else "succeeded"
 
 
-def start(novel_id: str, req: dict) -> dict:
-    """req: {goal, title, targetChars}。同一时间只允许一个生成任务；训练进行中拒绝。"""
-    with _lock:
-        if active_job():
-            raise JobError("已有章节正在生成，请等待完成或取消")
-        if local_jobs.gpu_busy():
-            raise JobError("有训练任务正在使用 GPU，请等待训练完成")
-        novel = store.get_novel(novel_id)
-        get_generator(novel["model"]).ensure_ready()
-        chapters = store.list_chapters(novel_id)
-        if chapters and chapters[-1]["status"] == "generating":
-            raise JobError(f"第 {chapters[-1]['index']} 章上次未完成（服务可能重启过），请先删除该章再继续")
-        job = {"id": uuid.uuid4().hex[:12], "novelId": novel_id,
-               "chapterIndex": (chapters[-1]["index"] + 1) if chapters else 1,
-               "status": "queued", "phase": "writing", "segment": 0, "error": None, "lastContext": None,
-               "startedAt": store.now(), "endedAt": None}
-        _jobs[job["id"]] = job
-        _events[job["id"]] = threading.Event()
+def _model_record(model: dict, gen: TextGenerator) -> dict:
+    """章节上记录写作所用的模型（不含任何密钥）。"""
+    if model.get("source") == "api":
+        return {"source": "api", "name": gen.name}
+    return {"source": "local", "baseId": model.get("baseId"), "adapterId": model.get("adapterId")}
+
+
+# ---------------------------------------------------------------- 润色（本地模型 + LoRA）
+
+def _polish_chunks(text: str) -> list[str]:
+    """按段落切成不超过 POLISH_CHUNK_CHARS 的块（超长单段落独立成块），块内保留换行。"""
+    chunks, cur = [], ""
+    for para in text.splitlines(keepends=True):
+        if cur and len(cur) + len(para) > POLISH_CHUNK_CHARS:
+            chunks.append(cur)
+            cur = ""
+        cur += para
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _check_polish(polish: dict) -> None:
+    if not polish.get("baseId"):
+        raise JobError("润色需要选择本地基础模型")
+    if polish.get("adapterId"):
+        inference.check_adapter(polish["adapterId"], polish["baseId"])
+    else:
+        registry.get_base(polish["baseId"])
+
+
+def _ensure_local(base_id: str, adapter_id: str | None, stop: threading.Event) -> LocalHFGenerator:
+    """确保本地模型（+ 适配器）已加载：同一基础模型已驻留时只切换适配器。"""
+    loaded = inference.loaded_model()
+    if not loaded or loaded["baseId"] != base_id or loaded["adapterId"] != adapter_id:
+        inference.load(base_id, adapter_id, "auto", from_generation=True)
+        inference.wait_loaded(stop_event=stop)
+    return LocalHFGenerator(base_id, adapter_id)
+
+
+def _polish(job: dict, novel: dict, chapter: dict, polish: dict, stop: threading.Event) -> None:
+    """逐块润色。原文（首次润色前的正文）存入 originalText；再次润色总是从原文开始。取消时保留原文不变。"""
+    source = chapter.get("originalText") or chapter["text"]
+    chunks = _polish_chunks(source)
+    job.update(phase="polish", polishDone=0, polishTotal=len(chunks))
+    gen = _ensure_local(polish["baseId"], polish.get("adapterId") or None, stop)
+    out, changed, kept = [], 0, 0
+    for chunk in chunks:
+        if stop.is_set():
+            break
+        if not chunk.strip():
+            out.append(chunk)
+            job["polishDone"] += 1
+            continue
+        msgs = [{"role": "system", "content": prompts.POLISH_SYSTEM},
+                {"role": "user", "content": prompts.polish_user(chunk.strip())}]
+        r = gen.generate(msgs, GenParams(max_new_tokens=int(gen.count_text(chunk) * 1.5) + 64, temperature=0.4,
+                                         top_p=0.8, top_k=20, repetition_penalty=1.05, stop_event=stop))
+        text = PREAMBLE.sub("", r.text, count=1).strip()
+        ratio = len(re.sub(r"\s", "", text)) / max(len(re.sub(r"\s", "", chunk)), 1)
+        ok = r.finish_reason == "stop" and POLISH_RATIO[0] <= ratio <= POLISH_RATIO[1]
+        if ok:
+            out.append(text + ("\n" if chunk.endswith("\n") else ""))
+            changed += 1
+        else:
+            out.append(chunk)
+            kept += 1
+        job["polishDone"] += 1
+        chapter["polishDraft"] = "".join(out)
+        _record(chapter, novel["id"], {"type": "polish", "promptTokens": r.prompt_tokens,
+                                       "completionTokens": r.completion_tokens, "finishReason": r.finish_reason,
+                                       "seconds": r.seconds, "chars": len(chunk), "kept": not ok,
+                                       "at": store.now()})
+        store.save_chapter(novel["id"], chapter)
+    chapter.pop("polishDraft", None)
+    if not stop.is_set():
+        adapter = registry.get_adapter(polish["adapterId"]) if polish.get("adapterId") else None
+        chapter["originalText"] = source
+        chapter["text"] = "".join(out)
+        chapter["polish"] = {"baseId": polish["baseId"], "adapterId": polish.get("adapterId"),
+                             "adapterName": adapter["name"] if adapter else None, "at": store.now(),
+                             "chunks": len(chunks), "changed": changed, "kept": kept}
+    store.save_chapter(novel["id"], chapter)
+    m = novel["model"]  # 本地工作区：润色换了适配器时切回工作区自己的（同一基础模型只切换适配器，很快）
+    if m.get("source") == "local" and m.get("baseId") == polish["baseId"] and \
+            (m.get("adapterId") or None) != (polish.get("adapterId") or None):
+        try:
+            inference.load(m["baseId"], m.get("adapterId") or None, "auto", from_generation=True)
+        except RuntimeError:
+            log.warning("润色后切回工作区适配器失败", exc_info=True)
+
+
+def _polish_only(job: dict, req: dict) -> None:
+    stop = _events[job["id"]]
+    novel = store.get_novel(job["novelId"])
+    chapter = store.get_chapter(novel["id"], job["chapterIndex"])
+    job["status"] = "running"
+    _polish(job, novel, chapter, req["polish"], stop)
+    job["status"] = "cancelled" if stop.is_set() else "succeeded"
+
+
+def _new_job(novel_id: str, kind: str, chapter_index: int) -> dict:
+    job = {"id": uuid.uuid4().hex[:12], "novelId": novel_id, "kind": kind, "chapterIndex": chapter_index,
+           "status": "queued", "phase": "polish" if kind == "polish" else "writing", "segment": 0, "error": None,
+           "lastContext": None, "polishDone": 0, "polishTotal": 0, "startedAt": store.now(), "endedAt": None}
+    _jobs[job["id"]] = job
+    _events[job["id"]] = threading.Event()
+    return job
+
+
+def _launch(job: dict, req: dict) -> dict:
     threading.Thread(target=_run, args=(job, req), daemon=True, name=f"gen-{job['id']}").start()
     time.sleep(0.05)
     return job
 
 
+def start(novel_id: str, req: dict) -> dict:
+    """req: {goal, title, targetChars, api?, polish?{enabled, baseId, adapterId}}。
+    api = Java 附带的大模型配置（工作区为大模型时必需），只在本次任务内存中使用，不进任务状态。
+    同一时间只允许一个生成任务；训练进行中拒绝。"""
+    with _lock:
+        if active_job():
+            raise JobError("已有章节正在生成，请等待完成或取消")
+        novel = store.get_novel(novel_id)
+        polish = (req.get("polish") or {}).get("enabled")
+        # 大模型生成不占本机 GPU，训练期间也可以写；本地生成 / 润色要用 GPU
+        if local_jobs.gpu_busy() and (novel["model"].get("source") != "api" or polish):
+            raise JobError("有训练任务正在使用 GPU，请等待训练完成" + ("（或关闭「润色」）" if polish else ""))
+        get_generator(novel["model"], req.get("api")).ensure_ready()
+        if polish:
+            _check_polish(req["polish"])
+        chapters = store.list_chapters(novel_id)
+        if chapters and chapters[-1]["status"] == "generating":
+            raise JobError(f"第 {chapters[-1]['index']} 章上次未完成（服务可能重启过），请先删除该章再继续")
+        job = _new_job(novel_id, "chapter", (chapters[-1]["index"] + 1) if chapters else 1)
+    return _launch(job, req)
+
+
+def start_polish(novel_id: str, index: int, polish: dict) -> dict:
+    """对已完成的章节单独润色（后台任务，与章节生成共用「同一时间一个任务」）。"""
+    with _lock:
+        if active_job():
+            raise JobError("已有章节正在生成或润色，请等待完成或取消")
+        if local_jobs.gpu_busy():
+            raise JobError("有训练任务正在使用 GPU，请等待训练完成")
+        chapter = store.get_chapter(novel_id, index)
+        if chapter["status"] != "done":
+            raise JobError("只能润色已完成的章节")
+        _check_polish(polish)
+        job = _new_job(novel_id, "polish", index)
+    return _launch(job, {"polish": polish})
+
+
+def edit_chapter(novel_id: str, index: int, fields: dict) -> dict:
+    """手动修改章节（标题 / 目标 / 正文 / 摘要）。正文修改后，润色前的原文 originalText 仍保留（恢复原文会丢掉手动修改）。
+    摘要用于后续章节的前情；已并入前情概要的章节，改摘要不会自动改概要（概要可单独修改）。"""
+    job = active_job()
+    if job and job["novelId"] == novel_id and job["chapterIndex"] == index:
+        raise JobError("本章正在生成或润色，完成后再修改")
+    chapter = store.get_chapter(novel_id, index)
+    if chapter["status"] == "generating":
+        raise JobError("本章还没有生成完")
+    changed = [k for k, v in fields.items() if v is not None and chapter.get(k) != v]
+    if not changed:
+        return chapter
+    for k in changed:
+        chapter[k] = fields[k]
+    if "text" in changed:
+        chapter["text"] = chapter["text"].rstrip() + "\n"
+    chapter["editedAt"] = store.now()
+    chapter["edited"] = sorted(set(chapter.get("edited") or []) | set(changed))
+    store.save_chapter(novel_id, chapter)
+    return chapter
+
+
+def revert_polish(novel_id: str, index: int) -> dict:
+    job = active_job()
+    if job and job["novelId"] == novel_id and job["chapterIndex"] == index:
+        raise JobError("本章正在处理中，请稍候")
+    chapter = store.get_chapter(novel_id, index)
+    if not chapter.get("originalText"):
+        raise JobError("本章没有润色过")
+    chapter["text"] = chapter.pop("originalText")
+    chapter.pop("polish", None)
+    store.save_chapter(novel_id, chapter)
+    return chapter
+
+
 def preview(novel_id: str, req: dict) -> dict:
     """不生成，只组装下一章第一段的上下文，返回分层 token 用量与完整提示词。"""
     novel = store.get_novel(novel_id)
-    gen = get_generator(novel["model"])
+    gen = get_generator(novel["model"])  # 大模型工作区：不带配置，只按字符估算 token
     cons = spec_mod.build(novel["settings"].get("spec"))
     chapters = store.list_chapters(novel_id)
     index = (chapters[-1]["index"] + 1) if chapters else 1

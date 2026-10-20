@@ -1,8 +1,8 @@
 <template>
-  <div v-loading="loading" class="candidate-review">
+  <div ref="rootRef" v-loading="loading" class="candidate-review">
     <div class="toolbar">
-      <el-checkbox :model-value="allChecked" :indeterminate="someChecked && !allChecked" :disabled="!items.length" @change="toggleAll">
-        全选（{{ checkedIds.length }}/{{ items.length }}）
+      <el-checkbox :model-value="allChecked" :indeterminate="someChecked && !allChecked" :disabled="!visibleItems.length" @change="toggleAll">
+        全选{{ filterCategory ? '本分类' : '' }}（已选 {{ checkedIds.length }}/{{ items.length }}）
       </el-checkbox>
       <el-select v-model="filterCategory" placeholder="全部分类" clearable size="small" style="width: 130px">
         <el-option v-for="c in MATERIAL_CATEGORIES" :key="c.code" :label="c.label" :value="c.code" />
@@ -14,7 +14,7 @@
 
     <el-empty v-if="!loading && !items.length" :description="extractId ? '这次提取没有待确认的素材候选' : '没有待确认的素材候选'" :image-size="80" />
 
-    <div v-for="c in visibleItems" :key="c.id" class="cand-card" :class="{ 'is-checked': checked[c.id] }">
+    <div v-for="c in pagedItems" :key="c.id" class="cand-card" :class="{ 'is-checked': checked[c.id] }">
       <div class="cand-head">
         <el-checkbox v-model="checked[c.id]" />
         <el-select v-model="c.edit.category" size="small" style="width: 110px">
@@ -34,6 +34,16 @@
         </div>
       </div>
     </div>
+    <!-- 每页只渲染少量可编辑卡片：候选可能有数百条，每张卡片含十几个表单组件，全部渲染会明显卡顿 -->
+    <el-pagination
+      v-if="visibleItems.length > PAGE_SIZE"
+      v-model:current-page="page"
+      class="pager"
+      layout="prev, pager, next, total"
+      :total="visibleItems.length"
+      :page-size="PAGE_SIZE"
+      @current-change="scrollTop"
+    />
   </div>
 </template>
 
@@ -46,6 +56,8 @@ import { MATERIAL_CATEGORIES, ignoreCandidates, listCandidates, saveCandidates }
 import { errorMessage } from '@/api/request'
 
 /** 素材候选确认：extractId 为空时显示全部待确认候选 */
+const PAGE_SIZE = 20
+
 const props = defineProps({
   extractId: { type: Number, default: null }
 })
@@ -56,11 +68,20 @@ const saving = ref(false)
 const items = ref([])
 const checked = reactive({})
 const filterCategory = ref('')
+const page = ref(1)
+const rootRef = ref()
 
 const visibleItems = computed(() => items.value.filter((c) => !filterCategory.value || c.edit.category === filterCategory.value))
+const pagedItems = computed(() => visibleItems.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE))
 const checkedIds = computed(() => items.value.filter((c) => checked[c.id]).map((c) => c.id))
-const allChecked = computed(() => items.value.length > 0 && checkedIds.value.length === items.value.length)
-const someChecked = computed(() => checkedIds.value.length > 0)
+const allChecked = computed(() => visibleItems.value.length > 0 && visibleItems.value.every((c) => checked[c.id]))
+const someChecked = computed(() => visibleItems.value.some((c) => checked[c.id]))
+
+watch(filterCategory, () => (page.value = 1))
+
+function scrollTop() {
+  rootRef.value?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
 
 async function load() {
   loading.value = true
@@ -79,6 +100,7 @@ async function load() {
       }
     }))
     Object.keys(checked).forEach((k) => delete checked[k])
+    page.value = Math.min(page.value, Math.max(1, Math.ceil(visibleItems.value.length / PAGE_SIZE)))
   } catch (e) {
     ElMessage.error(errorMessage(e, '加载素材候选失败'))
   } finally {
@@ -86,8 +108,9 @@ async function load() {
   }
 }
 
+/** 全选作用于当前筛选出的全部候选（不只本页） */
 function toggleAll(v) {
-  items.value.forEach((c) => (checked[c.id] = v))
+  visibleItems.value.forEach((c) => (checked[c.id] = v))
 }
 
 async function onSave() {
@@ -164,6 +187,10 @@ defineExpose({ reload: load })
   grid-template-columns: minmax(0, 1fr) 260px;
   gap: 12px;
   margin-top: 8px;
+}
+.pager {
+  margin-top: 12px;
+  justify-content: center;
 }
 .excerpt {
   margin-top: 8px;

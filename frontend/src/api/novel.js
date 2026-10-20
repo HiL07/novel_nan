@@ -31,3 +31,11 @@ export function listExtracts() {
 export function getExtract(id) {
   return request.get(`/api/novel/extract/${id}`).then((res) => res.data)
 }
+
+/**
+ * 保存手动修改后的提取结果（整体替换，须含 chapters）
+ * POST /api/novel/extract/{id}/result
+ */
+export function updateExtractResult(id, result) {
+  return request.post(`/api/novel/extract/${id}/result`, result).then((res) => res.data)
+}

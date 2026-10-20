@@ -1,0 +1,469 @@
+"""AI 构思：书名 / 全书大纲（分章计划）/ 下一章的标题与目标 / 构思方向建议（kind=direction），
+「AI 填写设定」（kind=fill：设定编辑器里的单个字段 / 分组新增若干项 / 整个分类的未填项），
+以及角色试聊（kind=chat：按角色卡扮演角色对话，类似 character.ai），结合工作区设定与素材库素材。
+
+由 Java 的 /api/novel/gen/{id}/ideas 转发：Java 附带选中 / 自动匹配的素材（素材库在 Java 的数据库里），
+以及所用模型：大模型（api，含 Key，只在本次调用中使用）或本地模型（local：基础模型 + 可选 LoRA 适配器，按需自动加载）。
+结果只返回给前端，用户确认后才保存（大纲存为 novel.outline）。
+"""
+import json
+import re
+
+from .. import llm_client
+from ..local import inference, jobs as local_jobs, registry
+from . import chapter as chapter_mod, spec as spec_mod, store
+from .backends import GenerationError, GenParams, LocalHFGenerator
+
+KINDS = ("title", "outline", "chapter", "fill", "direction", "chat")
+CHAT_TURNS = 20             # 角色试聊带上最近多少条消息
+CHAT_MESSAGE_CHARS = 1000
+CHAT_SETTING_CHARS = 1500   # 试聊时附带的世界观 / 核心设定上限
+FILL_MODES = ("field", "items", "category")
+FILL_TYPES = ("text", "textarea", "tags", "single", "multi")   # 数字 / 滑块是参数，不让 AI 填
+FILL_TYPE_HINTS = {
+    "text": "字符串：简短的名称或短语（20 字内）",
+    "textarea": "字符串：一段具体的描述（80~200 字）",
+    "tags": "字符串数组：3~6 个简短标签",
+    "single": "字符串：从可选项中选 1 个（输出选项文字；都不合适时可写一个新的简短选项）",
+    "multi": "字符串数组：从可选项中选 1~3 个（输出选项文字；都不合适时可写新的简短选项）",
+}
+FILL_TOKEN_BUDGET = {"text": 40, "textarea": 300, "tags": 60, "single": 25, "multi": 40}   # 每个字段的输出 token 估算
+MAX_MATERIALS = 20
+MATERIAL_TEXT_CHARS = 260   # 单条素材写进提示词的上限，控制总长度
+LOCAL_MAX_OUTLINE = 15     # 本地小模型一次规划太多章容易跑题 / 超时
+CATEGORY_LABELS = {"world": "世界观", "faction": "势力", "character": "角色", "monster": "怪物", "location": "地点",
+                   "item": "物品功法", "plot": "情节"}
+
+SYSTEM = """你是资深网络小说策划编辑，擅长构思书名、搭建大纲、设计章节。只输出 JSON，不要任何多余文字。
+原则：
+1. 严格遵守【已确定的设定】，不得与之矛盾；设定没提到的可以发挥。
+2. 【素材库素材】是作者挑选的创作素材：要有机地融入构思（可改写、组合、改名），不要照搬原作的专有名词和情节。
+3. 构思要具体、有冲突和悬念，避免空泛套话。"""
+
+
+FILL_SYSTEM = """你是资深网络小说策划编辑，正在帮作者补全小说设定。只输出 JSON，不要任何多余文字。
+原则：
+1. 与【已确定的设定】保持一致，不得矛盾；补全的内容要具体、有画面感、能直接用于写作。
+2. 【素材库素材】是作者挑选的参考：可以借鉴、改写、组合，不要照搬原作的专有名词。
+3. 选择类字段优先从给出的可选项里选。"""
+
+
+CHAT_SYSTEM = """你正在扮演一部小说中的角色，和作者进行角色扮演对话（作者借此检验角色的性格与口吻）。
+规则：
+1. 始终以「{name}」的身份、语气、用词和价值观说话，不要跳出角色，不要提及自己是 AI 或模型，不要替对方说话。
+2. 严格遵守下面的【角色卡】和【世界设定】；角色不知道的事情就表现得不知道，不要凭空给角色加设定之外的能力。
+3. 回复用简体中文，1~4 小段，合计 200 字以内；动作、神态写在（）里，台词直接写。
+4. 有来有往：可以反问、表露情绪、推进话题，让对话自然生动。"""
+
+
+FILL_PLAIN_SYSTEM = """你是资深网络小说策划编辑，正在帮作者补全小说设定。
+与【已确定的设定】保持一致；【素材库素材】可借鉴、改写，不要照搬原作的专有名词。
+只输出要求的内容本身，不要标题、引号、JSON 或任何解释。"""
+
+
+class IdeaError(ValueError):
+    pass
+
+
+def _material_lines(materials: list[dict]) -> list[str]:
+    lines = []
+    for m in materials[:MAX_MATERIALS]:
+        cat = CATEGORY_LABELS.get(m.get("category"), m.get("category") or "素材")
+        head = f"- [{cat}] {m.get('title', '')}" + (f"（{m['subtype']}）" if m.get("subtype") else "")
+        parts = [m.get("summary") or ""]
+        attrs = m.get("attributes") or {}
+        if attrs:
+            parts.append("；".join(f"{k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in attrs.items()))
+        if m.get("tags"):
+            parts.append("标签：" + "、".join(m["tags"]))
+        body = "；".join(p for p in parts if p)
+        lines.append(f"{head}：{body[:MATERIAL_TEXT_CHARS]}")
+    return lines
+
+
+def _context(novel: dict, spec: list | None = None) -> tuple[str, list[dict]]:
+    """工作区已有内容：书名、设定（核心 + 卡片；spec 为编辑器中尚未保存的当前设定时优先用它）、大纲、已写章节摘要。"""
+    cons = spec_mod.build(spec if spec is not None else novel["settings"].get("spec"))
+    parts = [f"【当前书名】{novel['title']}"]
+    settings = cons.core + [c.text for c in cons.cards]
+    parts.append("【已确定的设定】\n" + ("\n\n".join(settings) if settings else "（尚未设定，可自由构思）"))
+    if cons.open:
+        parts.append("【尚未设定】" + "、".join(cons.open))
+    outline = novel.get("outline") or {}
+    if outline.get("chapters"):
+        plan = "\n".join(f"第{c['index']}章《{c.get('title', '')}》：{c.get('goal', '')}" for c in outline["chapters"])
+        parts.append(f"【已采用的大纲】\n一句话：{outline.get('logline', '')}\n{outline.get('synopsis', '')}\n{plan}")
+    chapters = store.list_chapters(novel["id"])
+    if novel.get("arcSummary"):
+        parts.append(f"【前情概要（至第{novel['arcUpTo']}章）】{novel['arcSummary']}")
+    written = [c for c in chapters if c["index"] > novel.get("arcUpTo", 0) and c.get("summary")][-10:]
+    if written:
+        parts.append("【已写章节】\n" + "\n".join(f"第{c['index']}章《{c.get('title') or ''}》：{c['summary']}" for c in written))
+    return "\n\n".join(parts), chapters
+
+
+def _task(kind: str, hint: str, count: int, next_index: int, purpose: str = "") -> tuple[str, int]:
+    hint_line = f"作者的构思方向：{hint}\n" if hint else ""
+    if kind == "direction":
+        use = f"这些方向用于：{purpose}。\n" if purpose else ""
+        base = (f"作者已有的初步想法：「{hint}」——在它的基础上细化、发散出不同的走法。\n" if hint
+                else "作者还没有想法，请主动给出灵感。\n")
+        return (f"{base}{use}给出 {count} 个彼此差异明显的构思方向（可以从核心冲突、主角处境、反转设定、情感主线、"
+                "题材混搭、名场面等角度切入），贴合已有设定与素材，每个方向 30~80 字，写得具体，可直接当作后续生成的要求。\n"
+                '输出：{"directions":[{"label":"4~8 字的短标题","direction":"方向描述"}]}'), 1200
+    if kind == "title":
+        return (f"{hint_line}为这部小说构思 {count} 个书名候选，风格各异，贴合设定和素材。\n"
+                '输出：{"titles":[{"title":"书名","pitch":"一句话卖点（30字内）","materials":["用到的素材标题"]}]}'), 1200
+    if kind == "outline":
+        return (f"{hint_line}为这部小说写大纲，并规划从第{next_index}章开始的 {count} 章（已写的章节不要重写，接着往下规划）。\n"
+                "每章给出标题和本章目标（这一章具体发生什么、推进什么冲突、留下什么悬念，60~120字）。\n"
+                '输出：{"title":"建议书名（沿用当前书名也可）","logline":"一句话故事（40字内）",'
+                '"synopsis":"故事梗概（200~400字：主线、主要人物与关系、核心冲突、走向）",'
+                '"chapters":[{"index":章号,"title":"章节标题","goal":"本章目标","materials":["本章用到的素材标题"]}],'
+                '"materials":["整体用到的素材标题"]}'), min(8000, 1200 + count * 220)
+    return (f"{hint_line}设计第{next_index}章：给出 {count} 个不同方向的方案（若已有大纲，第一个方案应与大纲一致），"
+            "要承接已写章节、推进主线。\n"
+            '输出：{"options":[{"title":"章节标题","goal":"本章目标（60~150字，具体写发生什么）","materials":["用到的素材标题"]}]}'), 1500
+
+
+def generate(novel_id: str, req: dict) -> dict:
+    """req: {kind, hint?, count?, materials: [...], api?: ModelConfig dict, local?: {baseId, adapterId}}"""
+    kind = req.get("kind")
+    if kind not in KINDS:
+        raise IdeaError(f"kind 只能是 {KINDS}")
+    local = req.get("local")
+    if not req.get("api") and not (local and local.get("baseId")):
+        raise IdeaError("AI 构思需要通过 Java 后端发起，并选择大模型或本地模型")
+    novel = store.get_novel(novel_id)
+    if kind == "fill":
+        return _fill(novel, req, local)
+    if kind == "chat":
+        return _chat(novel, req, local)
+    spec = req.get("spec") if isinstance(req.get("spec"), list) else None
+    context, chapters = _context(novel, spec)
+    next_index = (chapters[-1]["index"] + 1) if chapters else 1
+    default_count = {"title": 5, "outline": 10, "chapter": 3, "direction": 5}[kind]
+    max_count = (LOCAL_MAX_OUTLINE if local else 40) if kind == "outline" else 8
+    count = max(1, min(int(req.get("count") or default_count), max_count))
+    materials = req.get("materials") or []
+    mat = _material_lines(materials)
+    task, max_tokens = _task(kind, (req.get("hint") or "").strip()[:500], count, next_index,
+                             (req.get("purpose") or "").strip()[:60])
+    user = context + ("\n\n【素材库素材】\n" + "\n".join(mat) if mat else "\n\n【素材库素材】（未选择）") + "\n\n【任务】\n" + task
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
+    r, model_name = _run_local(local, messages, max_tokens) if local else _run_api(req["api"], messages, max_tokens)
+    if r["finishReason"] == "length":
+        raise IdeaError("模型输出被截断，请减少章节数后重试")
+    data = _parse(r["text"], local)
+    return {"kind": kind, "nextIndex": next_index, "result": _normalize(kind, data, next_index),
+            "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]},
+            "model": model_name}
+
+
+_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+
+
+def _parse(text: str, local: dict | None) -> dict:
+    """容错解析模型输出的 JSON：去掉 ```json 包裹和多余的尾逗号；顶层是数组时视为 {"items": [...]}。"""
+    body = re.sub(r"^```\w*\s*|\s*```$", "", text.strip())
+    body = _TRAILING_COMMA.sub(r"\1", body)
+    starts = [i for i in (body.find("{"), body.find("[")) if i >= 0]
+    if starts:
+        try:
+            data = json.loads(body[min(starts):])
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, list):
+            return {"items": data}
+        if isinstance(data, dict):
+            return data
+    try:
+        return llm_client.parse_json(body)
+    except llm_client.LLMError as e:
+        hint = "；本地小模型不擅长按格式输出，可重试或换用大模型" if local else ""
+        raise IdeaError(f"{e}{hint}") from e
+
+
+def _run_api(api: dict, messages: list[dict], max_tokens: int) -> tuple[dict, str]:
+    cfg = llm_client.ModelConfig(**api)
+    try:
+        return llm_client.complete(cfg, messages, max_tokens=max_tokens, temperature=0.9, top_p=0.95,
+                                   json_mode=True, timeout=170), cfg.model
+    except llm_client.LLMError as e:
+        raise IdeaError(f"大模型调用失败：{e}") from e
+
+
+def _run_local(local: dict, messages: list[dict], max_tokens: int, temperature: float = 0.8) -> tuple[dict, str]:
+    """本地模型（+ 适配器）：未加载 / 加载的不一致时先加载（同一基础模型只切换适配器）。"""
+    if chapter_mod.active_job():
+        raise IdeaError("有章节正在生成或润色，完成后再用本地模型构思")
+    if local_jobs.gpu_busy():
+        raise IdeaError("有训练任务正在使用 GPU，请等待训练完成或换用大模型")
+    base_id, adapter_id = local["baseId"], local.get("adapterId") or None
+    try:
+        if adapter_id:
+            inference.check_adapter(adapter_id, base_id)
+        loaded = inference.loaded_model()
+        if not loaded or loaded["baseId"] != base_id or loaded["adapterId"] != adapter_id:
+            inference.load(base_id, adapter_id, "auto")
+            inference.wait_loaded(timeout=300)
+        gen = LocalHFGenerator(base_id, adapter_id)
+        g = gen.generate(messages, GenParams(max_new_tokens=min(max_tokens, 3000), temperature=temperature, top_p=0.9,
+                                             top_k=40, repetition_penalty=1.05))
+    except (RuntimeError, registry.RegistryError, GenerationError) as e:
+        raise IdeaError(f"本地模型构思失败：{e}") from e
+    return ({"text": g.text, "promptTokens": g.prompt_tokens, "completionTokens": g.completion_tokens,
+             "finishReason": g.finish_reason}, gen.name)
+
+
+# ---------------------------------------------------------------- 角色试聊（character.ai 式）
+
+def _chat(novel: dict, req: dict, local: dict | None) -> dict:
+    """req.chat: {character: {name, card: {字段名: 值}}, messages: [{role: user|assistant, content}], scene?, userRole?}
+    → result.reply：角色的下一句回复（纯文本）。"""
+    chat = req.get("chat") or {}
+    character = chat.get("character") or {}
+    name = str(character.get("name") or "").strip()[:40]
+    if not name:
+        raise IdeaError("角色还没有名字，先填写姓名再试聊")
+    card_lines = []
+    for k, v in (character.get("card") or {}).items():
+        if v in (None, "", []):
+            continue
+        text = "、".join(map(str, v)) if isinstance(v, list) else str(v)
+        card_lines.append(f"- {k}：{text[:600]}")
+    spec = req.get("spec") if isinstance(req.get("spec"), list) else None
+    cons = spec_mod.build(spec if spec is not None else novel["settings"].get("spec"))
+    world = "\n".join(cons.core)[:CHAT_SETTING_CHARS]
+    system = CHAT_SYSTEM.format(name=name) + "\n\n【角色卡】\n" + ("\n".join(card_lines) or f"- 姓名：{name}")
+    if world:
+        system += f"\n\n【世界设定】（小说《{novel['title']}》）\n{world}"
+    if chat.get("scene"):
+        system += f"\n\n【当前场景】{str(chat['scene'])[:300]}"
+    if chat.get("userRole"):
+        system += f"\n\n【对方身份】作者扮演：{str(chat['userRole'])[:100]}"
+    history = []
+    for m in (chat.get("messages") or [])[-CHAT_TURNS:]:
+        role = m.get("role") if isinstance(m, dict) else None
+        content = str(m.get("content") or "").strip()[:CHAT_MESSAGE_CHARS] if role else ""
+        if role in ("user", "assistant") and content:
+            history.append({"role": role, "content": content})
+    if not history or history[-1]["role"] != "user":
+        raise IdeaError("请先输入要对角色说的话")
+    messages = [{"role": "system", "content": system}, *history]
+    if local:
+        r, model_name = _run_local(local, messages, 500, temperature=0.85)
+    else:
+        cfg = llm_client.ModelConfig(**req["api"])
+        try:
+            r = llm_client.complete(cfg, messages, max_tokens=600, temperature=0.85, top_p=0.95, timeout=120)
+        except llm_client.LLMError as e:
+            raise IdeaError(f"大模型调用失败：{e}") from e
+        model_name = cfg.model
+    reply = re.sub(rf"^\s*{re.escape(name)}\s*[：:]\s*", "", r["text"].strip())  # 小模型常带「名字：」前缀
+    if r["finishReason"] == "length":
+        cut = max(reply.rfind(ch) for ch in _SENTENCE_END)
+        reply = reply[:cut + 1] if cut > 0 else reply
+    if not reply:
+        raise IdeaError("模型没有给出回复，请重试")
+    return {"kind": "chat", "result": {"reply": reply}, "model": model_name,
+            "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]}}
+
+
+# ---------------------------------------------------------------- AI 填写设定
+
+def _field_line(f: dict) -> str:
+    line = f"- {f['key']}「{f.get('label', '')}」：{FILL_TYPE_HINTS[f['type']]}"
+    if f.get("options"):
+        line += "；可选项：" + "、".join(str(o) for o in f["options"][:40])
+    if f.get("desc") or f.get("placeholder"):
+        line += f"（{f.get('desc') or f.get('placeholder')}）"
+    return line
+
+
+def _fill(novel: dict, req: dict, local: dict | None) -> dict:
+    """req.fill: {mode: field|items|category, path: [位置], fields: [{key, label, type, options?, desc?, placeholder?}],
+    current?: {标签: 已有内容}, itemLabel?, count?, existing?: [已有项名称]}；req.spec：编辑器当前设定（可选）。"""
+    fill = req.get("fill") or {}
+    mode = fill.get("mode")
+    if mode not in FILL_MODES:
+        raise IdeaError(f"fill.mode 只能是 {FILL_MODES}")
+    fields = [f for f in fill.get("fields") or [] if isinstance(f, dict) and f.get("key") and f.get("type") in FILL_TYPES]
+    if not fields:
+        raise IdeaError("没有可以由 AI 填写的字段（数字 / 滑块等参数请手动设置）")
+    spec = req.get("spec") if isinstance(req.get("spec"), list) else None
+    context, _ = _context(novel, spec)
+    mat = _material_lines(req.get("materials") or [])
+    hint = (req.get("hint") or "").strip()[:500]
+    path = " › ".join(str(p) for p in fill.get("path") or [])
+    current = {k: v for k, v in (fill.get("current") or {}).items() if v not in (None, "", [])}
+    lines = [f"位置：{path}" if path else ""]
+    if current:
+        lines.append("同一位置已填写的内容（要与之配合，不要重复）：\n" +
+                     "\n".join(f"- {k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in current.items()))
+    if hint:
+        lines.append(f"作者的要求：{hint}")
+    field_lines = "\n".join(_field_line(f) for f in fields)
+    plain_text = False
+    if mode == "items":
+        count = max(1, min(int(fill.get("count") or 3), 5 if local else 10))
+        label = fill.get("itemLabel") or "项"
+        existing = [str(x) for x in fill.get("existing") or [] if x][:50]
+        if existing:
+            lines.append(f"已有的{label}（不要重复）：" + "、".join(existing))
+        lines.append(f"新设计 {count} 个{label}，彼此不同、贴合设定与素材。每个{label}包含以下字段：\n{field_lines}\n"
+                     '输出：{"items":[{"字段key":值}]}')
+        # 角色卡这类字段多的分组：按字段类型估算每项输出长度，避免截断
+        per_item = sum(FILL_TOKEN_BUDGET[f["type"]] for f in fields) + 60
+        max_tokens = min(8000, max(350, per_item) * count + 300)
+    elif plain_text := (local and mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")):
+        # 本地小模型按 JSON 输出很不稳定：单个文本字段直接要正文
+        f = fields[0]
+        size = "一个简短的名称或短语（20 字内）" if f["type"] == "text" else "一段 80~200 字的具体描述"
+        lines.append(f"写出「{f.get('label', f['key'])}」：{size}。直接输出内容本身，不要 JSON、标题、引号或任何解释。")
+        max_tokens = 80 if f["type"] == "text" else 280  # 约 200 字；小模型容易越写越长、开始重复
+    else:
+        lines.append(f"为以下字段生成内容：\n{field_lines}\n" + '输出：{"values":{"字段key":值}}')
+        max_tokens = 300 * len(fields) + 300
+    user = (context + ("\n\n【素材库素材】\n" + "\n".join(mat) if mat else "") + "\n\n【任务：补全设定】\n" +
+            "\n".join(x for x in lines if x))
+    messages = [{"role": "system", "content": FILL_PLAIN_SYSTEM if plain_text else FILL_SYSTEM},
+                {"role": "user", "content": user}]
+    r, model_name = (_run_local(local, messages, max_tokens, temperature=0.5) if local
+                     else _run_api(req["api"], messages, max_tokens))
+    if plain_text:
+        value = _plain_value(r["text"], fields[0]["type"], truncated=r["finishReason"] == "length")
+        if not value:
+            raise IdeaError("模型没有给出可用的内容，请重试")
+        return {"kind": "fill", "mode": mode, "result": {"values": {fields[0]["key"]: value}}, "model": model_name,
+                "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]}}
+    if r["finishReason"] == "length":
+        raise IdeaError("模型输出被截断，请减少数量后重试")
+    try:
+        data = _parse(r["text"], local)
+    except IdeaError:
+        data = _salvage(r["text"], fields, mode)  # 小模型的 JSON 常有小毛病：按字段名把值抠出来
+        if data is None:
+            raise
+    if mode == "items":
+        result = {"items": [_coerce(fields, it) for it in data.get("items") or [] if isinstance(it, dict)]}
+        result["items"] = [it for it in result["items"] if it]
+    else:
+        values = data.get("values") if isinstance(data.get("values"), dict) else data
+        result = {"values": _coerce(fields, values)}
+    if not (result.get("items") or result.get("values")):
+        raise IdeaError("模型没有给出可用的内容，请重试")
+    return {"kind": "fill", "mode": mode, "result": result, "model": model_name,
+            "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]}}
+
+
+_SENTENCE_END = "。！？!?…」”"
+
+
+def _plain_value(text: str, ftype: str, truncated: bool) -> str:
+    """整理本地模型直接写出的字段内容：去掉代码块 / 引号 / 「情节描述：」之类的前缀；
+    名称只取第一行；被截断时回退到最后一个句末标点。"""
+    t = re.sub(r"^```\w*|```$", "", text.strip()).strip()
+    t = re.sub(r"^[^\n：:]{1,12}[：:]\s*", "", t, count=1) if len(t) > 15 else t
+    t = re.sub(r"^【[^】\n]{1,12}】\s*", "", t)  # 开头的「【情节描述】」之类的标题
+    echo = t.find("【", 1)  # 小模型常在后面复述「【情节描述】…」：从那里截断
+    t = (t[:echo] if echo > 0 else t).strip().strip('"“”「」')
+    if ftype == "text":
+        return t.splitlines()[0].strip().strip('"“”「」《》')[:40] if t else ""
+    if truncated:
+        cut = max(t.rfind(ch) for ch in _SENTENCE_END)
+        t = t[:cut + 1] if cut > 0 else t
+    return t.strip()
+
+
+def _salvage(text: str, fields: list[dict], mode: str) -> dict | None:
+    """JSON 解析失败时的兜底：在每个 {...} 片段里按字段 key 找 "key": "值" / "key": ["a","b"]。
+    只填一个文本字段且模型直接写了正文时，把正文当作该字段的值。"""
+    blocks = re.findall(r"\{[^{}]*\}", text) or [text]
+    found = []
+    for b in blocks:
+        item = {}
+        for f in fields:
+            k = re.escape(f["key"])
+            m = re.search(rf'"{k}"\s*:\s*"((?:[^"\\]|\\.)*)"', b, re.S)
+            if m:
+                item[f["key"]] = m.group(1).replace("\\n", "\n").replace('\\"', '"').strip()
+                continue
+            m = re.search(rf'"{k}"\s*:\s*\[([^\]]*)\]', b, re.S)
+            if m:
+                item[f["key"]] = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+        if item:
+            found.append(item)
+    if not found and mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea"):
+        plain = re.sub(r"^```\w*|```$", "", text.strip()).strip().strip('"')
+        if plain and "{" not in plain:
+            found = [{fields[0]["key"]: plain}]
+    if not found:
+        return None
+    return {"items": found} if mode == "items" else {"values": found[0]}
+
+
+def _coerce(fields: list[dict], values: dict) -> dict:
+    """按字段类型整理模型输出，只保留请求的字段；空值丢弃。"""
+    out = {}
+    for f in fields:
+        v = values.get(f["key"])
+        if v is None:
+            v = values.get(f.get("label"))  # 模型偶尔用中文名当键
+        if v is None:
+            continue
+        if f["type"] in ("tags", "multi"):
+            v = [str(x).strip() for x in (v if isinstance(v, list) else str(v).replace("，", "、").split("、")) if str(x).strip()]
+            v = v[:3] if f["type"] == "multi" else v[:12]
+        elif f["type"] == "single":
+            v = str(v[0] if isinstance(v, list) and v else v).strip()
+        else:
+            v = "、".join(map(str, v)) if isinstance(v, list) else str(v).strip()
+        if v:
+            out[f["key"]] = v
+    return out
+
+
+def _strs(v) -> list[str]:
+    return [str(x) for x in v] if isinstance(v, list) else []
+
+
+def _normalize(kind: str, data: dict, next_index: int) -> dict:
+    """整理成固定结构，丢掉模型多给 / 少给的字段。"""
+    if kind == "direction":
+        items = data.get("directions") or data.get("items") or []
+        out = []
+        for d in items:
+            if isinstance(d, str) and d.strip():
+                out.append({"label": "", "direction": d.strip()})
+            elif isinstance(d, dict) and str(d.get("direction") or "").strip():
+                out.append({"label": str(d.get("label") or "").strip()[:20], "direction": str(d["direction"]).strip()})
+        return {"directions": out}
+    if kind == "title":
+        return {"titles": [{"title": str(t.get("title", "")).strip(), "pitch": str(t.get("pitch", "")),
+                            "materials": _strs(t.get("materials"))}
+                           for t in data.get("titles", []) if isinstance(t, dict) and t.get("title")]}
+    if kind == "chapter":
+        return {"options": [{"title": str(o.get("title", "")).strip(), "goal": str(o.get("goal", "")).strip(),
+                             "materials": _strs(o.get("materials"))}
+                            for o in data.get("options", []) if isinstance(o, dict) and o.get("goal")]}
+    chapters = []
+    for i, c in enumerate(x for x in data.get("chapters", []) if isinstance(x, dict) and x.get("goal")):
+        chapters.append({"index": next_index + i, "title": str(c.get("title", "")).strip(),
+                         "goal": str(c.get("goal", "")).strip(), "materials": _strs(c.get("materials"))})
+    return {"title": str(data.get("title", "")).strip(), "logline": str(data.get("logline", "")).strip(),
+            "synopsis": str(data.get("synopsis", "")).strip(), "chapters": chapters,
+            "materials": _strs(data.get("materials"))}
+
+
+def validate_outline(outline: dict | None) -> dict | None:
+    """保存用户确认 / 编辑后的大纲：{logline, synopsis, chapters:[{index, title, goal, materials?}], materials?}"""
+    if outline is None:
+        return None
+    chapters = [{"index": int(c["index"]), "title": str(c.get("title", ""))[:60], "goal": str(c.get("goal", ""))[:2000],
+                 "materials": _strs(c.get("materials"))[:20]}
+                for c in outline.get("chapters", []) if isinstance(c, dict) and c.get("index") and c.get("goal")]
+    return {"logline": str(outline.get("logline", ""))[:200], "synopsis": str(outline.get("synopsis", ""))[:3000],
+            "chapters": sorted(chapters, key=lambda c: c["index"])[:200],
+            "materials": _strs(outline.get("materials"))[:50], "savedAt": store.now()}
+

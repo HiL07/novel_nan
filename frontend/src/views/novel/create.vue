@@ -59,19 +59,14 @@
     <el-dialog v-model="createDlg.visible" title="新建工作区" width="560px">
       <el-form label-width="96px">
         <el-form-item label="小说标题"><el-input v-model="createDlg.title" maxlength="100" placeholder="可稍后修改" /></el-form-item>
-        <el-form-item label="模型来源">
-          <el-radio-group v-model="createDlg.source">
-            <el-radio-button value="local">本地模型</el-radio-button>
-            <el-radio-button value="remote" disabled>远程模型（即将支持）</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="基础模型">
-          <el-select v-model="createDlg.baseId" placeholder="选择已登记的本地模型" style="width: 100%">
-            <el-option v-for="m in localModels" :key="m.id" :label="`${m.name}（${(m.numParams / 1e9).toFixed(1)}B）`" :value="m.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="LoRA 适配器">
-          <el-select model-value="" disabled placeholder="本阶段不启用适配器，仅使用基础模型" style="width: 100%" />
+        <el-form-item label="模型">
+          <div class="api-info">
+            <el-tag :type="defaultModel.source === 'api' ? 'success' : 'info'" size="small">{{ defaultModel.source === 'api' ? '大模型' : '本地模型' }}</el-tag>
+            {{ defaultModelLabel }}
+          </div>
+          <div class="muted hint">
+            创建后可在工作区顶部随时切换大模型 / 本地模型（+ LoRA 适配器）；AI 构思、AI 填写设定、润色也都能各自选择模型
+          </div>
         </el-form-item>
         <el-form-item label="上下文窗口">
           <el-select v-model="createDlg.contextWindow" style="width: 160px">
@@ -82,7 +77,7 @@
       </el-form>
       <template #footer>
         <el-button @click="createDlg.visible = false">取消</el-button>
-        <el-button type="primary" :disabled="!createDlg.baseId" @click="onCreate">创建并开始写作</el-button>
+        <el-button type="primary" @click="onCreate">创建并开始写作</el-button>
       </template>
     </el-dialog>
   </div>
@@ -94,18 +89,38 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { CONTEXT_WINDOWS, createNovel, deleteNovel, getGenStatus, listNovels } from '@/api/novelGen'
-import { downloadModel, listModels } from '@/api/localModel'
+import { downloadModel, listAdapters, listModels } from '@/api/localModel'
+import { listModels as listAiModels } from '@/api/aiModel'
 import { errorMessage } from '@/api/request'
 
 const router = useRouter()
 const status = ref(null)
 const novels = ref([])
 const models = ref([])
+const adapters = ref([])
+const apiModel = ref(null) // 「模型配置」中启用且已验证的大模型
+const apiError = ref('')
 const loadError = ref('')
 const downloading = ref(false)
 
 const localModels = computed(() => models.value.filter((m) => m.exists))
-const modelLabel = (m) => (m?.source === 'local' ? models.value.find((x) => x.id === m.baseId)?.name || m.baseId : '远程模型')
+/** 新工作区的默认模型：有可用的大模型就用它，否则用默认的本地模型（进入工作区后可随时切换） */
+const defaultModel = computed(() => {
+  const baseId = status.value?.defaultModel.model?.id || localModels.value[0]?.id
+  return apiModel.value || !baseId
+    ? { source: 'api', apiName: apiModel.value ? `${apiModel.value.name} · ${apiModel.value.model}` : null }
+    : { source: 'local', baseId, adapterId: null }
+})
+const defaultModelLabel = computed(() => {
+  const m = defaultModel.value
+  if (m.source === 'local') return localModels.value.find((x) => x.id === m.baseId)?.name || m.baseId
+  return m.apiName || '还没有可用的大模型（可先创建，稍后在「模型配置」中启用，或在工作区里改用本地模型）'
+})
+const modelLabel = (m) => {
+  if (m?.source !== 'local') return `大模型 · ${m?.apiName || '当前启用的模型'}`
+  const base = models.value.find((x) => x.id === m.baseId)?.name || m.baseId
+  return m.adapterId ? `${base} + ${adapters.value.find((a) => a.id === m.adapterId)?.name || m.adapterId}` : base
+}
 
 async function call(promise, fallback) {
   try {
@@ -119,12 +134,14 @@ async function call(promise, fallback) {
 
 async function load() {
   try {
-    const [s, n, m] = await Promise.all([
-      call(getGenStatus(), '获取状态失败'), call(listNovels(), '获取工作区失败'), call(listModels(), '获取模型失败')
+    const [s, n, m, a] = await Promise.all([
+      call(getGenStatus(), '获取状态失败'), call(listNovels(), '获取工作区失败'), call(listModels(), '获取模型失败'),
+      call(listAdapters(), '获取适配器失败')
     ])
     status.value = s
     novels.value = n
     models.value = m
+    adapters.value = a
     loadError.value = ''
   } catch (e) {
     loadError.value = `${e.message}（请确认 AI 服务已启动，地址见 VITE_AI_BASE_URL）`
@@ -143,19 +160,29 @@ async function downloadDefault() {
   }
 }
 
-const createDlg = reactive({ visible: false, title: '', source: 'local', baseId: '', contextWindow: 8192 })
-function openCreate() {
-  Object.assign(createDlg, {
-    visible: true, title: '', source: 'local', contextWindow: 8192,
-    baseId: status.value?.defaultModel.model?.id || localModels.value[0]?.id || ''
-  })
+/** 自动检测 Java「模型配置」中启用且验证通过的大模型 */
+async function detectApi() {
+  try {
+    const list = await call(listAiModels(), '获取模型配置失败')
+    apiModel.value = list.find((m) => m.active && m.status === 'VERIFIED') || null
+    apiError.value = ''
+  } catch (e) {
+    apiModel.value = null
+    apiError.value = `${e.message}（请确认 Java 后端已启动）`
+  }
+}
+
+const createDlg = reactive({ visible: false, title: '', contextWindow: 8192 })
+async function openCreate() {
+  await detectApi()
+  Object.assign(createDlg, { visible: true, title: '', contextWindow: 8192 })
 }
 
 async function onCreate() {
   try {
     const n = await call(createNovel({
       title: createDlg.title,
-      model: { source: createDlg.source, baseId: createDlg.baseId },
+      model: defaultModel.value,
       contextWindow: createDlg.contextWindow
     }), '创建失败')
     createDlg.visible = false
@@ -221,6 +248,12 @@ code {
 .muted {
   font-size: 12px;
   color: #909399;
+}
+.api-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 .hint {
   margin-left: 10px;

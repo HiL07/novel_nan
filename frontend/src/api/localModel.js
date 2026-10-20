@@ -8,7 +8,13 @@ const post = (url, body) => aiRequest.post(url, body).then((res) => res.data)
 export const RECOMMENDED_MODELS = [
   { repoId: 'Qwen/Qwen2.5-0.5B-Instruct', size: '约 1 GB', note: '最快，适合先跑通流程' },
   { repoId: 'Qwen/Qwen2.5-1.5B-Instruct', size: '约 3.1 GB', note: '8GB 显存推荐' },
-  { repoId: 'Qwen/Qwen2.5-3B-Instruct', size: '约 6.2 GB', note: 'QLoRA 可训练，接近上限' }
+  { repoId: 'Qwen/Qwen2.5-3B-Instruct', size: '约 6.2 GB', note: 'QLoRA 可训练，接近上限' },
+  {
+    repoId: 'Qwen/Qwen2.5-7B-Instruct',
+    size: '约 15 GB',
+    note: '8GB 显存只能 4bit 推理（约 5.5 GB，需关掉其他占显存的程序）；本机训练会超出资源，适合加载远程训练的 7B 适配器',
+    big: true
+  }
 ]
 
 /** GPU / 内存 / 磁盘 / 依赖 / 当前推理状态 / 进行中的任务 */
@@ -24,7 +30,14 @@ export const DOWNLOAD_SOURCES = [
   { value: 'hf-mirror', label: 'hf-mirror 镜像', note: 'Hugging Face 国内镜像' },
   { value: 'huggingface', label: 'Hugging Face 官方', note: '需能访问 huggingface.co' }
 ]
-export const downloadModel = (repoId, name, source = 'auto') => post('/api/local/models/download', { repoId, name, source })
+/** targetDir：保存位置（上级目录，实际存到 <targetDir>/<仓库名>）；空 = python-service/models/base/ */
+export const downloadModel = (repoId, name, source = 'auto', targetDir = '') =>
+  post('/api/local/models/download', { repoId, name, source, targetDir: targetDir || undefined })
+/** 下载前检查（需联网几秒）→ {source, sourceLabel, files, sizeGb, target, freeGb, enough, hasWeights} */
+export const checkDownload = (repoId, source = 'auto', targetDir = '') =>
+  post('/api/local/models/download/check', { repoId, source, targetDir: targetDir || undefined })
+/** 目录浏览（选择保存位置）：path 为空时列出各磁盘 → {path, parent, freeGb, dirs[{name, path, freeGb?}]} */
+export const listDirs = (path = '') => get(`/api/local/fs/dirs?path=${encodeURIComponent(path)}`)
 export const getDownloadSources = () => get('/api/local/models/download/sources')
 export const deleteModel = (id) => post(`/api/local/models/${id}/delete`)
 /** 资源评估：{baseModelId, mode: infer|train, quantization: 4bit|none, maxSeqLen, batchSize, loraR, adapterId?}
@@ -45,6 +58,8 @@ export const unloadModel = () => post('/api/local/inference/unload')
 export const generate = (body) => post('/api/local/inference/generate', body)
 /** 同一提示词 + 种子：基础模型（停用适配器）与微调模型各生成一次 → {base, adapter}；需已加载带适配器的模型 */
 export const compareGenerate = (body) => post('/api/local/inference/compare', body)
+/** 同一文本停用 / 启用适配器的 loss 与困惑度 {text, maxTokens?} → {tokens, base:{loss,ppl}, adapter:{loss,ppl}, lossDelta, pplChangePct} */
+export const evaluateAdapter = (body) => post('/api/local/inference/evaluate', body)
 
 /* ---------- 训练任务 ---------- */
 /** 见 python-service/app/local/router.py TrainReq；资源超限时返回 409（data 为评估结果），可带 force: true 强制开始 */

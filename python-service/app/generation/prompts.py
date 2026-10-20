@@ -44,3 +44,11 @@ def arc_user(previous_arc: str, summaries: list[str]) -> str:
     joined = "\n".join(summaries)
     prev = f"已有的前情概要：\n{previous_arc}\n\n" if previous_arc else ""
     return f"{prev}请把以下章节摘要与已有概要合并为一段不超过 300 字的前情概要，保留主线、人物关系和未解悬念：\n{joined}"
+
+
+POLISH_SYSTEM = "你是小说润色编辑。只输出润色后的正文，不要标题、说明或任何多余的话。"
+
+
+def polish_user(text: str) -> str:
+    return ("润色下面这段小说正文：情节、人物、对话含义、叙述视角和段落顺序保持不变，不增删情节，不续写；"
+            "只改进用词、句式和节奏，让文字更自然、更有文学性。直接输出润色后的这段正文：\n\n" + text)

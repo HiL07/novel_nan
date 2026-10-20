@@ -113,6 +113,28 @@ public class AiServiceClient {
         client.post().uri("/api/crawl/jobs/{id}/release", jobId).retrieve().toBodilessEntity();
     }
 
+    /** GET /api/crawl/checkpoints/{key} → {code, data: {exists, url, bookName, chapterTotal, chapterSaved}} */
+    public JsonNode crawlCheckpoint(String key) {
+        return client.get().uri("/api/crawl/checkpoints/{key}", key).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/gen/novels/{id}/chapters：大模型工作区开始生成下一章，附带 api（模型配置） */
+    public JsonNode startGenChapter(String novelId, Map<String, Object> body, AiModelConfig cfg) {
+        Map<String, Object> req = new HashMap<>(body);
+        req.put("api", modelBody(cfg));
+        return client.post().uri("/api/gen/novels/{id}/chapters", novelId).body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/gen/novels/{id}/ideas：AI 构思（书名 / 大纲 / 下一章），一次长输出，用慢客户端。
+     *  cfg 为 null 时 body 应含 local（本地模型），不附带大模型配置 */
+    public JsonNode genIdeas(String novelId, Map<String, Object> body, AiModelConfig cfg) {
+        Map<String, Object> req = new HashMap<>(body);
+        if (cfg != null) {
+            req.put("api", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/gen/novels/{id}/ideas", novelId).body(req).retrieve().body(JsonNode.class);
+    }
+
     private Map<String, Object> modelBody(AiModelConfig cfg) {
         return Map.of(
                 "baseUrl", cfg.getBaseUrl(),

@@ -1,5 +1,5 @@
 <template>
-  <el-drawer :model-value="modelValue" title="从素材库添加" size="720px" @update:model-value="close" @open="onOpen">
+  <el-drawer :model-value="modelValue" :title="pickOnly ? '选择构思用的素材' : '从素材库添加'" size="720px" @update:model-value="close" @open="onOpen">
     <div class="filters">
       <el-select v-model="category" placeholder="全部分类" clearable style="width: 130px" @change="onCategory">
         <el-option v-for="c in MATERIAL_CATEGORIES" :key="c.code" :label="c.label" :value="c.code" />
@@ -9,6 +9,9 @@
         <el-option v-for="t in tagCloud" :key="t.tag" :label="`${t.tag}（${t.count}）`" :value="t.tag" />
       </el-select>
       <el-button :icon="Search" @click="search">检索</el-button>
+    </div>
+    <div v-if="excludeBooks.length" class="blocked-hint">
+      已屏蔽来源书：{{ excludeBooks.map((b) => `《${b}》`).join('') }} —— 这些书的素材不显示（标为「保留」的除外）
     </div>
 
     <div v-loading="loading" class="list">
@@ -20,20 +23,22 @@
             <el-tag size="small" effect="plain">{{ categoryOf(m.category)?.label }}</el-tag>
             <b>{{ m.title }}</b>
             <span class="muted">{{ m.subtype }}</span>
+            <el-tag v-if="m.pinned" size="small" type="warning" effect="plain">保留</el-tag>
+            <span class="muted source">{{ m.sourceBook ? `《${m.sourceBook}》` : '手动添加' }}</span>
           </div>
           <div class="pick-summary">{{ m.summary }}</div>
           <div class="pick-tags">
             <el-tag v-for="t in (m.tags || []).slice(0, 6)" :key="t" size="small" type="info">{{ t }}</el-tag>
           </div>
-          <div v-if="selected[m.id]" class="target">将应用到：{{ describeTarget(m, categories) }}</div>
+          <div v-if="selected[m.id] && !pickOnly" class="target">将应用到：{{ describeTarget(m, categories) }}</div>
         </div>
       </div>
     </div>
 
     <template #footer>
-      <span class="muted footer-hint">应用 = 复制到当前设定，之后可随意修改；素材库后续修改不会影响已应用的内容</span>
+      <span class="muted footer-hint">{{ pickOnly ? '选中的素材会提供给 AI 构思书名 / 大纲 / 章节' : '应用 = 复制到当前设定，之后可随意修改；素材库后续修改不会影响已应用的内容' }}</span>
       <el-button @click="close">取消</el-button>
-      <el-button type="primary" :disabled="!selectedList.length" @click="apply">应用 {{ selectedList.length || '' }} 条</el-button>
+      <el-button type="primary" :disabled="!selectedList.length" @click="apply">{{ pickOnly ? '选择' : '应用' }} {{ selectedList.length || '' }} 条</el-button>
     </template>
   </el-drawer>
 </template>
@@ -46,11 +51,14 @@ import { MATERIAL_CATEGORIES, categoryOf, getMaterialTags, searchMaterials } fro
 import { describeTarget } from '@/novel-options/materialApply'
 import { errorMessage } from '@/api/request'
 
-/** categories：当前设定的分类（用于预览应用位置）；initialCategory：打开时预选的素材分类 */
+/** categories：当前设定的分类（用于预览应用位置）；initialCategory：打开时预选的素材分类；pickOnly：只选择不应用（AI 构思用）；
+ *  excludeBooks：屏蔽的来源书（不列出其素材，保留的除外） */
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
+  pickOnly: { type: Boolean, default: false },
   categories: { type: Array, default: () => [] },
-  initialCategory: { type: String, default: '' }
+  initialCategory: { type: String, default: '' },
+  excludeBooks: { type: Array, default: () => [] }
 })
 const emit = defineEmits(['update:modelValue', 'apply'])
 
@@ -83,7 +91,10 @@ function onCategory() {
 async function search() {
   loading.value = true
   try {
-    const res = await searchMaterials({ category: category.value || undefined, keyword: keyword.value.trim() || undefined, tags: tags.value, tagMode: 'all', page: 1, size: 50 })
+    const res = await searchMaterials({
+      category: category.value || undefined, keyword: keyword.value.trim() || undefined, tags: tags.value, tagMode: 'all',
+      excludeBooks: props.excludeBooks, page: 1, size: 50
+    })
     if (res.code !== 0) throw new Error(res.message)
     records.value = res.data.records
   } catch (e) {
@@ -154,6 +165,15 @@ function apply() {
 .muted {
   font-size: 12px;
   color: #909399;
+}
+.source {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.blocked-hint {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  color: var(--el-color-warning-dark-2);
 }
 .footer-hint {
   margin-right: 12px;
