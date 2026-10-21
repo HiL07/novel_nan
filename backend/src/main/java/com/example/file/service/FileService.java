@@ -26,7 +26,9 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -173,6 +175,43 @@ public class FileService {
      */
     public byte[] toUtf8Text(byte[] bytes) {
         return decodeText(bytes).getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** 分页预览的解码缓存：翻页时不必每次重读、重解码整本书（只留最近 2 个文件） */
+    private final Map<Long, String> textCache = new LinkedHashMap<>(4, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<Long, String> eldest) {
+            return size() > 2;
+        }
+    };
+
+    /**
+     * 文本分页预览：解码方式同 {@link #toUtf8Text}，按字符截取 [offset, offset + limit)。
+     * 返回 {text, offset, nextOffset, totalChars, done}；nextOffset 不会切开代理对。
+     */
+    public Map<String, Object> readTextPage(Long id, int offset, int limit) {
+        String text;
+        synchronized (textCache) {
+            text = textCache.get(id);
+        }
+        if (text == null) {
+            text = decodeText(read(id));
+            synchronized (textCache) {
+                textCache.put(id, text);
+            }
+        }
+        int start = Math.max(0, Math.min(offset, text.length()));
+        int end = (int) Math.min((long) start + Math.max(1, limit), text.length());
+        if (end < text.length() && end > start && Character.isHighSurrogate(text.charAt(end - 1))) {
+            end--;
+        }
+        Map<String, Object> page = new LinkedHashMap<>();
+        page.put("text", text.substring(start, end));
+        page.put("offset", start);
+        page.put("nextOffset", end);
+        page.put("totalChars", text.length());
+        page.put("done", end >= text.length());
+        return page;
     }
 
     private String decodeText(byte[] bytes) {

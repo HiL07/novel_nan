@@ -16,7 +16,7 @@ spring:
   sql:
     init:
       mode: always                              # 每次启动执行建表脚本（CREATE TABLE IF NOT EXISTS）
-      schema-locations: classpath:sql/file.sql,classpath:sql/novel_extract.sql,classpath:sql/novel_crawl.sql,classpath:sql/novel_crawl_book.sql,classpath:sql/ai_model_config.sql,classpath:sql/python_env.sql,classpath:sql/material.sql
+      schema-locations: classpath:sql/file.sql,classpath:sql/novel_extract.sql,classpath:sql/novel_crawl.sql,classpath:sql/novel_crawl_book.sql,classpath:sql/crawl_site_rule.sql,classpath:sql/ai_model_config.sql,classpath:sql/python_env.sql,classpath:sql/material.sql
       encoding: UTF-8                           # Windows 下 JDK 17 默认 GBK，脚本按 UTF-8 读取
   servlet:
     multipart:

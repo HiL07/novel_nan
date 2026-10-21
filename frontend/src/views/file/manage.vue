@@ -88,12 +88,20 @@
               class="preview-iframe"
               :src="previewUrl(current.id)"
             />
-            <pre v-else class="preview-text">{{ textContent }}</pre>
+            <template v-else>
+              <pre ref="textBox" class="preview-text" @scroll="onTextScroll">{{ textContent }}</pre>
+              <div v-if="textPage.total" class="preview-more">
+                已显示 {{ formatChars(textPage.next) }} / {{ formatChars(textPage.total) }} 字
+                <el-button v-if="!textPage.done" link type="primary" :loading="textPage.loading" @click="loadMoreText">
+                  加载更多
+                </el-button>
+              </div>
+            </template>
           </div>
           <div class="preview-actions">
             <el-button type="primary" @click="downloadFile(current.id)">下载</el-button>
             <el-button @click="copyPreview">
-              {{ previewType === 'pdf' ? '复制地址' : '复制' }}
+              {{ previewType === 'pdf' ? '复制地址' : '复制全文' }}
             </el-button>
             <el-button v-if="isExtractable(current.fileExt)" type="success" @click="startExtract(current)">
               小说提取
@@ -114,7 +122,7 @@ import { computed, onActivated, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
-import { classify, downloadFile, downloadUrl, fetchText, listFiles, previewUrl } from '@/api/file'
+import { classify, downloadFile, downloadUrl, fetchText, fetchTextPage, listFiles, previewUrl } from '@/api/file'
 import { isExtractable, submitExtract } from '@/api/novel'
 import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
 import { errorMessage } from '@/api/request'
@@ -138,6 +146,10 @@ const dialogVisible = ref(false)
 const current = ref(null)
 const previewType = ref('')
 const textContent = ref('')
+// 文本分页：每次取 PAGE_CHARS 字，滚到底部附近自动续上（9MB 的 txt 约 450 万字，一次渲染会卡死页面）
+const PAGE_CHARS = 100000
+const textBox = ref(null)
+const textPage = reactive({ id: null, next: 0, total: 0, done: true, loading: false })
 
 const currentFiles = computed(() =>
   activeTab.value === 'all'
@@ -185,7 +197,37 @@ function openDialog(item, type) {
   current.value = item
   previewType.value = type
   textContent.value = ''
+  Object.assign(textPage, { id: item.id, next: 0, total: 0, done: true, loading: false })
   dialogVisible.value = true
+}
+
+async function loadMoreText() {
+  if (textPage.loading || textPage.done) return
+  const id = textPage.id
+  textPage.loading = true
+  try {
+    const res = await fetchTextPage(id, textPage.next, PAGE_CHARS)
+    if (id !== textPage.id) return // 已换成别的文件
+    if (res.code !== 0) throw new Error(res.message)
+    const page = res.data
+    textContent.value = textPage.next === 0 ? page.text : textContent.value + page.text
+    Object.assign(textPage, { next: page.nextOffset, total: page.totalChars, done: page.done })
+  } catch (e) {
+    if (id !== textPage.id) return
+    if (textPage.next === 0) textContent.value = '文本加载失败'
+    ElMessage.error(errorMessage(e, '文本加载失败'))
+  } finally {
+    if (id === textPage.id) textPage.loading = false
+  }
+}
+
+function onTextScroll() {
+  const el = textBox.value
+  if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 400) loadMoreText()
+}
+
+function formatChars(n) {
+  return n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n)
 }
 
 /** 按分类决定点击行为（见 docx/fronted_vue3/view/file_manage.md 三） */
@@ -198,12 +240,8 @@ async function onCardClick(item) {
   } else if (category === 'text') {
     openDialog(item, 'text')
     textContent.value = '加载中…'
-    try {
-      textContent.value = await fetchText(item.id)
-    } catch (e) {
-      textContent.value = '文本加载失败'
-      ElMessage.error('文本加载失败')
-    }
+    textPage.done = false
+    await loadMoreText()
   } else if (category === 'office' && ext === 'pdf') {
     openDialog(item, 'pdf')
   } else if (category === 'office' && ext === 'docx') {
@@ -214,8 +252,10 @@ async function onCardClick(item) {
 }
 
 async function copyPreview() {
-  const text = previewType.value === 'pdf' ? downloadUrl(current.value.id) : textContent.value
   try {
+    let text = textContent.value
+    if (previewType.value === 'pdf') text = downloadUrl(current.value.id)
+    else if (!textPage.done) text = await fetchText(current.value.id) // 只取不渲染，不会卡
     await navigator.clipboard.writeText(text)
     ElMessage.success('已复制')
   } catch (e) {
@@ -401,6 +441,11 @@ onActivated(loadFiles)
   color: #303133;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.preview-more {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
 }
 .preview-actions {
   flex: 0 0 auto;

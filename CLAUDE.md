@@ -52,6 +52,8 @@ nan_novel/
 │       ├── views/ai/    # model.vue (remote AI model configs), local.vue (本地模型), pyenv.vue (Python 环境 selection & check)
 │       ├── views/material/ # index.vue (素材库: keyword/tag + AI semantic search, 待确认 candidates)
 │       ├── components/material/ # ExtractOptionsDialog, CandidateReview (20 per page), MaterialEditor, AttributeEditor, MaterialPicker (pick-only mode for AI 构思)
+│       ├── components/ai/ # TokenUsageBar (source tag 大模型/本地/远程, tokens incl. cache hits, cost via utils/modelPricing.js)
+│       ├── utils/modelPricing.js # reference prices per 1M tokens by model name (CNY/USD) + per-model overrides in localStorage
 │       ├── components/novel/ # IdeaPanel (AI 构思: 书名 / 大纲 / 章节题目 + 素材)
 │       ├── components/novel-options/ # schema-driven option UI (SettingsEditor, OptionField, ChoiceWidget, …)
 │       ├── novel-options/ # field-type registry, schema helpers, editor context
@@ -113,6 +115,7 @@ mvn clean package       # build jar (Lombok excluded from the fat jar)
 | `GET  /api/file/list` | All files, `create_time` descending |
 | `GET  /api/file/download/{id}` | Attachment download |
 | `GET  /api/file/preview/{id}` | Inline preview (image/PDF/text). Text files are transcoded to UTF-8 (`charset=UTF-8`): BOM → strict UTF-8 → strict GB18030, so GBK novels don't show as mojibake. Download returns original bytes. |
+| `GET  /api/file/text/{id}?offset=0&limit=100000` | Paged text preview (same decoding, by chars, limit 1k–500k) → `{text, offset, nextOffset, totalChars, done}`; decoded text of the last 2 files is cached. The 文件管理 dialog loads 100k chars at a time (scroll / 加载更多) — rendering a whole multi-MB novel froze the page |
 
 ### Novel extraction API (`NovelExtractController`)
 
@@ -273,6 +276,7 @@ npm run preview
 - Site mode shows the discovery limits (`整站上限` books, `分类范围` categories/list pages, `只要分类` name filter, `每本最多` chapters — 0 means whole book, `发现时解析每本目录` switch), then a selectable book table (书名/作者/分类/章节/目录页 or error) that is **auto-selected** after discovery, plus 全选 and 「开始抓取（已选 N 本）」.
 - `RULE_FIELDS` holds every XPath field; the four site-only ones (`categoryLinks`, `bookLinks`, `listNext`, `tocLink`) are rendered only in site mode (`ruleFields` computed), and empty fields fall back to the preset then heuristics.
 - Task table shows a 模式 tag (单本/整站); site tasks show `书 done/total` and open a 书籍明细 dialog (`GET /{id}/books`) where each finished book can go straight to 小说提取. 「继续抓取」 opens the resume dialog (saved progress + optional new site address); 「从头重抓」 re-runs the stored options as a new task; 改参数 refills the form (site books are re-discovered).
+- 「AI 解析地址」 is the only crawl step that spends tokens (rule-based crawling uses none): the job carries `usage {source: api|local, model, host, calls, promptTokens, completionTokens, cacheHitTokens}` (accumulated live by `llm_client.chat(..., usage=)`; `local` = OpenAI-compatible service on localhost) and each attempt `promptTokens/completionTokens`; the panel shows it with `TokenUsageBar` (price = built-in reference or the user's override).
 - The URL field is an autocomplete over recently used addresses (localStorage, also those only previewed / discovered) plus every task URL in the DB; the whole form (mode, rules, site limits) is kept as a localStorage draft.
 
 ## 6. Python AI Service (`python-service/`)

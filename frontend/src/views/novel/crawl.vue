@@ -37,17 +37,55 @@
             <el-button v-if="mode === 'book'" type="primary" :loading="previewing" :disabled="!form.url" @click="doPreview">
               解析目录
             </el-button>
+            <el-button
+              v-if="mode === 'book'"
+              type="success"
+              :icon="MagicStick"
+              :loading="aiRunning"
+              :disabled="!form.url"
+              @click="doAiAnalyze"
+            >
+              AI 解析地址
+            </el-button>
             <el-button v-else type="primary" :loading="discovering" :disabled="!form.url" @click="doDiscover">
               发现书籍
             </el-button>
           </div>
         </el-form-item>
+        <el-form-item v-if="mode === 'book'" label="AI 解析">
+          <span class="unit first">最多尝试</span>
+          <el-input-number v-model="ai.maxAttempts" :min="1" :max="10" size="small" />
+          <span class="unit">次</span>
+          <el-input v-model="ai.hint" size="small" class="ai-hint" placeholder="补充说明（可空），如：正文在 id=content 的 div 里" clearable />
+          <el-switch v-model="ai.autoStart" active-text="成功后直接抓全书" class="switch" />
+          <div class="meta block">
+            可填书籍详情页或目录页。先试已学到的 / 内置规则，失败再由大模型看页面结构写 XPath，每次都真实试抓目录 + 两章正文；
+            成功后总结地址规律并按域名保存，以后同站点「按域名自动选择」会自动套用。需要「模型配置」里有已验证的大模型。
+          </div>
+        </el-form-item>
         <el-form-item label="抓取规则">
           <el-select v-model="form.preset" style="width: 260px">
             <el-option label="按域名自动选择" value="" />
-            <el-option v-for="p in presets" :key="p.key" :label="p.name" :value="p.key" />
+            <el-option-group v-if="learnedRules.length" label="AI 学到的站点规则">
+              <el-option
+                v-for="r in learnedRules"
+                :key="r.id"
+                :label="`${r.siteName || r.host}（AI 学到）`"
+                :value="`learned:${r.id}`"
+              />
+            </el-option-group>
+            <el-option-group label="内置规则">
+              <el-option v-for="p in presets" :key="p.key" :label="p.name" :value="p.key" />
+            </el-option-group>
           </el-select>
-          <span class="hint">{{ currentPreset?.description || '命中预设域名用对应规则，否则自动识别' }}</span>
+          <span class="hint">{{ presetHint }}</span>
+          <el-button link type="primary" class="ml6" @click="openRules">已学规则（{{ learnedRules.length }}）</el-button>
+        </el-form-item>
+        <el-form-item label="保存目录">
+          <div class="url-row">
+            <el-input v-model="form.saveDir" placeholder="可空：只存入文件管理。填写后每本 txt 再另存一份到这个目录（不存在会自动创建）" clearable />
+            <el-button :icon="FolderOpened" @click="openDirPicker">浏览</el-button>
+          </div>
         </el-form-item>
 
         <template v-if="mode === 'site'">
@@ -104,13 +142,74 @@
         </el-collapse>
       </el-form>
 
+      <!-- 单本：AI 解析地址的过程与结果 -->
+      <div v-if="mode === 'book' && aiJob" class="preview">
+        <div class="sample-title">
+          AI 解析：{{ aiJob.url }}
+          <el-tag :type="AI_STATUS[aiJob.status]?.type" size="small">{{ AI_STATUS[aiJob.status]?.label || aiJob.status }}</el-tag>
+          <el-button v-if="aiRunning" size="small" type="danger" plain @click="doAiCancel">取消</el-button>
+          <el-button v-else size="small" @click="clearAiJob">收起</el-button>
+        </div>
+        <el-progress
+          :percentage="aiJob.progress || 0"
+          :status="aiJob.status === 'succeeded' ? 'success' : ['failed', 'cancelled'].includes(aiJob.status) ? 'exception' : ''"
+        />
+        <div class="meta">{{ aiJob.error || aiJob.message }}</div>
+        <TokenUsageBar :usage="aiJob.usage" :live="aiRunning" />
+        <el-table v-if="aiJob.attempts?.length" :data="aiJob.attempts" size="small" class="attempts">
+          <el-table-column prop="index" label="#" width="44" />
+          <el-table-column label="方式" width="110">
+            <template #default="{ row }">{{ AI_STRATEGY[row.strategy] || row.strategy }}</template>
+          </el-table-column>
+          <el-table-column label="结果" width="76">
+            <template #default="{ row }">
+              <el-tag :type="row.ok ? 'success' : 'danger'" size="small">{{ row.ok ? '成功' : '失败' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="章节 / 首章" width="110">
+            <template #default="{ row }">{{ row.chapterCount }} 章 / {{ row.sampleChars }} 字</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="300">
+            <template #default="{ row }">
+              <div v-if="row.reason">{{ row.reason }}</div>
+              <div v-if="row.error" class="err">{{ row.error }}</div>
+              <div v-if="Object.keys(row.rule || {}).length" class="meta rule-line">{{ ruleText(row.rule) }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="Token（入/出）" width="110">
+            <template #default="{ row }">
+              <span v-if="row.promptTokens || row.completionTokens">{{ row.promptTokens }} / {{ row.completionTokens }}</span>
+              <span v-else class="meta">不调用模型</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="耗时" width="70">
+            <template #default="{ row }">{{ row.seconds }} 秒</template>
+          </el-table-column>
+        </el-table>
+        <el-descriptions v-if="aiJob.result" :column="1" border size="small" class="ai-result">
+          <el-descriptions-item label="站点">
+            {{ aiJob.result.siteName || aiJob.result.host }}
+            <el-tag v-if="aiJob.savedRuleId" size="small" type="success" class="ml6">规则已保存，同站点自动套用</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="地址规律">
+            <div>书籍：{{ aiJob.result.bookUrlPattern }}</div>
+            <div>目录：{{ aiJob.result.tocUrlPattern }}</div>
+            <div>章节：{{ aiJob.result.chapterUrlPattern }}</div>
+          </el-descriptions-item>
+          <el-descriptions-item label="总结">{{ aiJob.result.summary }}</el-descriptions-item>
+          <el-descriptions-item label="规则">
+            <span class="rule-line">{{ ruleText(aiJob.result.rule) || '内置规则 / 自动识别即可' }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+
       <!-- 单本：目录预览 -->
       <div v-if="mode === 'book' && preview" class="preview">
         <el-descriptions :column="3" border size="small">
           <el-descriptions-item label="书名">{{ preview.bookName || '-' }}</el-descriptions-item>
           <el-descriptions-item label="作者">{{ preview.author || '-' }}</el-descriptions-item>
           <el-descriptions-item label="章节数">{{ preview.chapterCount }}（目录 {{ preview.tocPages }} 页）</el-descriptions-item>
-          <el-descriptions-item label="使用规则">{{ presetName(preview.preset) }}</el-descriptions-item>
+          <el-descriptions-item label="使用规则">{{ ruleLabel(preview) }}</el-descriptions-item>
           <el-descriptions-item label="首章" :span="2">{{ preview.chapters[0]?.title }}</el-descriptions-item>
           <el-descriptions-item label="简介" :span="3">
             <div class="intro">{{ preview.intro || '-' }}</div>
@@ -160,7 +259,7 @@
             {{ siteResult.bookCount }} 本
             <el-tag v-if="siteResult.truncated" size="small" type="warning" class="ml6">已达上限</el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="使用规则">{{ presetName(siteResult.preset) }}</el-descriptions-item>
+          <el-descriptions-item label="使用规则">{{ ruleLabel(siteResult) }}</el-descriptions-item>
         </el-descriptions>
 
         <div class="cat-chips">
@@ -344,6 +443,64 @@
       </template>
     </el-dialog>
 
+    <!-- AI 学到的站点规则 -->
+    <el-dialog v-model="rulesDlg.visible" title="AI 学到的站点规则" width="860px">
+      <p class="meta">每个域名一条；抓取规则选「按域名自动选择」时自动套用（高级选项里填写的 XPath 优先）。同站点再次 AI 解析成功会覆盖。</p>
+      <el-empty v-if="!learnedRules.length" description="还没有学到的规则：在单本模式输入书籍地址，点「AI 解析地址」" />
+      <el-table v-else :data="learnedRules" size="small" max-height="460">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="rule-detail">
+              <div>总结：{{ row.summary || '-' }}</div>
+              <div>书籍地址：{{ row.bookUrlPattern || '-' }}</div>
+              <div>目录地址：{{ row.tocUrlPattern || '-' }}</div>
+              <div>章节地址：{{ row.chapterUrlPattern || '-' }}</div>
+              <div>学习样例：{{ row.sampleUrl }}（{{ row.bookName || '-' }}，{{ row.chapterCount || 0 }} 章）</div>
+              <div class="rule-line">规则：{{ ruleText(row.rule) || '内置规则 / 自动识别即可' }}</div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="站点" min-width="160">
+          <template #default="{ row }">
+            <div>{{ row.siteName || row.host }}</div>
+            <div class="meta">{{ row.host }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="地址规律" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.bookUrlPattern }}</template>
+        </el-table-column>
+        <el-table-column label="学到方式" width="120">
+          <template #default="{ row }">{{ AI_STRATEGY[row.strategy] || row.strategy }} · 第 {{ row.attempts }} 次</template>
+        </el-table-column>
+        <el-table-column prop="updateTime" label="更新时间" width="160" />
+        <el-table-column label="操作" width="120">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="useRule(row)">使用</el-button>
+            <el-button link type="danger" @click="removeRule(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
+
+    <!-- 选择保存目录（服务器即本机的目录） -->
+    <el-dialog v-model="dirDlg.visible" title="选择保存目录" width="600px">
+      <div class="dialog-bar">
+        <el-button size="small" :icon="Back" :disabled="dirDlg.parent === null" @click="openDir(dirDlg.parent)">上一级</el-button>
+        <code class="dir-path">{{ dirDlg.path || '此电脑' }}</code>
+      </div>
+      <div v-loading="dirDlg.loading" class="dir-list">
+        <div v-for="e in dirDlg.entries" :key="e.path" class="dir-item" @click="openDir(e.path)">
+          <el-icon><Folder /></el-icon>
+          <span>{{ e.name }}</span>
+        </div>
+        <el-empty v-if="!dirDlg.loading && !dirDlg.entries.length" description="没有子目录" :image-size="60" />
+      </div>
+      <template #footer>
+        <el-button @click="dirDlg.visible = false">取消</el-button>
+        <el-button type="primary" :disabled="!dirDlg.path" @click="pickDir">选择当前目录</el-button>
+      </template>
+    </el-dialog>
+
     <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.fileName" @confirm="doExtract" />
   </div>
 </template>
@@ -351,14 +508,19 @@
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Back, FolderOpened, MagicStick, Refresh } from '@element-plus/icons-vue'
 import {
+  analyzeCrawlUrl,
   cancelCrawl,
+  cancelCrawlAiJob,
+  deleteCrawlRule,
   discoverCrawl,
+  getCrawlAiJob,
   getCrawlCheckpoint,
   listCrawlBooks,
   listCrawlPresets,
+  listCrawlRules,
   listCrawls,
   previewCrawl,
   resumeCrawl,
@@ -367,8 +529,10 @@ import {
   submitSiteCrawl
 } from '@/api/crawl'
 import { submitExtract } from '@/api/novel'
+import { browseDir } from '@/api/pythonEnv'
 import { errorMessage } from '@/api/request'
 import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
+import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 
 const STATUS = {
   QUEUED: { label: '排队中', type: 'info' },
@@ -377,11 +541,19 @@ const STATUS = {
   FAILED: { label: '失败', type: 'danger' },
   CANCELLED: { label: '已取消', type: 'info' }
 }
+const AI_STATUS = {
+  queued: { label: '排队中', type: 'info' },
+  running: { label: '分析中', type: 'warning' },
+  succeeded: { label: '成功', type: 'success' },
+  failed: { label: '失败', type: 'danger' },
+  cancelled: { label: '已取消', type: 'info' }
+}
+const AI_STRATEGY = { learned: '已学到的规则', preset: '内置规则', ai: 'AI 写规则' }
 const RULE_FIELDS = [
   { key: 'categoryLinks', label: '分类链接', placeholder: "如 //ul[@class='channel-nav-list']/li/a", siteOnly: true },
   { key: 'bookLinks', label: '书籍链接', placeholder: "如 //ul[@class='seeWell cf']/li/span/a[1]", siteOnly: true },
   { key: 'listNext', label: '分类下一页', placeholder: '分类列表分页：「下一页」的 <a>', siteOnly: true },
-  { key: 'tocLink', label: '目录链接', placeholder: "如 //div[@class='b-oper']/a[@class='reader']", siteOnly: true },
+  { key: 'tocLink', label: '目录链接', placeholder: "详情页 → 目录页的 <a>，如 //div[@class='b-oper']/a[@class='reader']" },
   { key: 'chapterLinks', label: '章节链接', placeholder: "如 //div[@id='list']//dd/a" },
   { key: 'content', label: '正文', placeholder: "如 //div[@id='content']" },
   { key: 'bookName', label: '书名', placeholder: '如 //h1/text()' },
@@ -412,10 +584,18 @@ const tasks = ref([])
 const booksDlg = reactive({ visible: false, crawl: null, title: '', books: [], loading: false })
 const extractDlg = reactive({ visible: false, fileId: null, fileName: '' })
 const resumeDlg = reactive({ visible: false, task: null, info: null, loading: false, newOrigin: '', submitting: false })
+const ai = reactive({ maxAttempts: 5, hint: '', autoStart: false })
+const aiJob = ref(null)
+const learnedRules = ref([])
+const rulesDlg = reactive({ visible: false })
+const dirDlg = reactive({ visible: false, path: '', parent: null, entries: [], loading: false })
 let timer = null
+let aiTimer = null
 
 // 本机浏览器里记住表单草稿与最近用过的地址（刷新 / 关页面后还在）；已提交任务的地址另存在数据库的任务表里
 const DRAFT_KEY = 'nan_novel.crawl.draft'
+// 解析目录 / 发现书籍 / AI 解析的结果：切到别的页面、刷新浏览器后回来还在，直到重新解析或开始抓取
+const RESULT_KEY = 'nan_novel.crawl.result'
 const RECENT_KEY = 'nan_novel.crawl.recentUrls'
 const MAX_RECENT = 30
 const recentUrls = ref(readJson(RECENT_KEY, []))
@@ -472,6 +652,41 @@ function restoreDraft() {
     if (Object.values(form.rule).some(Boolean) || form.removeText) advancedOpen.value = ['adv']
   }
   if (d.site) Object.assign(site, emptySite(), d.site)
+  if (d.ai) Object.assign(ai, d.ai)
+}
+
+/** 恢复上次的解析结果（目录预览 / 整站书单 + 勾选 / AI 解析过程），进行中的 AI 解析继续轮询 */
+let pendingSelection = null
+function restoreResult() {
+  const r = readJson(RESULT_KEY, null)
+  if (!r) return
+  preview.value = r.preview || null
+  if (r.range) Object.assign(range, r.range)
+  siteResult.value = r.siteResult || null
+  pendingSelection = r.selected || null
+  aiJob.value = r.aiJob || null
+  if (aiJob.value && ['queued', 'running'].includes(aiJob.value.status)) scheduleAiPoll()
+}
+
+function saveResult() {
+  writeJson(RESULT_KEY, {
+    preview: preview.value,
+    range: { ...range },
+    siteResult: siteResult.value,
+    selected: pendingSelection || selectedBooks.value.map((b) => b.tocUrl),
+    aiJob: aiJob.value
+  })
+}
+
+/** 整站书单表格渲染后，把恢复出来的勾选状态还原 */
+async function applyPendingSelection() {
+  if (!pendingSelection || !siteResult.value) return
+  const wanted = new Set(pendingSelection)
+  pendingSelection = null
+  await nextTick()
+  ;(siteResult.value.books || []).forEach((b) => {
+    if (b.tocUrl && wanted.has(b.tocUrl)) booksTableRef.value?.toggleRowSelection(b, true)
+  })
 }
 
 function emptyForm() {
@@ -481,7 +696,8 @@ function emptyForm() {
     delayMs: 1000,
     respectRobots: true,
     rule: Object.fromEntries(RULE_FIELDS.map((f) => [f.key, ''])),
-    removeText: ''
+    removeText: '',
+    saveDir: ''
   }
 }
 
@@ -490,7 +706,9 @@ function emptySite() {
 }
 
 restoreDraft()
-watch([mode, form, site], () => writeJson(DRAFT_KEY, { mode: mode.value, form, site }), { deep: true })
+restoreResult()
+watch([mode, form, site, ai], () => writeJson(DRAFT_KEY, { mode: mode.value, form, site, ai }), { deep: true })
+watch([preview, siteResult, selectedBooks, aiJob, () => range.start, () => range.end], saveResult)
 
 const tipText = computed(() =>
   mode.value === 'book'
@@ -510,6 +728,51 @@ function presetName(key) {
   return presets.value.find((p) => p.key === key)?.name || key
 }
 
+/** 预览 / 发现结果用的规则：套用了 AI 学到的规则时标明站点 */
+function ruleLabel(data) {
+  const lr = data?.learnedRule
+  if (lr) return `AI 学到的规则（${lr.siteName || lr.host}）`
+  return presetName(data?.preset)
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url.trim()).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/** 与后端 CrawlRuleService.findForUrl 同口径：精确域名，或忽略 www. / m. / wap. 前缀 */
+const matchedRule = computed(() => {
+  const host = hostOf(form.url)
+  if (!host) return null
+  const bare = host.replace(/^(www|m|wap)\./, '')
+  return (
+    learnedRules.value.find((r) => r.host === host) ||
+    learnedRules.value.find((r) => [bare, `www.${bare}`, `m.${bare}`].includes(r.host)) ||
+    null
+  )
+})
+
+const presetHint = computed(() => {
+  if (form.preset.startsWith('learned:')) {
+    const r = learnedRules.value.find((x) => `learned:${x.id}` === form.preset)
+    return r?.summary || '使用 AI 学到的规则'
+  }
+  if (!form.preset && matchedRule.value) {
+    return `该站点有 AI 学到的规则（${matchedRule.value.siteName || matchedRule.value.host}），将自动套用`
+  }
+  return currentPreset.value?.description || '命中预设域名用对应规则，否则自动识别'
+})
+
+function ruleText(rule) {
+  return Object.entries(rule || {})
+    .filter(([, v]) => v && (!Array.isArray(v) || v.length))
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' | ') : v}`)
+    .join('；')
+}
+
 /** 表单 → 后端参数：只带非空的自定义规则字段；整站模式带上发现上限 */
 function buildOptions() {
   const rule = Object.fromEntries(Object.entries(form.rule).filter(([, v]) => v && v.trim()).map(([k, v]) => [k, v.trim()]))
@@ -521,7 +784,8 @@ function buildOptions() {
     preset: form.preset,
     delayMs: form.delayMs,
     respectRobots: form.respectRobots,
-    ...(Object.keys(rule).length ? { rule } : {})
+    ...(Object.keys(rule).length ? { rule } : {}),
+    ...(form.saveDir.trim() ? { saveDir: form.saveDir.trim() } : {})
   }
   if (mode.value === 'site') {
     options.maxBooks = site.maxBooks
@@ -534,10 +798,10 @@ function buildOptions() {
   return options
 }
 
+// 切换模式不清空结果：两种模式的结果各自保留，切回来还在
 function onModeChange() {
-  preview.value = null
-  siteResult.value = null
-  selectedBooks.value = []
+  if (mode.value === 'site') applyPendingSelection()
+  else if (selectedBooks.value.length) pendingSelection = selectedBooks.value.map((b) => b.tocUrl)
 }
 
 async function loadPresets() {
@@ -658,6 +922,179 @@ async function doSubmitSite() {
   } finally {
     submitting.value = false
   }
+}
+
+// ---------------------------------------------------------------- AI 解析地址
+
+const aiRunning = computed(() => !!aiJob.value && ['queued', 'running'].includes(aiJob.value.status))
+
+async function doAiAnalyze() {
+  if (!form.url) return
+  const url = form.url.trim()
+  rememberUrl(url)
+  try {
+    const res = await analyzeCrawlUrl({
+      url,
+      maxAttempts: ai.maxAttempts,
+      delayMs: form.delayMs,
+      respectRobots: form.respectRobots,
+      hint: ai.hint.trim()
+    })
+    if (res.code !== 0) {
+      ElMessage.error(res.message || 'AI 解析提交失败')
+      return
+    }
+    aiJob.value = res.data
+    preview.value = null
+    scheduleAiPoll()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, 'AI 解析提交失败（需要「模型配置」里有已验证的大模型）'))
+  }
+}
+
+/** AI 解析在后台跑：离开本页也继续轮询（结果存在本地，回来就能看到） */
+function scheduleAiPoll() {
+  if (aiTimer) clearTimeout(aiTimer)
+  aiTimer = setTimeout(pollAi, 2000)
+}
+
+async function pollAi() {
+  aiTimer = null
+  const jobId = aiJob.value?.jobId
+  if (!jobId) return
+  try {
+    const res = await getCrawlAiJob(jobId)
+    if (res.code !== 0) {
+      aiJob.value = { ...aiJob.value, status: 'failed', error: res.message || '查询失败' }
+      return
+    }
+    aiJob.value = res.data
+  } catch (e) {
+    if (e?.response?.status === 404) {
+      aiJob.value = { ...aiJob.value, status: 'failed', error: 'AI 服务已重启，任务中断，请重新解析' }
+      return
+    }
+    scheduleAiPoll() // 网络抖动 / 服务暂时不可达：继续等
+    return
+  }
+  if (aiRunning.value) {
+    scheduleAiPoll()
+    return
+  }
+  if (aiJob.value.status === 'succeeded') await onAiSucceeded()
+}
+
+/** 成功：载入学到的规则与目录预览（可直接「开始抓取」），开启了自动抓取则直接提交 */
+async function onAiSucceeded() {
+  const r = aiJob.value.result
+  await loadRules()
+  form.url = r.tocUrl || form.url
+  form.preset = aiJob.value.savedRuleId ? `learned:${aiJob.value.savedRuleId}` : ''
+  RULE_FIELDS.forEach((f) => (form.rule[f.key] = ''))
+  rememberUrl(form.url, r.preview?.bookName)
+  if (r.preview) {
+    preview.value = { ...r.preview, learnedRule: { host: r.host, siteName: r.siteName } }
+    range.start = 1
+    range.end = r.preview.chapterCount
+  }
+  if (ai.autoStart && preview.value) {
+    ElMessage.success('AI 解析成功，开始抓取全书')
+    await doSubmit()
+  } else {
+    ElMessage.success('AI 解析成功：规则已保存，确认目录后点「开始抓取」')
+  }
+}
+
+async function doAiCancel() {
+  try {
+    await cancelCrawlAiJob(aiJob.value.jobId)
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '取消失败'))
+  }
+}
+
+function clearAiJob() {
+  aiJob.value = null
+}
+
+// ---------------------------------------------------------------- 学到的规则
+
+async function loadRules() {
+  try {
+    const res = await listCrawlRules()
+    if (res.code === 0) learnedRules.value = res.data || []
+  } catch {
+    // 后端没起时不影响其它功能
+  }
+}
+
+async function openRules() {
+  rulesDlg.visible = true
+  await loadRules()
+}
+
+function useRule(row) {
+  form.preset = `learned:${row.id}`
+  if (!form.url && row.sampleUrl) form.url = row.sampleUrl
+  rulesDlg.visible = false
+}
+
+async function removeRule(row) {
+  try {
+    await ElMessageBox.confirm(`删除「${row.siteName || row.host}」学到的规则？之后该站点回到内置规则 / 自动识别。`, '删除规则', {
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteCrawlRule(row.id)
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '删除失败')
+      return
+    }
+    if (form.preset === `learned:${row.id}`) form.preset = ''
+    await loadRules()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '删除失败'))
+  }
+}
+
+// ---------------------------------------------------------------- 保存目录
+
+async function openDirPicker() {
+  dirDlg.visible = true
+  await openDir(form.saveDir.trim())
+}
+
+async function openDir(path) {
+  dirDlg.loading = true
+  try {
+    const res = await browseDir(path || '')
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '打开目录失败')
+      if (path) await openDir('')
+      return
+    }
+    dirDlg.path = res.data.path
+    dirDlg.parent = res.data.parent
+    dirDlg.entries = (res.data.entries || []).filter((e) => e.dir)
+  } catch (e) {
+    // 填的目录还不存在（抓取时会自动创建）：从盘符开始选
+    if (path) {
+      dirDlg.loading = false
+      await openDir('')
+      return
+    }
+    ElMessage.error(errorMessage(e, '打开目录失败'))
+  } finally {
+    dirDlg.loading = false
+  }
+}
+
+function pickDir() {
+  form.saveDir = dirDlg.path
+  dirDlg.visible = false
 }
 
 const isActive = (t) => t.status === 'QUEUED' || t.status === 'RUNNING'
@@ -782,11 +1219,13 @@ async function loadBooks() {
 function reuseOptions(row) {
   const o = row.options || {}
   mode.value = o.mode === 'site' ? 'site' : 'book'
+  const learned = o.learnedRuleId && learnedRules.value.some((r) => r.id === o.learnedRuleId)
   Object.assign(form, emptyForm(), {
     url: o.url || row.url,
-    preset: o.preset || '',
+    preset: learned ? `learned:${o.learnedRuleId}` : o.learnedRuleId ? '' : o.preset || '',
     delayMs: o.delayMs || 1000,
-    respectRobots: o.respectRobots !== false
+    respectRobots: o.respectRobots !== false,
+    saveDir: o.saveDir || ''
   })
   Object.assign(site, emptySite(), {
     maxBooks: o.maxBooks || 20,
@@ -796,7 +1235,8 @@ function reuseOptions(row) {
     verify: o.verify !== false,
     categoriesText: (o.categories || []).join(',')
   })
-  const rule = o.rule || {}
+  // 套用学到的规则时，存档里的 rule 是合并后的结果：规则交给下拉框，不再填进高级选项
+  const rule = o.learnedRuleId ? {} : o.rule || {}
   RULE_FIELDS.forEach((f) => (form.rule[f.key] = rule[f.key] || ''))
   form.removeText = (rule.removePatterns || []).join('\n')
   if (Object.keys(rule).length) advancedOpen.value = ['adv']
@@ -824,9 +1264,11 @@ async function doExtract(options) {
   }
 }
 
-// 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止轮询
+// 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止任务列表轮询（AI 解析的轮询不停）
 onActivated(async () => {
   if (!presets.value.length) loadPresets()
+  loadRules()
+  if (mode.value === 'site') applyPendingSelection()
   await loadTasks()
   if (tasks.value.some(isActive)) schedulePoll()
 })
@@ -956,5 +1398,54 @@ onDeactivated(stopPoll)
 }
 .ml6 {
   margin-left: 6px;
+}
+.unit.first {
+  margin: 0 6px 0 0;
+}
+.ai-hint {
+  width: 360px;
+  margin-left: 16px;
+}
+.meta.block {
+  width: 100%;
+  line-height: 1.6;
+}
+.attempts,
+.ai-result {
+  margin-top: 12px;
+}
+.err {
+  color: #f56c6c;
+}
+.rule-line {
+  font-family: Consolas, monospace;
+  word-break: break-all;
+}
+.rule-detail {
+  padding: 4px 48px;
+  line-height: 1.8;
+  color: #606266;
+  font-size: 13px;
+}
+.dir-path {
+  flex: 1;
+  margin-left: 10px;
+  word-break: break-all;
+}
+.dir-list {
+  height: 360px;
+  overflow: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+}
+.dir-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.dir-item:hover {
+  background: #f5f7fa;
 }
 </style>

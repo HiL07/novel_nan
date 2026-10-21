@@ -97,6 +97,7 @@ def preview(opts: CrawlOptions) -> dict:
     url = check_url(opts.url)
     preset_key, rule = rules.resolve(opts.preset, opts.rule, urlsplit(url).hostname or "")
     with Fetcher(opts.delayMs, opts.respectRobots, rule.encoding) as f:
+        url = resolve_toc_url(f, url, rule)
         toc = _load_toc(f, url, rule)
         sample = None
         if toc["chapters"]:
@@ -106,8 +107,18 @@ def preview(opts: CrawlOptions) -> dict:
                 sample = {"title": first["title"], "url": first["url"], "chars": len(text), "text": text[:600]}
             except (CrawlError, ValueError) as e:
                 sample = {"title": first["title"], "url": first["url"], "chars": 0, "text": "", "error": str(e)}
-    return {**toc, "preset": preset_key, "rule": rule.model_dump(), "chapterCount": len(toc["chapters"]),
+    return {**toc, "tocUrl": url, "preset": preset_key, "rule": rule.model_dump(), "chapterCount": len(toc["chapters"]),
             "sample": sample}
+
+
+def resolve_toc_url(f: Fetcher, url: str, rule: CrawlRule) -> str:
+    """规则带 tocLink 时（如 AI 学到的规则、整站预设），给的是书籍详情页也能跳到目录页；
+    页面上没有该链接（本身就是目录页）时原样返回。"""
+    if not rule.tocLink:
+        return url
+    final_url, html = f.get_html(url)
+    href = parser.parse_next(html, final_url, rule.tocLink)
+    return href or url
 
 
 def _load_toc(f: Fetcher, url: str, rule: CrawlRule, max_pages: int = MAX_TOC_PAGES) -> dict:
@@ -411,6 +422,7 @@ def _plan(job: CrawlJob, req: CrawlRequest, f: Fetcher, rule: CrawlRule) -> tupl
         return meta, meta["chapters"], saved["done"]
 
     job.message = "解析目录…"
+    job.url = resolve_toc_url(f, job.url, rule)
     toc = _load_toc(f, job.url, rule)
     job.bookName, job.author = toc["bookName"] or "未命名小说", toc["author"]
     chapters = toc["chapters"][req.startIndex - 1: req.endIndex]

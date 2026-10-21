@@ -75,3 +75,39 @@ export function resumeCrawl(id, newOrigin) {
 export function getCrawlCheckpoint(id) {
   return request.get(`/api/novel/crawl/${id}/checkpoint`).then((res) => res.data)
 }
+
+// ---------------------------------------------------------------- AI 解析地址 / 学到的站点规则
+
+/**
+ * AI 解析地址（后台任务，用当前激活的大模型）：先试已学 / 内置规则，失败再让大模型看页面结构写 XPath，
+ * 每次都真实试抓（目录 + 两章正文），成功后总结地址规律并按域名存为站点规则。
+ * POST /api/novel/crawl/ai/analyze {url, maxAttempts?(1~10), delayMs?, respectRobots?, hint?, useKnown?} → job
+ */
+export function analyzeCrawlUrl(options) {
+  return request.post('/api/novel/crawl/ai/analyze', options).then((res) => res.data)
+}
+
+/**
+ * AI 解析任务状态 GET /api/novel/crawl/ai/jobs/{jobId}
+ * → {jobId, url, status, progress, message, error, maxAttempts, savedRuleId?,
+ *    attempts:[{index, strategy, reason, tocUrl, rule, ok, chapterCount, sampleChars, error, seconds}],
+ *    result:{host, siteName, tocUrl, rule, summary, bookUrlPattern, tocUrlPattern, chapterUrlPattern, preview}}
+ */
+export function getCrawlAiJob(jobId) {
+  return request.get(`/api/novel/crawl/ai/jobs/${jobId}`).then((res) => res.data)
+}
+
+/** 取消 AI 解析（当前这次尝试结束后停止），POST /api/novel/crawl/ai/jobs/{jobId}/cancel */
+export function cancelCrawlAiJob(jobId) {
+  return request.post(`/api/novel/crawl/ai/jobs/${jobId}/cancel`).then((res) => res.data)
+}
+
+/** 学到的站点规则（每个域名一条，最近更新在前），GET /api/novel/crawl/rules */
+export function listCrawlRules() {
+  return request.get('/api/novel/crawl/rules').then((res) => res.data)
+}
+
+/** 删除学到的站点规则，POST /api/novel/crawl/rules/{id}/delete */
+export function deleteCrawlRule(id) {
+  return request.post(`/api/novel/crawl/rules/${id}/delete`).then((res) => res.data)
+}

@@ -66,7 +66,15 @@ export function downloadFile(id) {
   document.body.removeChild(a)
 }
 
-/** 读取文本内容（纯文本预览，见 view/file_manage.md） */
+/**
+ * 文本分页预览（按字符，已转成 UTF-8）：大文件只取一页，避免整本加载 + 渲染卡住页面
+ * GET /api/file/text/{id}?offset=&limit= → {text, offset, nextOffset, totalChars, done}
+ */
+export function fetchTextPage(id, offset = 0, limit = 100000) {
+  return request.get(`/api/file/text/${id}`, { params: { offset, limit } }).then((res) => res.data)
+}
+
+/** 读取完整文本（复制全文用；预览请用 fetchTextPage） */
 export function fetchText(id) {
   return request.get(`/api/file/preview/${id}`, { responseType: 'text' }).then((res) => res.data)
 }

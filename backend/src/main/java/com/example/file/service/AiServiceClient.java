@@ -118,6 +118,23 @@ public class AiServiceClient {
         return client.get().uri("/api/crawl/checkpoints/{key}", key).retrieve().body(JsonNode.class);
     }
 
+    /** POST /api/crawl/ai/jobs：AI 解析地址（反复写规则 + 试抓），附带模型配置 → {code, data: AnalyzeJob} */
+    public JsonNode submitCrawlAi(Map<String, Object> body, AiModelConfig cfg) {
+        Map<String, Object> req = new HashMap<>(body);
+        req.put("model", modelBody(cfg));
+        return client.post().uri("/api/crawl/ai/jobs").body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** GET /api/crawl/ai/jobs/{jobId} → {code, data: AnalyzeJob（attempts[], result）} */
+    public JsonNode getCrawlAiJob(String jobId) {
+        return client.get().uri("/api/crawl/ai/jobs/{id}", jobId).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/crawl/ai/jobs/{jobId}/cancel */
+    public JsonNode cancelCrawlAiJob(String jobId) {
+        return client.post().uri("/api/crawl/ai/jobs/{id}/cancel", jobId).retrieve().body(JsonNode.class);
+    }
+
     /** POST /api/gen/novels/{id}/chapters：大模型工作区开始生成下一章，附带 api（模型配置） */
     public JsonNode startGenChapter(String novelId, Map<String, Object> body, AiModelConfig cfg) {
         Map<String, Object> req = new HashMap<>(body);

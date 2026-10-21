@@ -2,8 +2,10 @@ package com.example.file.controller;
 
 import com.example.file.common.Result;
 import com.example.file.common.ResultResponses;
+import com.example.file.entity.CrawlSiteRule;
 import com.example.file.entity.NovelCrawl;
 import com.example.file.entity.NovelCrawlBook;
+import com.example.file.service.CrawlRuleService;
 import com.example.file.service.NovelCrawlService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -36,9 +38,11 @@ public class NovelCrawlController {
     private static final Logger log = LoggerFactory.getLogger(NovelCrawlController.class);
 
     private final NovelCrawlService crawlService;
+    private final CrawlRuleService ruleService;
 
-    public NovelCrawlController(NovelCrawlService crawlService) {
+    public NovelCrawlController(NovelCrawlService crawlService, CrawlRuleService ruleService) {
         this.crawlService = crawlService;
+        this.ruleService = ruleService;
     }
 
     /** GET /api/novel/crawl/presets */
@@ -114,5 +118,40 @@ public class NovelCrawlController {
     @PostMapping("/{id}/retry")
     public ResponseEntity<Result<NovelCrawl>> retry(@PathVariable Long id) {
         return ResultResponses.handle(() -> crawlService.retry(id), log, "重新抓取失败，id=" + id);
+    }
+
+    // ---------------------------------------------------------------- AI 解析地址 / 学到的站点规则
+
+    /** POST /api/novel/crawl/ai/analyze {url, maxAttempts?, delayMs?, respectRobots?, hint?, useKnown?}：后台任务，立即返回 */
+    @PostMapping("/ai/analyze")
+    public ResponseEntity<Result<JsonNode>> aiAnalyze(@RequestBody Map<String, Object> options) {
+        return ResultResponses.handle(() -> ruleService.analyze(options), log, "提交 AI 解析地址失败");
+    }
+
+    /** GET /api/novel/crawl/ai/jobs/{jobId}：状态、每次尝试、成功结果（savedRuleId = 已存入的规则） */
+    @GetMapping("/ai/jobs/{jobId}")
+    public ResponseEntity<Result<JsonNode>> aiJob(@PathVariable String jobId) {
+        return ResultResponses.handle(() -> ruleService.getJob(jobId), log, "查询 AI 解析任务失败");
+    }
+
+    /** POST /api/novel/crawl/ai/jobs/{jobId}/cancel */
+    @PostMapping("/ai/jobs/{jobId}/cancel")
+    public ResponseEntity<Result<JsonNode>> aiCancel(@PathVariable String jobId) {
+        return ResultResponses.handle(() -> ruleService.cancel(jobId), log, "取消 AI 解析任务失败");
+    }
+
+    /** GET /api/novel/crawl/rules：学到的站点规则（最近更新在前） */
+    @GetMapping("/rules")
+    public ResponseEntity<Result<List<CrawlSiteRule>>> rules() {
+        return ResultResponses.handle(ruleService::list, log, "查询站点规则失败");
+    }
+
+    /** POST /api/novel/crawl/rules/{id}/delete */
+    @PostMapping("/rules/{id}/delete")
+    public ResponseEntity<Result<Void>> deleteRule(@PathVariable Long id) {
+        return ResultResponses.handle(() -> {
+            ruleService.delete(id);
+            return null;
+        }, log, "删除站点规则失败，id=" + id);
     }
 }

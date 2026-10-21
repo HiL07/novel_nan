@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 
 from ..local.router import LocalError, ok
-from . import rules, service
+from . import ai_rules, rules, service
 from .fetcher import CrawlError
 
 router = APIRouter(prefix="/api/crawl", tags=["novel-crawl"])
@@ -81,3 +81,27 @@ def checkpoint_info(key: str):
 def discard_checkpoint(key: str):
     _guard(service.discard_checkpoint, key)
     return ok()
+
+
+# ---------------------------------------------------------------- AI 解析地址（模型配置由 Java 随请求下发，不进任务状态）
+
+@router.post("/ai/jobs")
+def ai_submit(req: ai_rules.AnalyzeRequest):
+    """给一本书的地址：先试已学 / 内置规则，失败再让大模型看页面结构写 XPath，反复试抓直到成功或达到上限。"""
+    return ok(_guard(ai_rules.submit, req))
+
+
+@router.get("/ai/jobs/{job_id}")
+def ai_get(job_id: str):
+    job = ai_rules.get(job_id)
+    if job is None:
+        raise LocalError(404, "AI 解析任务不存在（AI 服务可能已重启）")
+    return ok(job)
+
+
+@router.post("/ai/jobs/{job_id}/cancel")
+def ai_cancel(job_id: str):
+    job = ai_rules.cancel(job_id)
+    if job is None:
+        raise LocalError(404, "AI 解析任务不存在（AI 服务可能已重启）")
+    return ok(job)

@@ -3,6 +3,7 @@ package com.example.file.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
+import com.example.file.entity.CrawlSiteRule;
 import com.example.file.entity.FileInfo;
 import com.example.file.entity.NovelCrawl;
 import com.example.file.entity.NovelCrawlBook;
@@ -11,6 +12,7 @@ import com.example.file.mapper.NovelCrawlMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +23,14 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -55,7 +64,11 @@ public class NovelCrawlService {
     /** 转发给 Python 的参数白名单（与 python-service/app/crawler/service.py 的 CrawlRequest / SiteOptions 一致） */
     private static final Set<String> OPTION_KEYS = Set.of("url", "preset", "rule", "delayMs", "respectRobots",
             "startIndex", "endIndex", "mode", "maxCategories", "maxListPages", "maxBooks", "maxChaptersPerBook",
-            "categories", "verify", "books");
+            "categories", "verify", "books", "saveDir");
+    /** 只在 Java 用、不转发给 Python 的参数：另存目录、套用的已学规则 id */
+    private static final List<String> JAVA_ONLY_KEYS = List.of("saveDir", "learnedRuleId");
+    /** 学到的规则在规则下拉框里的值：learned:&lt;id&gt; */
+    private static final String LEARNED_PREFIX = "learned:";
     /** 整站模式下每本书要保留的参数（其余上限参数只给 discover 用） */
     private static final List<String> BOOK_JOB_KEYS = List.of("preset", "rule", "delayMs", "respectRobots");
 
@@ -63,6 +76,7 @@ public class NovelCrawlService {
     private final NovelCrawlBookMapper bookMapper;
     private final FileService fileService;
     private final AiServiceClient aiClient;
+    private final CrawlRuleService ruleService;
     private final ObjectMapper objectMapper;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "novel-crawl");
@@ -73,11 +87,12 @@ public class NovelCrawlService {
     private final Set<Long> siteCancels = ConcurrentHashMap.newKeySet();
 
     public NovelCrawlService(NovelCrawlMapper crawlMapper, NovelCrawlBookMapper bookMapper, FileService fileService,
-                             AiServiceClient aiClient, ObjectMapper objectMapper) {
+                             AiServiceClient aiClient, CrawlRuleService ruleService, ObjectMapper objectMapper) {
         this.crawlMapper = crawlMapper;
         this.bookMapper = bookMapper;
         this.fileService = fileService;
         this.aiClient = aiClient;
+        this.ruleService = ruleService;
         this.objectMapper = objectMapper;
     }
 
@@ -121,7 +136,9 @@ public class NovelCrawlService {
         body.remove("endIndex");
         body.remove("books");
         body.remove("mode");
-        return callPython(() -> aiClient.crawlPreview(body));
+        CrawlSiteRule learned = applyLearnedRule(body);
+        Map<String, Object> req = pythonBody(body);
+        return withLearned(callPython(() -> aiClient.crawlPreview(req)), learned);
     }
 
     /**
@@ -134,7 +151,9 @@ public class NovelCrawlService {
         body.remove("endIndex");
         body.remove("books");
         body.remove("mode");
-        return callPython(() -> aiClient.crawlDiscover(body));
+        CrawlSiteRule learned = applyLearnedRule(body);
+        Map<String, Object> req = pythonBody(body);
+        return withLearned(callPython(() -> aiClient.crawlDiscover(req)), learned);
     }
 
     // ---------------------------------------------------------------- 提交 / 查询 / 取消
@@ -142,6 +161,9 @@ public class NovelCrawlService {
     /** 提交抓取任务（按 options.mode 分派单本 / 整站），立即返回任务记录（QUEUED）。 */
     public NovelCrawl submit(Map<String, Object> options) {
         Map<String, Object> body = normalize(options);
+        checkSaveDir(body);
+        // 学到的规则在提交时合并进 options 存档，之后重抓 / 续抓不受规则后续变化影响
+        applyLearnedRule(body);
         boolean site = isSite(body);
         List<Map<String, Object>> books = site ? booksOf(body) : List.of();
         if (site && books.isEmpty()) {
@@ -363,7 +385,7 @@ public class NovelCrawlService {
         if (NovelCrawl.CANCELLED.equals(crawlMapper.selectById(taskId).getStatus())) {
             return;
         }
-        Map<String, Object> body = new LinkedHashMap<>(options);
+        Map<String, Object> body = pythonBody(options);
         body.remove("mode");
         body.put("resumeKey", resumeKey(taskId, null));
         if (newOrigin != null) {
@@ -381,7 +403,7 @@ public class NovelCrawlService {
             if (cancelled) {
                 aiClient.cancelCrawl(jobId);
             }
-            poll(taskId, jobId);
+            poll(taskId, jobId, str(options.get("saveDir")));
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，crawlId={}", taskId, e);
             update(taskId, NovelCrawl.FAILED, null, "AI 服务不可达，请确认 python-service 已启动后「继续抓取」");
@@ -394,7 +416,7 @@ public class NovelCrawlService {
         }
     }
 
-    private void poll(Long taskId, String jobId) throws Exception {
+    private void poll(Long taskId, String jobId, String saveDir) throws Exception {
         int unreachable = 0;
         while (!Thread.currentThread().isInterrupted()) {
             Thread.sleep(POLL_INTERVAL_MS);
@@ -423,7 +445,7 @@ public class NovelCrawlService {
             switch (status) {
                 case "succeeded" -> {
                     crawlMapper.updateById(patch);
-                    finishSucceeded(taskId, jobId, job);
+                    finishSucceeded(taskId, jobId, job, saveDir);
                     return;
                 }
                 case "failed" -> {
@@ -445,13 +467,13 @@ public class NovelCrawlService {
         }
     }
 
-    /** 成功收尾：取全文 → 存为 txt（落盘 + file 表）→ 记 fileId → 通知 Python 释放内存。 */
-    private void finishSucceeded(Long taskId, String jobId, JsonNode job) {
+    /** 成功收尾：取全文 → 存为 txt（落盘 + file 表）→（可选）另存到用户目录 → 记 fileId → 通知 Python 释放内存。 */
+    private void finishSucceeded(Long taskId, String jobId, JsonNode job, String saveDir) {
         byte[] text = aiClient.getCrawlText(jobId);
         String name = safeFileName(job.path("bookName").asText("")) + ".txt";
         FileInfo file = fileService.saveBytes(name, text, "text/plain; charset=UTF-8");
         NovelCrawl patch = patch(taskId, NovelCrawl.SUCCEEDED, 100,
-                job.path("message").asText("抓取完成") + "，已保存为文件「" + name + "」");
+                job.path("message").asText("抓取完成") + "，已保存为文件「" + name + "」" + exportCopy(saveDir, name, text));
         patch.setFileId(file.getId());
         crawlMapper.updateById(patch);
         releaseQuietly(jobId);
@@ -472,6 +494,7 @@ public class NovelCrawlService {
             return;
         }
         Map<String, Object> base = singleBookBody(body);
+        String saveDir = str(body.get("saveDir"));
         Integer cap = intOrNull(body.get("maxChaptersPerBook"));
         int total = books.size();
         int done = 0, failed = 0, chapters = 0, chapterFailed = 0, words = 0;
@@ -523,7 +546,8 @@ public class NovelCrawlService {
                         byte[] text = aiClient.getCrawlText(jobId);
                         String name = safeFileName(book.getBookName()) + ".txt";
                         FileInfo file = fileService.saveBytes(name, text, "text/plain; charset=UTF-8");
-                        patchBook(book.getId(), NovelCrawlBook.SUCCEEDED, 100, "已保存为文件「" + name + "」");
+                        patchBook(book.getId(), NovelCrawlBook.SUCCEEDED, 100,
+                                "已保存为文件「" + name + "」" + exportCopy(saveDir, name, text));
                         patchBookFile(book.getId(), file.getId());
                         log.info("整站抓取《{}》完成，fileId={} {} 字节", label, file.getId(), text.length);
                     } else if ("cancelled".equals(status)) {
@@ -661,6 +685,126 @@ public class NovelCrawlService {
     }
 
     // ---------------------------------------------------------------- 参数校验 / 装饰 / 工具
+
+    /** 转发给 Python 的参数：去掉只在 Java 用的键 */
+    private static Map<String, Object> pythonBody(Map<String, Object> body) {
+        Map<String, Object> out = new LinkedHashMap<>(body);
+        JAVA_ONLY_KEYS.forEach(out::remove);
+        return out;
+    }
+
+    /**
+     * 套用 AI 学到的站点规则：规则选了「learned:&lt;id&gt;」，或选「按域名自动选择」且该域名学过规则时，
+     * 把学到的 XPath 合并进 rule（用户在高级选项里填的字段优先），preset 改为 auto。→ 套用的规则或 null
+     */
+    @SuppressWarnings("unchecked")
+    private CrawlSiteRule applyLearnedRule(Map<String, Object> body) {
+        String preset = str(body.get("preset"));
+        CrawlSiteRule learned;
+        if (preset != null && preset.startsWith(LEARNED_PREFIX)) {
+            Integer id = intOrNull(preset.substring(LEARNED_PREFIX.length()));
+            if (id == null) {
+                throw new BizException(400, "规则选择无效：" + preset);
+            }
+            learned = ruleService.getById(id.longValue());
+        } else if (preset == null || preset.isEmpty()) {
+            learned = ruleService.findForUrl(str(body.get("url")));
+        } else {
+            return null;
+        }
+        if (learned == null) {
+            return null;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>(learned.getRule() == null ? Map.of() : learned.getRule());
+        if (body.get("rule") instanceof Map<?, ?> custom) {
+            ((Map<String, Object>) custom).forEach((k, v) -> {
+                if (v != null && !"".equals(v) && !(v instanceof List<?> l && l.isEmpty())) {
+                    merged.put(k, v);
+                }
+            });
+        }
+        if (merged.isEmpty()) {
+            body.remove("rule");
+        } else {
+            body.put("rule", merged);
+        }
+        body.put("preset", "auto");
+        body.put("learnedRuleId", learned.getId());
+        return learned;
+    }
+
+    /** 预览 / 发现结果里标明套用了哪条学到的规则（前端展示「使用规则」） */
+    private static JsonNode withLearned(JsonNode data, CrawlSiteRule learned) {
+        if (learned != null && data instanceof ObjectNode node) {
+            ObjectNode info = node.putObject("learnedRule");
+            info.put("id", learned.getId());
+            info.put("host", learned.getHost());
+            info.put("siteName", learned.getSiteName());
+        }
+        return data;
+    }
+
+    /** 另存目录（可空）：必须是绝对路径、不在 Windows 系统目录下；不存在则创建，并确认可写。规范化后写回 body。 */
+    private static void checkSaveDir(Map<String, Object> body) {
+        String raw = str(body.get("saveDir"));
+        if (raw == null || raw.isEmpty()) {
+            body.remove("saveDir");
+            return;
+        }
+        Path dir;
+        try {
+            dir = Paths.get(raw);
+        } catch (InvalidPathException e) {
+            throw new BizException(400, "保存目录不合法：" + raw);
+        }
+        if (!dir.isAbsolute()) {
+            throw new BizException(400, "保存目录请填写完整路径，如 D:\\小说");
+        }
+        dir = dir.toAbsolutePath().normalize();
+        String sysRoot = System.getenv("SystemRoot");
+        if (sysRoot != null && dir.toString().toLowerCase().startsWith(sysRoot.toLowerCase())) {
+            throw new BizException(400, "不能保存到系统目录：" + dir);
+        }
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new BizException(400, "无法创建保存目录：" + dir + "（" + e.getMessage() + "）");
+        }
+        if (!Files.isWritable(dir)) {
+            throw new BizException(400, "保存目录不可写：" + dir);
+        }
+        body.put("saveDir", dir.toString());
+    }
+
+    /**
+     * 把 txt 另存一份到用户选的目录（文件管理里那份照常保留，供小说提取使用）。
+     * 重名时加「 (2)」等后缀，先写 .part 再改名。失败不影响任务成功，只在说明里提示。→ 附加到说明的文字
+     */
+    private static String exportCopy(String saveDir, String name, byte[] text) {
+        if (saveDir == null || saveDir.isEmpty()) {
+            return "";
+        }
+        try {
+            Path dir = Paths.get(saveDir);
+            Files.createDirectories(dir);
+            String stem = name.endsWith(".txt") ? name.substring(0, name.length() - 4) : name;
+            Path target = dir.resolve(name);
+            for (int i = 2; Files.exists(target); i++) {
+                target = dir.resolve(stem + " (" + i + ").txt");
+            }
+            Path tmp = dir.resolve(target.getFileName() + ".part");
+            Files.write(tmp, text);
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, target);
+            }
+            return "，另存到 " + target;
+        } catch (IOException | InvalidPathException e) {
+            log.warn("另存抓取结果失败，目录 {}：{}", saveDir, e.getMessage());
+            return "；另存到 " + saveDir + " 失败：" + e.getMessage();
+        }
+    }
 
     /** 只保留白名单参数，并校验地址（详细校验由 Python 完成，其错误信息会原样返回） */
     private Map<String, Object> normalize(Map<String, Object> options) {

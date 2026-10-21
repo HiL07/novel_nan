@@ -2,6 +2,7 @@ package com.example.file.controller;
 
 import com.example.file.common.BizException;
 import com.example.file.common.Result;
+import com.example.file.common.ResultResponses;
 import com.example.file.entity.FileInfo;
 import com.example.file.service.FileService;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -76,6 +78,18 @@ public class FileController {
     @GetMapping("/preview/{id}")
     public ResponseEntity<byte[]> preview(@PathVariable Long id) {
         return stream(id, false);
+    }
+
+    /**
+     * GET /api/file/text/{id}?offset=0&limit=100000，文本分页预览（按字符，已转码）：
+     * 大文件（几 MB 的小说）一次只取一页，避免整本加载 + 渲染卡住页面。→ {text, offset, nextOffset, totalChars, done}
+     */
+    @GetMapping("/text/{id}")
+    public ResponseEntity<Result<Map<String, Object>>> text(@PathVariable Long id,
+                                                            @RequestParam(defaultValue = "0") int offset,
+                                                            @RequestParam(defaultValue = "100000") int limit) {
+        int size = Math.max(1000, Math.min(limit, 500_000));
+        return ResultResponses.handle(() -> fileService.readTextPage(id, offset, size), log, "文本预览失败，id=" + id);
     }
 
     /**

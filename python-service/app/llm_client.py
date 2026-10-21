@@ -122,9 +122,34 @@ def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | N
     raise LLMError("模型调用失败")
 
 
+def source_of(cfg: ModelConfig) -> str:
+    """local = 本机 OpenAI 兼容服务（llama.cpp 等，不计费）；api = 远端大模型接口（按 token 计费）"""
+    return "local" if urlparse(cfg.baseUrl).hostname in _LOCAL_HOSTS else "api"
+
+
+def new_usage(cfg: ModelConfig) -> dict:
+    """token 用量累加器（不含密钥，可放进任务状态）。cacheHitTokens 是 promptTokens 里命中缓存的部分。"""
+    return {"source": source_of(cfg), "model": cfg.model, "host": urlparse(cfg.baseUrl).hostname or "",
+            "calls": 0, "promptTokens": 0, "completionTokens": 0, "cacheHitTokens": 0}
+
+
+def add_usage(acc: dict, data: dict) -> dict:
+    """把一次响应的 usage 累加进 acc，返回本次的 {promptTokens, completionTokens, cacheHitTokens}。"""
+    usage = data.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or {}
+    one = {"promptTokens": int(usage.get("prompt_tokens") or 0),
+           "completionTokens": int(usage.get("completion_tokens") or 0),
+           # DeepSeek: prompt_cache_hit_tokens；OpenAI / 通义: prompt_tokens_details.cached_tokens
+           "cacheHitTokens": int(usage.get("prompt_cache_hit_tokens") or details.get("cached_tokens") or 0)}
+    acc["calls"] = acc.get("calls", 0) + 1
+    for k, v in one.items():
+        acc[k] = acc.get(k, 0) + v
+    return one
+
+
 def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: bool = True,
-         retries: int = 2, timeout: float | None = None) -> str:
-    """发送一次对话，返回文本（提取 / 校验用：低温度，默认 JSON 模式）。"""
+         retries: int = 2, timeout: float | None = None, usage: dict | None = None) -> str:
+    """发送一次对话，返回文本（提取 / 校验用：低温度，默认 JSON 模式）。usage 不为空时累加本次 token 用量。"""
     payload = {
         "model": cfg.model,
         "messages": messages,
@@ -133,7 +158,10 @@ def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: boo
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    return _post_chat(cfg, payload, retries, timeout)["choices"][0]["message"]["content"] or ""
+    data = _post_chat(cfg, payload, retries, timeout)
+    if usage is not None:
+        add_usage(usage, data)
+    return data["choices"][0]["message"]["content"] or ""
 
 
 def complete(cfg: ModelConfig, messages: list[dict], *, max_tokens: int, temperature: float, top_p: float,
