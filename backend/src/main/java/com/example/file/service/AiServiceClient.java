@@ -20,7 +20,7 @@ public class AiServiceClient {
 
     private final RestClient client;
     private final RestClient slowClient;
-    private final RestClient discoverClient;
+    private final RestClient longClient;
 
     public AiServiceClient(@Value("${ai.service.url}") String aiServiceUrl) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -33,11 +33,11 @@ public class AiServiceClient {
         slowFactory.setConnectTimeout(5000);
         slowFactory.setReadTimeout(180000);
         this.slowClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(slowFactory).build();
-        // 整站发现要逐页访问分类列表 + 每本书的详情 / 目录（最多 120 本），单独放宽到 5 分钟
-        SimpleClientHttpRequestFactory discoverFactory = new SimpleClientHttpRequestFactory();
-        discoverFactory.setConnectTimeout(5000);
-        discoverFactory.setReadTimeout(300000);
-        this.discoverClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(discoverFactory).build();
+        // 书目「AI 读简介」：最多 1000 本分批调用模型，按并发数可能要几分钟
+        SimpleClientHttpRequestFactory longFactory = new SimpleClientHttpRequestFactory();
+        longFactory.setConnectTimeout(5000);
+        longFactory.setReadTimeout(900000);
+        this.longClient = RestClient.builder().baseUrl(aiServiceUrl).requestFactory(longFactory).build();
     }
 
     /** POST /api/models/verify → {ok, latencyMs, message, reply} */
@@ -81,11 +81,6 @@ public class AiServiceClient {
     /** POST /api/crawl/preview：解析目录（含分页）+ 试抓第一章，目录分页多时较慢 → {code, data} */
     public JsonNode crawlPreview(Map<String, Object> options) {
         return slowClient.post().uri("/api/crawl/preview").body(options).retrieve().body(JsonNode.class);
-    }
-
-    /** POST /api/crawl/discover：整站发现（首页 → 分类 → 列表翻页 → 书籍 → 目录），逐页抓取较慢 → {code, data} */
-    public JsonNode crawlDiscover(Map<String, Object> options) {
-        return discoverClient.post().uri("/api/crawl/discover").body(options).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/crawl/jobs → {code, data: CrawlJob（含 jobId）} */
@@ -133,6 +128,42 @@ public class AiServiceClient {
     /** POST /api/crawl/ai/jobs/{jobId}/cancel */
     public JsonNode cancelCrawlAiJob(String jobId) {
         return client.post().uri("/api/crawl/ai/jobs/{id}/cancel", jobId).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/crawl/catalog/jobs：全自动爬虫书目采集（按学到的规律找书、取简介 / 标签 / 目录、抽检正文）→ {code, data: CatalogJob} */
+    public JsonNode submitCatalog(Map<String, Object> body) {
+        return client.post().uri("/api/crawl/catalog/jobs").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** GET /api/crawl/catalog/jobs/{jobId}?since=N → {code, data: 状态 + 第 N 本之后的书目 + report} */
+    public JsonNode getCatalogJob(String jobId, int since) {
+        return client.get().uri("/api/crawl/catalog/jobs/{id}?since={since}", jobId, since).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/crawl/catalog/jobs/{jobId}/cancel */
+    public void cancelCatalogJob(String jobId) {
+        client.post().uri("/api/crawl/catalog/jobs/{id}/cancel", jobId).retrieve().toBodilessEntity();
+    }
+
+    /** POST /api/crawl/catalog/plot-tags：按情节找书（省 token），从已有标签里挑 → {code, data: {tags, suggested, reason, usage}} */
+    public JsonNode catalogPlotTags(String query, List<String> vocabulary, AiModelConfig cfg) {
+        return slowClient.post().uri("/api/crawl/catalog/plot-tags")
+                .body(Map.of("query", query, "vocabulary", vocabulary, "model", modelBody(cfg)))
+                .retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/crawl/catalog/intro-match：按情节找书（耗 token），分批逐本读简介打分，最多 1000 本，单独放宽到 15 分钟 */
+    public JsonNode catalogIntroMatch(String query, List<Map<String, Object>> items, int threshold, AiModelConfig cfg) {
+        return longClient.post().uri("/api/crawl/catalog/intro-match")
+                .body(Map.of("query", query, "items", items, "threshold", threshold, "model", modelBody(cfg)))
+                .retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/crawl/catalog/tag：AI 补标签 → {code, data: [{id, tags[]}]} */
+    public JsonNode catalogTag(List<Map<String, Object>> items, List<String> vocabulary, AiModelConfig cfg) {
+        return slowClient.post().uri("/api/crawl/catalog/tag")
+                .body(Map.of("items", items, "vocabulary", vocabulary, "model", modelBody(cfg)))
+                .retrieve().body(JsonNode.class);
     }
 
     /** POST /api/gen/novels/{id}/chapters：大模型工作区开始生成下一章，附带 api（模型配置） */

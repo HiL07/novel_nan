@@ -173,6 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_material_candidate_status ON material_candidate (
 CREATE TABLE IF NOT EXISTS crawl_site_rule (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     host                TEXT    NOT NULL,          -- 域名（小写），按它匹配
+    home_url            TEXT,                      -- 站点根地址（首页），如 https://www.example.com/
     site_name           TEXT,
     preset              TEXT,                      -- 规则基于的内置预设 key（auto / biquge …）
     rule                TEXT,                      -- CrawlRule JSON，只含非空字段；{} 表示内置规则即可
@@ -186,7 +187,78 @@ CREATE TABLE IF NOT EXISTS crawl_site_rule (
     strategy            TEXT,                      -- learned / preset / ai：哪种尝试成功的
     attempts            INTEGER,                   -- 第几次尝试成功
     chapter_count       INTEGER,
+    site_map            TEXT,                      -- 站点结构实测 JSON：每层跳转规律（首页/分类/书籍/目录/章节/分页/换书验证）及是否掌握
+    status              TEXT    NOT NULL DEFAULT 'PENDING',  -- PENDING 待确认 / CONFIRMED 已确认（只有已确认的自动套用）/ FAILED 解析失败（只作记录）
+    error               TEXT,                      -- 解析失败的原因（FAILED）
+    attempt_log         TEXT,                      -- 解析过程 JSON：{attempts[每次尝试的方式 / 结果 / 原因 / 规则 / token], usage, message, sample}
+    confirm_time        TEXT,
     create_time         TEXT    NOT NULL,
     update_time         TEXT    NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_site_rule_host ON crawl_site_rule (host);
+-- 同一域名最多一条已确认 + 一条待确认（由代码保证）；规则另存一份 JSON：data/crawl-rules/<host>_<id>.json
+CREATE INDEX IF NOT EXISTS idx_crawl_site_rule_host ON crawl_site_rule (host);
+
+-- 小说抓取页「常用地址」（SQLite）：用户收藏的可抓取网址（目录页 / 书籍详情页 / 站点首页），一个地址一行。
+CREATE TABLE IF NOT EXISTS crawl_saved_url (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    url            TEXT    NOT NULL,
+    name           TEXT,                      -- 显示名，如书名 / 站点名
+    mode           TEXT    NOT NULL DEFAULT 'book',   -- book 单本 / site 整站：选用时切到对应模式
+    note           TEXT,
+    use_count      INTEGER NOT NULL DEFAULT 0,
+    last_used_time TEXT,
+    create_time    TEXT    NOT NULL,
+    update_time    TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_saved_url_url ON crawl_saved_url (url);
+
+-- 全自动爬虫的站点书目（SQLite）：一个站点首页一行。按 AI 解析学到的规律（crawl_site_rule）测试能否找到多本书、
+-- 取到目录 / 简介 / 标签 / 正文，测试报告存 report；用户决定是否使用（decision），使用后可扩充书目、筛选并抓取。
+-- 同一首页的数据放在一起：data/site-catalog/<host>/（toc/<key>.json 每本书的目录，catalog.json 书目导出）。
+CREATE TABLE IF NOT EXISTS crawl_site_catalog (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    host           TEXT    NOT NULL,
+    home_url       TEXT    NOT NULL,                     -- 站点首页（规则的 home_url）
+    site_name      TEXT,
+    rule_id        INTEGER,                              -- 使用的站点规则（crawl_site_rule.id，逻辑关联）
+    catalog_dir    TEXT    NOT NULL,                     -- 相对 data/ 的目录，如 site-catalog/www.example.com
+    decision       TEXT    NOT NULL DEFAULT 'PENDING',   -- PENDING 待决定 / USED 使用 / REJECTED 不使用
+    status         TEXT    NOT NULL DEFAULT 'IDLE',      -- 最近一次采集：IDLE / RUNNING / SUCCEEDED / FAILED / CANCELLED
+    phase          TEXT,                                 -- test 测试 / scan 扩充书目
+    job_id         TEXT,                                 -- Python 书目采集任务
+    progress       INTEGER NOT NULL DEFAULT 0,
+    message        TEXT,
+    report         TEXT,                                 -- 最近一次「测试」的报告 JSON（见 python-service/app/crawler/catalog.py#_report）
+    last_report    TEXT,                                 -- 最近一次采集（测试或扩充）的报告 JSON
+    book_count     INTEGER NOT NULL DEFAULT 0,
+    last_scan_time TEXT,
+    create_time    TEXT    NOT NULL,
+    update_time    TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_site_catalog_home ON crawl_site_catalog (home_url);
+
+-- 站点书目里的一本书（SQLite）：只存简介 / 标签 / 目录概况等元数据，完整目录在 data/<toc_path>，正文不保存
+-- （选中后走普通抓取任务，每本一个 txt 进文件管理）。同一书目里按 book_url 去重，扩充时更新已有行。
+CREATE TABLE IF NOT EXISTS crawl_catalog_book (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id     INTEGER NOT NULL,                     -- crawl_site_catalog.id（逻辑关联）
+    book_name      TEXT,
+    author         TEXT,
+    category       TEXT,                                 -- 在哪个分类页找到的
+    tags           TEXT,                                 -- 站点上的标签 JSON 数组（含分类）
+    ai_tags        TEXT,                                 -- 「AI 补标签」生成的标签 JSON 数组
+    intro          TEXT,
+    book_url       TEXT    NOT NULL,                     -- 书籍页
+    toc_url        TEXT,                                 -- 目录页（抓取时用）
+    chapter_count  INTEGER NOT NULL DEFAULT 0,
+    first_chapter  TEXT,
+    latest_chapter TEXT,
+    toc_path       TEXT,                                 -- 目录 JSON，相对 data/
+    toc_ok         INTEGER NOT NULL DEFAULT 0,
+    content_ok     INTEGER,                              -- 首章正文抽检：1 合格 / 0 不合格 / NULL 未抽检
+    content_chars  INTEGER,
+    error          TEXT,
+    create_time    TEXT    NOT NULL,
+    update_time    TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_catalog_book_url ON crawl_catalog_book (catalog_id, book_url);

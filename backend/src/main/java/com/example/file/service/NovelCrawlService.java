@@ -47,8 +47,8 @@ import java.util.function.Supplier;
  * 网络小说抓取，两种采集模式：
  * <ul>
  *   <li>单本（mode=book）：一个目录页 → 一个 txt；</li>
- *   <li>整站（mode=site）：复刻 copybook 的跳转链——站点首页 → 分类 → 分类列表翻页 → 书籍详情 → 目录，
- *       先由 Python 的 /api/crawl/discover 有界采样出书籍清单，再<b>逐本</b>复用单本抓取流程，
+ *   <li>整站 / 全自动（mode=site）：书籍清单来自全自动爬虫的站点书目（{@link CrawlCatalogService}：按 AI 学到的
+ *       规律找书、取简介 / 标签 / 目录，用户筛选后提交），再<b>逐本</b>复用单本抓取流程，
  *       每本存为一个 txt（明细见 novel_crawl_book）。</li>
  * </ul>
  * Python 只负责抓取与解析，Java 是唯一写库 / 写文件的一方。任务之间单线程串行（Python 端也只跑一个）。
@@ -69,7 +69,7 @@ public class NovelCrawlService {
     private static final List<String> JAVA_ONLY_KEYS = List.of("saveDir", "learnedRuleId");
     /** 学到的规则在规则下拉框里的值：learned:&lt;id&gt; */
     private static final String LEARNED_PREFIX = "learned:";
-    /** 整站模式下每本书要保留的参数（其余上限参数只给 discover 用） */
+    /** 整站模式下每本书要保留的参数（其余是旧版整站发现的上限参数，留在 options 里不再使用） */
     private static final List<String> BOOK_JOB_KEYS = List.of("preset", "rule", "delayMs", "respectRobots");
 
     private final NovelCrawlMapper crawlMapper;
@@ -122,7 +122,7 @@ public class NovelCrawlService {
         executor.shutdownNow();
     }
 
-    // ---------------------------------------------------------------- 规则 / 预览 / 发现
+    // ---------------------------------------------------------------- 规则 / 预览
 
     /** 规则预设列表（自动识别 / 笔趣阁式 / 维基文库 / 全书网原规则…） */
     public JsonNode presets() {
@@ -141,21 +141,6 @@ public class NovelCrawlService {
         return withLearned(callPython(() -> aiClient.crawlPreview(req)), learned);
     }
 
-    /**
-     * 整站发现（copybook 式）：首页 → 分类 → 分类列表翻页 → 书籍详情 → 目录，
-     * → {siteName, categoriesAll[], categories[], books[{bookName, author, category, tocUrl, sourceUrl, chapterCount, error}], truncated}
-     */
-    public JsonNode discover(Map<String, Object> options) {
-        Map<String, Object> body = normalize(options);
-        body.remove("startIndex");
-        body.remove("endIndex");
-        body.remove("books");
-        body.remove("mode");
-        CrawlSiteRule learned = applyLearnedRule(body);
-        Map<String, Object> req = pythonBody(body);
-        return withLearned(callPython(() -> aiClient.crawlDiscover(req)), learned);
-    }
-
     // ---------------------------------------------------------------- 提交 / 查询 / 取消
 
     /** 提交抓取任务（按 options.mode 分派单本 / 整站），立即返回任务记录（QUEUED）。 */
@@ -167,7 +152,7 @@ public class NovelCrawlService {
         boolean site = isSite(body);
         List<Map<String, Object>> books = site ? booksOf(body) : List.of();
         if (site && books.isEmpty()) {
-            throw new BizException(400, "整站抓取需要先「发现书籍」并勾选要抓的书");
+            throw new BizException(400, "整站抓取需要先在站点书目里勾选要抓的书");
         }
         NovelCrawl task = new NovelCrawl();
         task.setUrl((String) body.get("url"));
@@ -199,7 +184,7 @@ public class NovelCrawlService {
         return submit(body);
     }
 
-    /** 用原参数重新抓取（新建任务）：整站任务按已存的书籍清单重跑，不重新发现（要换清单请重新「发现书籍」） */
+    /** 用原参数重新抓取（新建任务）：整站任务按已存的书籍清单重跑（要换书请在站点书目里重新勾选） */
     public NovelCrawl retry(Long id) {
         NovelCrawl old = getById(id);
         try {
@@ -480,7 +465,7 @@ public class NovelCrawlService {
         log.info("抓取完成 crawlId={} fileId={} {} 字节", taskId, file.getId(), text.length);
     }
 
-    // ---------------------------------------------------------------- 整站抓取（copybook 式）
+    // ---------------------------------------------------------------- 整站抓取（逐本，书单来自站点书目）
 
     private void runSite(Long taskId, Map<String, Object> body, String newOrigin) {
         NovelCrawl task = crawlMapper.selectById(taskId);
@@ -644,7 +629,7 @@ public class NovelCrawlService {
         throw new BizException(400, "任务已中断");
     }
 
-    /** 整站模式每本书要传给 Python 的参数（去掉上限 / 书籍清单 / 模式等只在前端和 discover 用的键） */
+    /** 整站模式每本书要传给 Python 的参数（去掉上限 / 书籍清单 / 模式等不属于单本抓取的键） */
     private Map<String, Object> singleBookBody(Map<String, Object> body) {
         Map<String, Object> out = new LinkedHashMap<>();
         for (String key : BOOK_JOB_KEYS) {
@@ -707,6 +692,9 @@ public class NovelCrawlService {
                 throw new BizException(400, "规则选择无效：" + preset);
             }
             learned = ruleService.getById(id.longValue());
+            if (CrawlSiteRule.FAILED.equals(learned.getStatus())) {
+                throw new BizException(400, "这条是解析失败的记录，没有可用的规则");
+            }
         } else if (preset == null || preset.isEmpty()) {
             learned = ruleService.findForUrl(str(body.get("url")));
         } else {

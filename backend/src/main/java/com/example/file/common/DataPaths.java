@@ -14,6 +14,10 @@ public class DataPaths {
 
     /** 完整提取结果 JSON：data/extract-results/&lt;taskId&gt;.json */
     public static final String EXTRACT_RESULTS = "extract-results";
+    /** AI 学到的站点抓取规则（数据库之外另存一份，方便查找 / 备份）：data/crawl-rules/&lt;host&gt;_&lt;id&gt;.json */
+    public static final String CRAWL_RULES = "crawl-rules";
+    /** 全自动爬虫的站点书目（同一首页一个目录）：data/site-catalog/&lt;host&gt;/toc/&lt;key&gt;.json（Python 写）、catalog.json（Java 导出） */
+    public static final String SITE_CATALOG = "site-catalog";
 
     private final Path root;
 

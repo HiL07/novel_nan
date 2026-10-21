@@ -4,7 +4,9 @@
 1. 已学到的规则（Java 传 knownRule，同域名之前成功过）→ 2. 内置预设 / 启发式 → 3+. 大模型根据
    页面结构（去脚本、折叠重复节点后的骨架 + 链接分组 / 正文候选的 XPath 提示）和之前每次失败的原因写 XPath。
 每次尝试都是一次真实的小规模抓取：解析目录（含分页）+ 试抓首章与中间一章，正文够长且两章不同才算成功。
-成功后再让大模型总结地址规律（书籍 / 目录 / 章节地址模板）与规则说明；总结失败不影响结果。
+抓通后再从站点根地址（首页）出发摸清每层跳转规律并逐项实测（_explore：首页 / 分类 / 书籍 / 目录 / 目录分页 /
+章节 / 正文分页 / 书籍信息 / 换一本书按同一套规则试抓），每项标明已掌握 / 部分掌握 / 未掌握 / 本站无此结构 / 未验证；
+最后让大模型结合实测结果总结地址规律与规则说明；总结失败不影响结果。
 
 模型配置（含 API Key）只存在于本次任务的内存闭包里，不进任务状态、不写文件。
 """
@@ -24,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import llm_client
 from ..llm_client import LLMError, ModelConfig
 from . import parser, rules, service
-from .fetcher import CrawlError, Fetcher, check_url
+from .fetcher import BlockedError, CrawlError, Fetcher, check_url
 from .rules import CrawlRule
 
 log = logging.getLogger("crawler.ai")
@@ -73,8 +75,9 @@ class AnalyzeJob(BaseModel):
     attempts: list[Attempt] = Field(default_factory=list)
     # token 用量（实时累加，含成功后的总结）：{source: api|local, model, host, calls, promptTokens, completionTokens, cacheHitTokens}
     usage: dict = Field(default_factory=dict)
-    # 成功后：{host, siteName, tocUrl, preset, rule, strategy, summary, bookUrlPattern, tocUrlPattern,
-    #          chapterUrlPattern, chapterSamples[], preview{bookName, author, intro, chapters, chapterCount, tocPages, preset, rule, sample}}
+    # 成功后：{host, homeUrl, siteName, tocUrl, preset, rule, strategy, summary, bookUrlPattern, tocUrlPattern,
+    #          chapterUrlPattern, chapterSamples[], siteMap（见 _explore）,
+    #          preview{bookName, author, intro, chapters, chapterCount, tocPages, preset, rule, sample}}
     result: Optional[dict] = None
     createTime: datetime = Field(default_factory=datetime.now)
     finishTime: Optional[datetime] = None
@@ -174,6 +177,11 @@ def _run(job: AnalyzeJob, req: AnalyzeRequest) -> None:
                     attempt.chapterCount = len(trial["toc"]["chapters"])
                     attempt.sampleChars = trial["samples"][0].get("chars", 0) if trial["samples"] else 0
                     attempt.ok, attempt.error = not trial["problems"], "；".join(trial["problems"])
+                except BlockedError as e:   # 反爬校验页：换规则也没用，不再请模型
+                    attempt.ok, attempt.error = False, str(e)
+                    attempt.seconds = round(time.monotonic() - started, 1)
+                    job.attempts.append(attempt)
+                    raise
                 except (CrawlError, ValueError) as e:
                     trial, attempt.ok, attempt.error = None, False, str(e)
                 attempt.seconds = round(time.monotonic() - started, 1)
@@ -181,11 +189,12 @@ def _run(job: AnalyzeJob, req: AnalyzeRequest) -> None:
                 _remember(job.jobId, i, trial)
                 log.info("AI 解析 %s 第 %s 次（%s）：%s %s", req.url, i, strategy, "成功" if attempt.ok else "失败", attempt.error)
                 if attempt.ok:
-                    job.progress, job.message = 92, "抓取成功，正在总结地址规律…"
-                    job.result = _result(req, f, host, strategy, rule, trial, job.usage)
+                    job.progress, job.message = 92, "本书抓取成功，正在验证站点结构（首页 / 分类 / 其他书）…"
+                    job.result = _result(req, f, host, strategy, rule, trial, job)
+                    sm = job.result["siteMap"]
                     job.progress, job.status = 100, "succeeded"
                     job.message = (f"第 {i} 次尝试成功（{_STRATEGY[strategy]}）：目录 {attempt.chapterCount} 章，"
-                                   f"首章 {attempt.sampleChars} 字")
+                                   f"首章 {attempt.sampleChars} 字；站点规律掌握 {sm['mastered']}/{sm['total']} 项")
                     return
             job.status = "failed"
             job.error = f"已尝试 {req.maxAttempts} 次仍未抓通，最后一次：{job.attempts[-1].error if job.attempts else '无'}"
@@ -225,13 +234,15 @@ def _compact(rule: CrawlRule) -> dict:
 
 # ---------------------------------------------------------------- 一次试抓
 
-def _trial(f: _CachedFetcher, entry: str, rule: CrawlRule) -> dict:
-    """入口 →（tocLink）→ 目录（含分页）→ 首章 + 中间一章。→ {tocUrl, toc, samples, problems}"""
+def _trial(f: _CachedFetcher, entry: str, rule: CrawlRule, max_pages: int = service.MAX_TOC_PAGES,
+           sample_count: int = 2) -> dict:
+    """入口 →（tocLink）→ 目录（含分页）→ 首章 + 中间一章。→ {tocUrl, toc, samples, problems}
+    max_pages / sample_count 调小用于「换一本书验证」（只看目录前几页 + 首章）。"""
     f.encoding = rule.encoding
     toc_url = service.resolve_toc_url(f, entry, rule)
     toc = None
     try:
-        toc = service._load_toc(f, toc_url, rule)
+        toc = service._load_toc(f, toc_url, rule, max_pages=max_pages)
     except CrawlError:
         if rule.tocLink or rule.chapterLinks:
             raise
@@ -241,7 +252,7 @@ def _trial(f: _CachedFetcher, entry: str, rule: CrawlRule) -> dict:
         guessed = parser.parse_book_detail(html, final, rule)["tocUrl"]
         if guessed and guessed != final and (toc is None or len(toc["chapters"]) < 30):
             try:
-                other = service._load_toc(f, guessed, rule)
+                other = service._load_toc(f, guessed, rule, max_pages=max_pages)
                 if toc is None or len(other["chapters"]) > len(toc["chapters"]):
                     toc, toc_url = other, guessed
             except CrawlError:
@@ -250,7 +261,7 @@ def _trial(f: _CachedFetcher, entry: str, rule: CrawlRule) -> dict:
         raise CrawlError("目录页上没有识别到章节链接")
 
     chapters = toc["chapters"]
-    picks = [0] + ([len(chapters) // 2] if len(chapters) >= 5 else [])
+    picks = [0] + ([len(chapters) // 2] if len(chapters) >= 5 and sample_count >= 2 else [])
     samples, problems = [], []
     for idx in picks:
         ch = chapters[idx]
@@ -490,17 +501,209 @@ def _short(href: str) -> str:
     return (parts.path + (f"?{parts.query}" if parts.query else ""))[:80] or href[:80]
 
 
+# ---------------------------------------------------------------- 成功后：摸清站点结构（根地址 + 每层跳转规律，逐项验证）
+
+# 每项状态：ok 已掌握 / partial 部分掌握 / failed 未掌握 / na 本站无此结构 / skipped 前置步骤失败未验证
+SITE_MAP_STEPS = (("home", "站点首页"), ("category", "分类页"), ("book", "书籍页"), ("toc", "目录页"),
+                  ("tocPaging", "目录分页"), ("chapter", "章节页"), ("contentPaging", "正文分页"),
+                  ("bookInfo", "书名 / 作者 / 简介"), ("generalize", "换一本书验证"))
+
+
+def _explore(f: _CachedFetcher, req: AnalyzeRequest, rule: CrawlRule, trial: dict, job: AnalyzeJob) -> dict:
+    """规则抓通这本书之后，从站点根地址出发把「首页 → 分类 → 书籍 → 目录 → 章节」每一层的地址规律找出来并实测：
+    首页能否打开、分类导航、首页 / 分类页上同格式的其他书、目录与章节地址格式、分页，最后拿另一本书按同一套规则试抓。
+    → {homeUrl, siteName, items:[{key, label, status, pattern, example, detail}], mastered, failed, total, otherBooks[]}"""
+    parts = urlsplit(req.url)
+    home_url = f"{parts.scheme}://{parts.netloc}/"
+    toc, toc_url = trial["toc"], trial["tocUrl"]
+    chapters = toc["chapters"]
+    book_re = path_regex(req.url)
+    items: dict[str, dict] = {k: {"key": k, "label": label, "status": "skipped", "pattern": "", "example": "", "detail": ""}
+                              for k, label in SITE_MAP_STEPS}
+
+    def put(key, status, detail="", pattern="", example=""):
+        items[key].update(status=status, detail=detail, pattern=pattern, example=example)
+
+    # 首页 + 分类导航 + 首页上的其他书
+    site_name, others, cats = "", [], []
+    job.message = "验证站点结构：读取站点首页…"
+    try:
+        home_final, home_html = f.get_html(home_url)
+        site = parser.parse_site(home_html, home_final, CrawlRule())
+        site_name, cats = site["siteName"], site["categories"]
+        others = _book_links(home_html, home_final, book_re, (req.url, toc_url))
+        put("home", "ok", f"首页可访问，标题「{site_name or '-'}」；首页上找到 {len(others)} 个同格式的书籍链接",
+            home_url, home_final)
+    except (CrawlError, ValueError) as e:
+        put("home", "failed", f"首页打不开：{e}", home_url)
+
+    if items["home"]["status"] == "ok":
+        if not cats:
+            put("category", "failed", "首页上没有识别到分类导航（站点可能没有分类，或导航是脚本生成的）")
+        else:
+            job.message = f"验证站点结构：打开分类「{cats[0]['name']}」…"
+            try:
+                cat_final, cat_html = f.get_html(cats[0]["url"], referer=home_url)
+                in_cat = _book_links(cat_html, cat_final, book_re, (req.url, toc_url))
+                others += [u for u in in_cat if u not in others]
+                names = "、".join(c["name"] for c in cats[:6])
+                pattern = _common_pattern([c["url"] for c in cats])
+                if in_cat:
+                    put("category", "ok", f"识别到 {len(cats)} 个分类（{names}…）；「{cats[0]['name']}」页里有 "
+                        f"{len(in_cat)} 个同格式书籍链接", pattern, cats[0]["url"])
+                else:
+                    put("category", "partial", f"识别到 {len(cats)} 个分类（{names}…），但「{cats[0]['name']}」页里"
+                        "没找到与本书同格式的书籍链接，分类 → 书籍这一跳没掌握", pattern, cats[0]["url"])
+            except (CrawlError, ValueError) as e:
+                put("category", "failed", f"分类页「{cats[0]['name']}」打不开：{e}", "", cats[0]["url"])
+
+    # 书籍页：输入地址的格式能否在站内找到其他实例
+    book_pattern = url_pattern(req.url, generic=True)
+    if others:
+        put("book", "ok", f"站内找到 {len(others)} 个同格式的书籍地址（首页 / 分类页），书籍地址规律成立", book_pattern,
+            others[0])
+    elif items["home"]["status"] == "ok":
+        put("book", "partial", "本书能抓，但首页 / 分类页上没找到同格式的其他书籍地址，无法确认这个格式适用于全站",
+            book_pattern, req.url)
+    else:
+        put("book", "partial", "本书能抓；首页打不开，无法在站内找其他书确认地址格式", book_pattern, req.url)
+
+    # 目录页：与书籍页的关系
+    if parser._same_page(toc_url, req.url):
+        relation = "书籍页本身就是目录页"
+    elif rule.tocLink:
+        relation = f"从书籍页按 tocLink（{rule.tocLink}）跳到目录页"
+    else:
+        relation = "从书籍页上的「目录 / 全部章节」链接跳到目录页（自动识别）"
+    put("toc", "ok", f"{relation}；识别到 {len(chapters)} 章", url_pattern(toc_url, generic=True), toc_url)
+
+    pages = toc.get("tocPages") or 1
+    if pages > 1:
+        put("tocPaging", "ok", f"目录共 {pages} 页，按{'tocNext 规则' if rule.tocNext else '「下一页」链接（自动识别）'}翻页")
+    else:
+        put("tocPaging", "na", "目录只有 1 页，不需要翻页")
+
+    # 章节页：地址格式是否统一 + 正文
+    if chapters:
+        ch_re = path_regex(chapters[0]["url"])
+        fit = sum(1 for c in chapters if ch_re.fullmatch(_path_of(c["url"])))
+        ratio = fit / len(chapters)
+        chars = "、".join(f"{s['chars']} 字" for s in trial["samples"])
+        detail = f"{fit}/{len(chapters)} 个章节地址符合该格式；试抓正文 {chars}"
+        put("chapter", "ok" if ratio >= 0.9 else "partial",
+            detail if ratio >= 0.9 else detail + "（格式不统一，个别章节地址另有规律）",
+            url_pattern(chapters[0]["url"], generic=True), chapters[0]["url"])
+        try:
+            final, html = f.get_html(chapters[0]["url"])
+            _, sub = parser.parse_content(html, final, rule)
+            if sub:
+                put("contentPaging", "ok", f"一章分多页，按{'contentNext 规则' if rule.contentNext else '「下一页」链接（自动识别）'}"
+                    "翻页，已合并", url_pattern(sub, generic=True), sub)
+            else:
+                put("contentPaging", "na", "正文不分页（一章一个页面）")
+        except (CrawlError, ValueError) as e:
+            put("contentPaging", "failed", f"复查章节页失败：{e}")
+
+    got = {"书名": toc.get("bookName"), "作者": toc.get("author"), "简介": toc.get("intro")}
+    have = [k for k, v in got.items() if v]
+    miss = [k for k, v in got.items() if not v]
+    status = "ok" if not miss else "partial" if "书名" in have else "failed"
+    put("bookInfo", status, (f"取到：{'、'.join(have)}" if have else "都没取到") + (f"；没取到：{'、'.join(miss)}" if miss else ""),
+        example=f"《{toc.get('bookName') or '-'}》 {toc.get('author') or ''}".strip())
+
+    # 换一本书：同一套规则在另一本书上也能抓通，才算真正掌握「每本书」的跳转规律
+    if others:
+        other = others[0]
+        job.message = "验证站点结构：换一本书按同一套规则试抓…"
+        try:
+            t2 = _trial(f, other, rule, max_pages=2, sample_count=1)
+            name2 = t2["toc"].get("bookName") or other
+            s2 = t2["samples"][0] if t2["samples"] else {}
+            if t2["problems"]:
+                put("generalize", "failed", f"《{name2}》：{'；'.join(t2['problems'])}", "", other)
+            else:
+                put("generalize", "ok", f"《{name2}》：目录 {len(t2['toc']['chapters'])}+ 章，首章 {s2.get('chars', 0)} 字，"
+                    "同一套规则可用", "", other)
+        except (CrawlError, ValueError) as e:
+            put("generalize", "failed", f"按同一套规则抓不通：{e}", "", other)
+    else:
+        put("generalize", "skipped", "站内没找到第二本书，未能验证规则是否适用于其他书")
+    f.encoding = rule.encoding
+
+    out = list(items.values())
+    return {"homeUrl": home_url, "siteName": site_name, "items": out, "otherBooks": others[:5],
+            "categories": [{"name": c["name"], "url": c["url"]} for c in cats[:12]],
+            "mastered": sum(1 for i in out if i["status"] == "ok"),
+            "failed": sum(1 for i in out if i["status"] in ("failed", "partial")),
+            "total": sum(1 for i in out if i["status"] != "na")}
+
+
+def _book_links(html: str, url: str, book_re: re.Pattern, exclude: tuple) -> list[str]:
+    """页面上与「书籍页」同格式（同域名、路径符合 book_re）的链接，去重，排除本书。"""
+    tree = parser.parse_doc(html, url)
+    host = urlsplit(url).hostname
+    out = []
+    for a in tree.iter("a"):
+        href = (a.get("href") or "").split("#")[0]
+        if not parser._usable_href(href) or urlsplit(href).hostname != host:
+            continue
+        if not book_re.fullmatch(_path_of(href)) or any(parser._same_page(href, x) for x in exclude):
+            continue
+        if href not in out:
+            out.append(href)
+    return out[:50]
+
+
+def _path_of(url: str) -> str:
+    parts = urlsplit(url)
+    return parts.path + (f"?{parts.query}" if parts.query else "")
+
+
+def path_regex(url: str) -> re.Pattern:
+    """地址路径 → 正则：数字段换成 \\d+；路径里没有数字（如拼音 slug）时把最后一段换成任意段。"""
+    path = _path_of(url)
+    pattern, n = re.subn(r"\d+", "@@NUM@@", path)
+    escaped = re.escape(pattern).replace("@@NUM@@", r"\d+")
+    if not n:
+        segs = path.rstrip("/").split("/")
+        if len(segs) > 1 and segs[-1]:
+            tail = "/" if path.endswith("/") else ""
+            escaped = re.escape("/".join(segs[:-1]) + "/") + r"[^/?#]+" + re.escape(tail)
+    return re.compile(escaped)
+
+
+def _common_pattern(urls: list[str]) -> str:
+    """一组地址（如分类页）的公共模板：取出现最多的 url_pattern。"""
+    counts: dict[str, int] = {}
+    for u in urls:
+        p = url_pattern(u, generic=True)
+        counts[p] = counts.get(p, 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
+def _site_map_text(site_map: dict) -> str:
+    return "\n".join(f"- {i['label']}：{_STATUS_TEXT[i['status']]}；{i['pattern'] or ''} {i['detail']}"
+                     for i in site_map["items"])
+
+
+_STATUS_TEXT = {"ok": "已掌握", "partial": "部分掌握", "failed": "未掌握", "na": "本站无此结构", "skipped": "未验证"}
+
+
 # ---------------------------------------------------------------- 成功：总结规律
 
-SUMMARY_TEMPLATE = """下面是一次已经成功的网络小说抓取。请总结这个站点的地址规律和抓取规则，方便以后抓同站其他书。
+SUMMARY_TEMPLATE = """下面是一次已经成功的网络小说抓取，以及对该站点结构的逐项实测。请总结这个站点的地址规律和抓取规则，方便以后抓同站其他书。
 
-入口地址：{entry}
+站点首页（根地址）：{home}
+入口地址（本书）：{entry}
 目录页：{toc}
 章节地址样本：{chapters}
 书名：{book}
+同站其他书籍地址样本：{others}
 最终规则（XPath）：{rule}
+站点结构实测结果：
+{siteMap}
 
-严格按 JSON 输出：
+严格按 JSON 输出（summary 里要如实说明哪些规律已掌握、哪些没掌握）：
 {{"siteName":"站点名（中文名或域名）",
  "summary":"2~4 句中文：入口地址是什么页面、目录在哪、章节地址格式、正文位置、需要注意的地方",
  "bookUrlPattern":"书籍地址模板，变量用 {{bookId}} 这类占位，如 https://www.example.com/book/{{bookId}}/",
@@ -509,21 +712,27 @@ SUMMARY_TEMPLATE = """下面是一次已经成功的网络小说抓取。请总�
 
 
 def _result(req: AnalyzeRequest, f: _CachedFetcher, host: str, strategy: str, rule: CrawlRule, trial: dict,
-            usage: dict) -> dict:
+            job: AnalyzeJob) -> dict:
+    usage = job.usage
     toc, chapters = trial["toc"], trial["toc"]["chapters"]
     samples = [c["url"] for c in chapters[:3]]
+    site_map = _explore(f, req, rule, trial, job)
+    job.message = "总结地址规律…"
     summary = {
-        "siteName": "", "summary": "",
-        "bookUrlPattern": url_pattern(req.url),
-        "tocUrlPattern": url_pattern(trial["tocUrl"]),
-        "chapterUrlPattern": url_pattern(chapters[0]["url"]) if chapters else "",
+        "siteName": site_map["siteName"], "summary": "",
+        "bookUrlPattern": url_pattern(req.url, generic=True),
+        "tocUrlPattern": url_pattern(trial["tocUrl"], generic=True),
+        "chapterUrlPattern": url_pattern(chapters[0]["url"], generic=True) if chapters else "",
     }
     try:
         text = llm_client.chat(req.model, [{"role": "system", "content": "你是网络爬虫专家，只输出 JSON。"},
                                            {"role": "user", "content": SUMMARY_TEMPLATE.format(
-                                               entry=req.url, toc=trial["tocUrl"], chapters=samples,
-                                               book=toc.get("bookName") or "", rule=_compact(rule) or "全部自动识别")}],
-                               max_tokens=600, usage=usage)
+                                               home=site_map["homeUrl"], entry=req.url, toc=trial["tocUrl"],
+                                               chapters=samples, book=toc.get("bookName") or "",
+                                               others=site_map["otherBooks"][:3] or "（没找到）",
+                                               rule=_compact(rule) or "全部自动识别",
+                                               siteMap=_site_map_text(site_map))}],
+                               max_tokens=700, usage=usage)
         data = llm_client.parse_json(text)
         for key in summary:
             if isinstance(data.get(key), str) and data[key].strip():
@@ -537,10 +746,20 @@ def _result(req: AnalyzeRequest, f: _CachedFetcher, host: str, strategy: str, ru
     preview = {**{k: v for k, v in toc.items() if k != "chapters"}, "chapters": chapters,
                "chapterCount": len(chapters), "preset": preset_key, "rule": rule.model_dump(),
                "sample": trial["samples"][0] if trial["samples"] else None}
-    return {"host": host, "tocUrl": trial["tocUrl"], "strategy": strategy, "preset": preset_key,
-            "rule": _compact(rule), "chapterSamples": samples, **summary, "preview": preview}
+    return {"host": host, "homeUrl": site_map["homeUrl"], "tocUrl": trial["tocUrl"], "strategy": strategy,
+            "preset": preset_key, "rule": _compact(rule), "chapterSamples": samples, **summary,
+            "siteMap": site_map, "preview": preview}
 
 
-def url_pattern(url: str) -> str:
-    """把地址里的数字段换成占位：https://x.com/book/500489/123.html → https://x.com/book/{n}/{n}.html"""
-    return re.sub(r"(?<=[/_=-])\d{2,}(?=[/._?&-]|$)", "{n}", url)
+def url_pattern(url: str, generic: bool = False) -> str:
+    """把地址里的数字段换成占位：https://x.com/book/500489/123.html → https://x.com/book/{n}/{n}.html。
+    generic=True 且路径里没有数字（拼音 slug 等）时，把最后一段换成 {slug}。"""
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"   # 只换路径和参数，域名 / IP 里的数字不动
+    out = origin + re.sub(r"(?<=[/_=-])\d+(?=[/._?&-]|$)", "{n}", url[len(origin):])
+    if generic and out == url:
+        segs = parts.path.rstrip("/").split("/")
+        if len(segs) > 1 and segs[-1]:
+            tail = "/" if parts.path.endswith("/") else ""
+            out = f"{parts.scheme}://{parts.netloc}" + "/".join(segs[:-1]) + "/{slug}" + tail
+    return out

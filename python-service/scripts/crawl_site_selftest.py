@@ -1,14 +1,17 @@
-"""抓取自测：起一个本地假书城（http.server），验证两种采集模式。
+"""抓取自测：起一个本地假书城（http.server），验证全自动书目采集与单本抓取。
 
     .venv/Scripts/python scripts/crawl_site_selftest.py
 
 覆盖：
-1. 整站发现（copybook 式）：首页 → 3 个分类 → 玄幻分类翻 2 页 → 书籍详情 → 目录，返回可勾选清单；
-2. 单本抓取：用发现结果里的目录地址提交任务，直到成功，取回全文并检查章节数与首尾内容。
+1. 全自动书目采集（catalog.py）：按学习样例的书籍地址规律，首页 → 3 个分类 → 玄幻分类翻 2 页 → 书籍页
+   （书名 / 作者 / 简介 / 标签）→ 目录（写入 data/site-catalog/<测试目录>/toc/）→ 抽检首章正文 → 测试报告；
+   再以 scan 阶段 + knownUrls 扩充，只采集新书；
+2. 单本抓取：用采集结果里的目录地址提交任务，直到成功，取回全文并检查章节数与首尾内容。
 
 假站点不开真实网络：靠 CRAWL_ALLOW_PRIVATE=1 放行 127.0.0.1（fetcher 默认禁止内网地址）。
 """
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -21,7 +24,7 @@ os.environ["CRAWL_ALLOW_PRIVATE"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.crawler import service  # noqa: E402
+from app.crawler import catalog, service  # noqa: E402
 
 CATEGORIES = [("玄幻", "xuanhuan"), ("都市", "dushi"), ("科幻", "kehuan")]
 BOOKS = {  # 分类 → 该分类下的书（含翻页）
@@ -61,13 +64,25 @@ def build_site(root: str) -> None:
             f"<div class='b-info'><h1>{name}</h1></div>"
             f"<a class='reader' href='/book/{slug}/toc.html'>开始阅读</a>"
             f"<div id='intro'>这是《{name}》的简介。</div>"
+            f"<div class='tags'><a href='/tag/1.html'>热血</a><a href='/tag/2.html'>测试标签</a></div>"
+            f"<p>状态：连载中</p>"
             f"<div class='bookDetail'><dl class='bookso'><dd> 作者：测试作者 </dd></dl></div>")))
         chs = "".join(
             f"<dd><a href='/book/{slug}/{i}.html'>第{i}章 测试章节{i}</a></dd>" for i in range(1, 4))
         write(f"book/{slug}/toc.html", page(name, f"<div id='list'><dl>{chs}</dl></div>"))
         for i in range(1, 4):
-            body_text = f"{name} 第{i}章的正文内容，这一行足够长以便被识别为正文区块，而不是导航或广告。" * 2
+            body_text = f"{name} 第{i}章的正文内容，这一行足够长以便被识别为正文区块，而不是导航或广告。" * 6
             write(f"book/{slug}/{i}.html", page(f"第{i}章", f"<div id='content'>{body_text}</div>"))
+
+
+def _wait_catalog(job, timeout: float = 120) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cur = catalog.get(job.jobId)
+        if cur["status"] in ("succeeded", "failed", "cancelled"):
+            return cur
+        time.sleep(0.3)
+    raise AssertionError("书目采集超时")
 
 
 def main() -> int:
@@ -80,25 +95,42 @@ def main() -> int:
     print(f"假书城：{base}（{root}）")
 
     try:
-        # ---------------- 1. 整站发现 ----------------
-        site = service.discover(service.SiteOptions(url=base + "/", delayMs=300, maxBooks=5, verify=True))
-        print(f"\n站点名={site['siteName']!r} 全部分类={[c['name'] for c in site['categoriesAll']]} "
-              f"已访问={[c['name'] for c in site['categories']]} 书籍={site['bookCount']} 截断={site['truncated']}")
-        for b in site["books"]:
-            print(f"  [{b['category']}] {b['bookName']} / {b['author']} / {b['chapterCount']} 章 "
-                  f"/ toc={b['tocUrl']} / err={b['error'] or '-'}")
-        assert len(site["categoriesAll"]) == 3, f"应发现 3 个分类，实际 {site['categoriesAll']}"
-        assert site["bookCount"] == 5, f"maxBooks=5 应发现 5 本，实际 {site['bookCount']}"
-        assert site["truncated"] is True, "达到 maxBooks 应标记 truncated"
-        assert any(b["category"] == "玄幻" for b in site["books"]), "玄幻分类应有书"
-        for b in site["books"]:
+        # ---------------- 1. 全自动书目采集 ----------------
+        catalog_dir = f"site-catalog/selftest-{os.getpid()}"
+        common = dict(homeUrl=base + "/", sampleUrl=base + "/book/jw/", delayMs=300, catalogDir=catalog_dir)
+        res = _wait_catalog(catalog.submit(catalog.CatalogRequest(**common, phase="test", maxBooks=5, contentSamples=2)))
+        rep = res["report"]
+        print(f"\n站点名={res['siteName']!r} 全部分类={[c['name'] for c in res['categoriesAll']]} "
+              f"规律={res['bookPattern']!r}\n报告：{rep['summary']} 问题={rep['problems']}")
+        for b in res["books"]:
+            print(f"  [{b['category']}] {b['bookName']} / {b['author']} / {b['chapterCount']} 章 / 标签={b['tags']} "
+                  f"/ toc={b['tocUrl']} / 正文={b['contentOk']} {b['contentChars']} 字 / err={b['error'] or '-'}")
+        assert res["status"] == "succeeded", f"采集失败：{res['error']}"
+        assert len(res["categoriesAll"]) == 3, f"应发现 3 个分类，实际 {res['categoriesAll']}"
+        assert len(res["books"]) == 5, f"maxBooks=5 应采集 5 本，实际 {len(res['books'])}"
+        assert rep["verdict"] == "usable", f"规律应判定可用：{rep}"
+        assert rep["counts"]["contentChecked"] == 2 and rep["counts"]["content"] == 2, f"正文抽检不对：{rep['counts']}"
+        for b in res["books"]:
             assert not b["error"], f"书籍 {b['bookName']} 解析有错：{b['error']}"
             assert b["tocUrl"].endswith("/toc.html"), f"目录地址不对：{b['tocUrl']}"
             assert b["chapterCount"] == 3, f"{b['bookName']} 章节数应为 3，实际 {b['chapterCount']}"
-        # copybook 的关键行为：列表翻页（玄幻第 2 页的《诡秘之主》在 maxBooks 内应被发现）
-        assert any(b["bookName"] == "诡秘之主" for b in site["books"]), "分类列表翻页没有生效"
+            assert b["intro"].startswith("这是《"), f"简介不对：{b['intro']!r}"
+            assert "热血" in b["tags"] and "连载中" in b["tags"], f"标签不对：{b['tags']}"
+            toc_file = catalog.DATA_DIR / b["tocPath"]
+            assert toc_file.is_file(), f"目录文件没写：{toc_file}"
+        assert any(b["bookName"] == "诡秘之主" for b in res["books"]), "分类列表翻页没有生效"
+        # 扩充：已采集的书不再重复
+        known = [b["bookUrl"] for b in res["books"]]
+        more = _wait_catalog(catalog.submit(catalog.CatalogRequest(**common, phase="scan", maxBooks=20,
+                                                                   contentSamples=0, knownUrls=known)))
+        print(f"扩充：新增 {len(more['books'])} 本：{[b['bookName'] for b in more['books']]}")
+        assert more["status"] == "succeeded", more["error"]
+        assert len(more["books"]) == 3, f"共 8 本、已采 5 本，应新增 3 本，实际 {len(more['books'])}"
+        assert not {b["bookUrl"] for b in more["books"]} & set(known), "扩充时重复采集了已有的书"
+        shutil.rmtree(catalog.DATA_DIR / catalog_dir, ignore_errors=True)
+        site = {"books": res["books"]}
 
-        # ---------------- 2. 单本抓取（用发现结果里的目录地址） ----------------
+        # ---------------- 2. 单本抓取（用采集结果里的目录地址） ----------------
         target = site["books"][0]
         job = service.submit(service.CrawlRequest(url=target["tocUrl"], delayMs=300, startIndex=1, endIndex=3))
         deadline = time.time() + 60
@@ -118,6 +150,7 @@ def main() -> int:
         service.release(job.jobId)
     finally:
         httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
 
     print("\n全部通过 ✅")
     return 0

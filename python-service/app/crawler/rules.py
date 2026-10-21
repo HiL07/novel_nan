@@ -2,7 +2,7 @@
 
 两种采集模式共用一套规则：
 - 单本（book）：只用到 bookName / author / intro / chapterLinks / tocNext / content / contentNext；
-- 整站（site）：先按 categoryLinks / bookLinks / listNext 发现「分类 → 列表页 → 书籍」，
+- 全自动（catalog.py + Java 逐本抓取）：先按 categoryLinks / bookLinks / listNext 发现「分类 → 列表页 → 书籍」，
   再用 tocLink 从书籍详情页跳到目录页，之后与单本完全相同的流程抓正文。
   对应 copybook/bookspider/spiders/quanshuwang.py 的 4 段跳转（首页 → 分类 → 列表翻页 → 书籍 → 章节）。
 
@@ -24,6 +24,7 @@ class CrawlRule(BaseModel):
     bookName: str = ""        # 书名文本，如 //div[@class='b-info']/h1/text()
     author: str = ""          # 作者文本
     intro: str = ""           # 简介文本（多个文本节点会拼接）
+    tags: str = ""            # 标签 / 分类文本（全自动采集书目用；每个节点一个标签），留空按 meta / 「标签：」等启发式
     chapterLinks: str = ""    # 章节 <a> 元素（取 text() 作章节名、@href 作地址），如 //div[@id='list']//dd/a
     tocNext: str = ""         # 目录分页「下一页」的 href（目录分多页的站点）
     content: str = ""         # 正文所在元素，如 //div[@id='content']（取其全部文本，<br>/<p> 换行）

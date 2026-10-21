@@ -14,6 +14,8 @@ Java（Spring Boot）与 Python（FastAPI）共用的数据根目录。**本目�
 | `extract-results/<taskId>.json` | 小说提取的完整结果 JSON | Java（`ExtractResultStore`，提取任务成功时写入） | Java（`GET /api/novel/extract/{id}` 读出后原样返回） | 暂无 | `novel_extract.result_path`（相对 `data/`）、`result_size`、`result_sha256` |
 | `novels/<novelId>/novel.json`、`chapters/NNNN.json` | AI 生成的小说工作区与正文 | Python（`app/generation/store.py`） | Python；Java 按本约定只读（本轮无 Java 读取接口） | Python（删除工作区 / 最后一章） | 不入数据库 |
 | `crawl-cache/<resumeKey>/meta.json`、`chapters.jsonl` | 小说抓取断点：章节清单 + 已抓章节正文（逐章追加），用于「继续抓取」 | Python（`app/crawler/checkpoint.py`） | Python | Python（Java 保存 txt 后 release 时删除；失败 / 取消的保留） | `resumeKey` 由任务 id 推出：单本 `c<novel_crawl.id>`，整站 `c<novel_crawl.id>b<novel_crawl_book.id>` |
+| `site-catalog/<host>[_端口]/toc/<key>.json`、`catalog.json` | 全自动爬虫的站点书目（同一首页的数据放在一起）：每本书的完整目录（`key` = 书籍地址 SHA-1 前 16 位）+ 书目导出（简介 / 标签 / 测试报告）。**不含正文** | `toc/` Python（`app/crawler/catalog.py`，采集时写入）；`catalog.json` Java（`CrawlCatalogService`，每次采集结束 / 决定 / AI 补标签后导出） | Java（`GET /api/novel/crawl/catalogs/books/{id}/toc`） | Java（删除书目时整个目录） | `crawl_site_catalog.catalog_dir`、`crawl_catalog_book.toc_path`（相对 `data/`）；数据库为准 |
+| `crawl-rules/<host>_<id>.json` | AI 解析地址得到的站点抓取规则（整条记录：状态 待确认 / 已确认、XPath 规则、地址规律、总结、学习样例），方便查找 / 备份 | Java（`CrawlRuleService`：解析成功、确认时写入；启动时补写缺失的） | 人工查看；程序以数据库为准 | Java（不确认 / 删除规则、确认替换旧规则时） | `crawl_site_rule` 一行一个文件 |
 
 ## 格式约定
 

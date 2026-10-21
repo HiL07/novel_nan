@@ -122,10 +122,10 @@ def _guess_author(tree) -> str:
 
 
 def _guess_intro(tree) -> str:
+    # <meta name=description> 常是全站通用的站点介绍，排在页面上的简介块之后
     text = _first_text(tree, "//meta[@property='og:description']/@content") \
+        or _join_text(tree, "//*[@id='intro' or contains(@class,'intro')]") \
         or _first_text(tree, "//meta[@name='description']/@content")
-    if not text:
-        text = _join_text(tree, "//*[@id='intro' or contains(@class,'intro')]")
     return text[:2000]
 
 
@@ -226,10 +226,60 @@ def parse_book_detail(html: str, url: str, rule: CrawlRule) -> dict:
     toc = (_rule_href(tree, rule.tocLink) if rule.tocLink else _guess_toc_link(tree, url)) or ""
     if not toc and _has_chapters(tree, url):
         toc = url
-    return {"bookName": _first_text(tree, rule.bookName) or _guess_book_name(tree),
-            "author": _first_text(tree, rule.author) or _guess_author(tree),
+    name = _first_text(tree, rule.bookName) or _guess_book_name(tree)
+    author = _first_text(tree, rule.author) or _guess_author(tree)
+    return {"bookName": name, "author": author,
             "intro": _join_text(tree, rule.intro) if rule.intro else _guess_intro(tree),
+            "tags": _tags(tree, rule, {name, author}),
             "tocUrl": toc}
+
+
+# 详情页上的「标签：玄幻 热血」「类别：都市」「状态：连载中」这类文字
+_TAG_LINE = re.compile(r"(?:标\s*签|关键词|tags?)\s*[:：]\s*([^\n]{1,80})", re.IGNORECASE)
+_TAG_KV = re.compile(r"(?:类\s*别|分\s*类|类\s*型|题\s*材|频\s*道)\s*[:：]\s*([^\s|/，,<>：:]{1,10})")
+_TAG_STATUS = re.compile(r"状\s*态\s*[:：]\s*(连载中?|已?完结|完本|已完本)")
+_TAG_SPLIT = re.compile(r"[\s,，、|/;；#]+")
+_TAG_HINT = re.compile(r"tag|label|keyword|biaoqian", re.IGNORECASE)
+MAX_TAGS = 12
+
+
+def _tags(tree, rule: CrawlRule, exclude: set) -> list[str]:
+    """标签：规则 XPath；否则 og:novel:category / status、class 像 tag 的块里的短文字、「标签 / 类别 / 状态：」文字。"""
+    out: list[str] = []
+
+    def add(text: str) -> None:
+        text = _clean_inline(text).strip("#[]【】()（）")
+        if 1 <= len(text) <= 10 and text not in out and text not in exclude and text not in _NON_LINK_TEXTS \
+                and not _PAGE_TEXT.match(text) and not CHAPTER_TITLE_RE.search(text):
+            out.append(text)
+
+    if rule.tags:
+        for node in _xpath(tree, rule.tags):
+            text = node.text_content() if isinstance(node, etree._Element) else str(node)
+            for part in _TAG_SPLIT.split(text):
+                add(part)
+        return out[:MAX_TAGS]
+    for prop in ("og:novel:category", "og:novel:status", "og:novel:tags", "og:novel:keywords"):
+        for part in _TAG_SPLIT.split(_first_text(tree, f"//meta[@property='{prop}']/@content")):
+            add(part)
+    for el in tree.xpath("//*[@class or @id]"):
+        if not _TAG_HINT.search(f"{el.get('class', '')} {el.get('id', '')}") or el.tag in ("html", "body"):
+            continue
+        kids = [k for k in el.iter("a", "span", "em", "li", "b") if k is not el]
+        for k in kids[:20]:
+            add(k.text_content())
+        if len(out) >= MAX_TAGS:
+            break
+    text = tree.text_content()
+    for m in _TAG_LINE.finditer(text):
+        for part in _TAG_SPLIT.split(m.group(1))[:8]:
+            add(part)
+    for m in _TAG_KV.finditer(text):
+        add(m.group(1))
+    m = _TAG_STATUS.search(text)
+    if m:
+        add(m.group(1))
+    return out[:MAX_TAGS]
 
 
 def parse_next(html: str, url: str, xpath: str) -> Optional[str]:

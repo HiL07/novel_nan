@@ -48,20 +48,6 @@ class CrawlRequest(CrawlOptions):
     newOrigin: Optional[str] = Field(default=None, max_length=300)
 
 
-class SiteOptions(BaseModel):
-    """整站发现参数（copybook 式：首页 → 分类 → 列表翻页 → 书籍）。url 为站点首页或分类列表页。"""
-    url: str = Field(min_length=8, max_length=2000)
-    preset: str = ""
-    rule: Optional[CrawlRule] = None
-    delayMs: int = Field(default=1000, ge=300, le=30000)
-    respectRobots: bool = True
-    maxCategories: int = Field(default=10, ge=1, le=30)             # 最多看几个分类
-    maxListPages: int = Field(default=5, ge=1, le=20)               # 每个分类最多翻几页
-    maxBooks: int = Field(default=20, ge=1, le=120)                 # 最多发现几本书
-    categories: list[str] = Field(default_factory=list)             # 只要含这些名字的分类（空 = 全部）
-    verify: bool = True                                             # 解析每本的目录（多花请求，但能提前发现规则不对）
-
-
 class CrawlJob(BaseModel):
     jobId: str
     url: str
@@ -112,7 +98,7 @@ def preview(opts: CrawlOptions) -> dict:
 
 
 def resolve_toc_url(f: Fetcher, url: str, rule: CrawlRule) -> str:
-    """规则带 tocLink 时（如 AI 学到的规则、整站预设），给的是书籍详情页也能跳到目录页；
+    """规则带 tocLink 时（如 AI 学到的规则、全书网预设），给的是书籍详情页也能跳到目录页；
     页面上没有该链接（本身就是目录页）时原样返回。"""
     if not rule.tocLink:
         return url
@@ -138,103 +124,6 @@ def _load_toc(f: Fetcher, url: str, rule: CrawlRule, max_pages: int = MAX_TOC_PA
     if not toc["chapters"]:
         raise CrawlError("目录页上没有识别到章节链接：请确认填的是「章节目录页」地址，或在高级选项中填写章节链接 XPath")
     return toc
-
-
-# ---------------------------------------------------------------- 整站发现（copybook 式）
-
-VERIFY_TOC_PAGES = 3   # 发现阶段只翻目录前几页，够判断规则对不对即可
-
-
-def discover(opts: SiteOptions) -> dict:
-    """站点首页 → 分类 → 分类列表翻页 → 书籍 →（可选）解析目录，返回可勾选的书籍清单。
-
-    对应 copybook 的 parse（分类）/ getNext（列表翻页）/ getBooks（详情）三段；
-    copybook 是一次性全站铺开，这里按 maxCategories / maxListPages / maxBooks 有界采样，先给用户看清单。
-    """
-    url = check_url(opts.url)
-    preset_key, rule = rules.resolve(opts.preset, opts.rule, urlsplit(url).hostname or "")
-    books: list[dict] = []
-    seen_books: set[str] = set()
-    categories: list[dict] = []
-    truncated = False
-    site_name, home_url = "", url
-
-    with Fetcher(opts.delayMs, opts.respectRobots, rule.encoding) as f:
-        home_url, html = f.get_html(url)
-        site = parser.parse_site(html, home_url, rule)
-        site_name = site["siteName"]
-        cats = site["categories"]
-        if not cats:  # 首页没有分类导航，或用户直接给了一个分类列表页：当成单个「整站」入口
-            cats = [{"name": site_name or "整站", "url": home_url}]
-        all_cats = [{"name": c["name"], "url": c["url"]} for c in cats]  # 站点上发现的全部分类（UI 展示）
-        if opts.categories:
-            wanted = [w.strip() for w in opts.categories if w.strip()]
-            picked = [c for c in cats if any(w in c["name"] for w in wanted)]
-            cats = picked or cats
-        cats = cats[:opts.maxCategories]
-        log.info("整站发现 %s → %s 个分类，上限 %s 本", url, len(cats), opts.maxBooks)
-
-        for cat in cats:
-            page_url, pages, found, cat_error = cat["url"], 0, 0, ""
-            while page_url and pages < opts.maxListPages:
-                try:
-                    page_final, page_html = f.get_html(page_url, referer=home_url)
-                except (CrawlError, ValueError) as e:
-                    cat_error = str(e)
-                    break
-                for link in parser.parse_book_links(page_html, page_final, rule):
-                    if link["url"] in seen_books:
-                        continue
-                    seen_books.add(link["url"])
-                    books.append({"bookName": link["title"], "author": "", "intro": "",
-                                  "sourceUrl": link["url"], "tocUrl": "", "category": cat["name"],
-                                  "chapterCount": None, "error": ""})
-                    found += 1
-                    if len(books) >= opts.maxBooks:
-                        truncated = True
-                        break
-                pages += 1
-                if len(books) >= opts.maxBooks:
-                    break
-                page_url = parser.parse_next(page_html, page_final, rule.listNext)
-            categories.append({"name": cat["name"], "url": cat["url"], "pages": pages,
-                               "books": found, "error": cat_error})
-            if len(books) >= opts.maxBooks:
-                break
-
-        if not books:
-            raise CrawlError("没有发现任何书籍链接：请确认填的是站点首页或分类列表页，"
-                             "或在高级选项中填写「分类链接 / 书籍链接」XPath")
-
-        for i, book in enumerate(books, 1):
-            try:
-                detail_final, detail_html = f.get_html(book["sourceUrl"], referer=home_url)
-                detail = parser.parse_book_detail(detail_html, detail_final, rule)
-                book["bookName"] = detail["bookName"] or book["bookName"] or "未命名小说"
-                book["author"] = detail["author"]
-                book["intro"] = detail["intro"]
-                book["tocUrl"] = detail["tocUrl"] or book["sourceUrl"]
-            except (CrawlError, ValueError) as e:
-                book["tocUrl"] = book["sourceUrl"]
-                book["error"] = f"详情页解析失败：{e}"
-                continue
-            if not opts.verify:
-                continue
-            try:
-                toc = _load_toc(f, book["tocUrl"], rule, max_pages=VERIFY_TOC_PAGES)
-                book["chapterCount"] = len(toc["chapters"])
-                # 详情页已经解析出的名字/作者更可信（目录页的 <title> 常带「目录」后缀），只做兜底
-                book["bookName"] = book["bookName"] or toc["bookName"] or "未命名小说"
-                book["author"] = book["author"] or toc["author"]
-            except (CrawlError, ValueError) as e:
-                book["error"] = str(e)
-            log.info("发现 %s/%s：%s（%s 章）", i, len(books), book["bookName"], book["chapterCount"])
-
-    return {"siteName": site_name, "url": home_url, "preset": preset_key, "rule": rule.model_dump(),
-            "categoriesAll": all_cats, "categories": categories, "books": books,
-            "bookCount": len(books), "truncated": truncated,
-            "limits": {"maxCategories": opts.maxCategories, "maxListPages": opts.maxListPages,
-                       "maxBooks": opts.maxBooks, "verify": opts.verify}}
 
 
 def _load_chapter(f: Fetcher, chapter: dict, rule: CrawlRule, referer: str) -> str:

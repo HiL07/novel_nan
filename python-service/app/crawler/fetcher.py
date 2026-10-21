@@ -37,6 +37,28 @@ class NetworkError(CrawlError):
     """断网 / DNS 失败 / 超时 / 5xx 等暂时性故障（重试已用完）。抓取任务遇到它会等待后重试同一章，而不是记为失败。"""
 
 
+class BlockedError(CrawlError):
+    """站点的反爬校验页（Cloudflare 人机验证、脚本跳转令牌等）：程序不执行脚本，换规则也抓不到，直接告诉用户原因。"""
+
+
+_CF_MARKERS = ("just a moment", "cf-chl", "challenge-platform", "cf_chl_opt", "attention required! | cloudflare")
+_JS_JUMP = re.compile(r"(?:window\.|document\.|top\.|self\.)?location(?:\.href)?\s*=|location\.(?:replace|assign)\s*\(",
+                      re.IGNORECASE)
+
+
+def blocked_reason(status: int, headers, body: bytes) -> Optional[str]:
+    """识别反爬校验页 → 原因说明；不是则 None。只认明确特征，避免把正常的小页面误判。"""
+    head = body[:20000].decode("utf-8", errors="ignore").lower()
+    if status in (403, 429, 503) and ("cloudflare" in (headers.get("server") or "").lower()
+                                      or any(m in head for m in _CF_MARKERS)):
+        return ("站点开启了 Cloudflare 人机验证（「Just a moment…」页面），需要浏览器执行脚本通过校验，程序无法自动抓取；"
+                "请换一个站点")
+    # 整页只有一段 <script> 把地址拼出来再跳转（常带一次性令牌），没有任何正文 / 链接
+    if status == 200 and len(body) < 3000 and "<a " not in head and "<script" in head and _JS_JUMP.search(head):
+        return "站点返回的是脚本跳转校验页（反爬：要执行页面脚本拿到令牌才给内容），程序不执行脚本，无法自动抓取；请换一个站点"
+    return None
+
+
 def quote_url(url: str) -> str:
     """只编码非 ASCII 等不安全字符，已编码的 %XX 保持不变。"""
     return quote(url, safe=":/?#[]@!$&'()*+,;=%~")
@@ -110,6 +132,9 @@ class Fetcher:
                 resp = self.client.get(url, headers={"Referer": referer} if referer else None)
                 if resp.status_code == 404:
                     raise CrawlError(f"页面不存在（404）：{url}")
+                reason = blocked_reason(resp.status_code, resp.headers, resp.content)
+                if reason:
+                    raise BlockedError(f"{reason}：{url}")
                 if resp.status_code in (401, 403):
                     raise CrawlError(f"站点拒绝访问（HTTP {resp.status_code}），可能有反爬限制：{url}")
                 if resp.status_code >= 400:

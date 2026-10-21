@@ -38,6 +38,16 @@ public class SchemaMigrations {
         if (addedBook) {
             backfillSourceBook();
         }
+        // 站点规则加「待确认 / 已确认」：老规则当时已直接生效，迁移为已确认；一个域名可同时有已确认 + 待确认两条
+        addColumn("crawl_site_rule", "status", "TEXT NOT NULL DEFAULT 'CONFIRMED'");
+        addColumn("crawl_site_rule", "confirm_time", "TEXT");
+        // 站点根地址 + 站点结构实测（每层跳转规律是否掌握）
+        addColumn("crawl_site_rule", "home_url", "TEXT");
+        addColumn("crawl_site_rule", "site_map", "TEXT");
+        jdbc.execute("DROP INDEX IF EXISTS uk_crawl_site_rule_host");
+        // 解析过程（每次尝试成败）+ 失败记录的原因：解析管理里直接查看
+        addColumn("crawl_site_rule", "error", "TEXT");
+        addColumn("crawl_site_rule", "attempt_log", "TEXT");
     }
 
     /** 列不存在时添加，返回是否新加 */

@@ -2,10 +2,12 @@ package com.example.file.controller;
 
 import com.example.file.common.Result;
 import com.example.file.common.ResultResponses;
+import com.example.file.entity.CrawlSavedUrl;
 import com.example.file.entity.CrawlSiteRule;
 import com.example.file.entity.NovelCrawl;
 import com.example.file.entity.NovelCrawlBook;
 import com.example.file.service.CrawlRuleService;
+import com.example.file.service.CrawlSavedUrlService;
 import com.example.file.service.NovelCrawlService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -16,6 +18,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -39,10 +42,13 @@ public class NovelCrawlController {
 
     private final NovelCrawlService crawlService;
     private final CrawlRuleService ruleService;
+    private final CrawlSavedUrlService savedUrlService;
 
-    public NovelCrawlController(NovelCrawlService crawlService, CrawlRuleService ruleService) {
+    public NovelCrawlController(NovelCrawlService crawlService, CrawlRuleService ruleService,
+                                CrawlSavedUrlService savedUrlService) {
         this.crawlService = crawlService;
         this.ruleService = ruleService;
+        this.savedUrlService = savedUrlService;
     }
 
     /** GET /api/novel/crawl/presets */
@@ -55,12 +61,6 @@ public class NovelCrawlController {
     @PostMapping("/preview")
     public ResponseEntity<Result<JsonNode>> preview(@RequestBody Map<String, Object> options) {
         return ResultResponses.handle(() -> crawlService.preview(options), log, "抓取预览失败");
-    }
-
-    /** POST /api/novel/crawl/discover：整站发现（首页 → 分类 → 列表翻页 → 书籍 → 目录，同步） */
-    @PostMapping("/discover")
-    public ResponseEntity<Result<JsonNode>> discover(@RequestBody Map<String, Object> options) {
-        return ResultResponses.handle(() -> crawlService.discover(options), log, "整站发现失败");
     }
 
     /** POST /api/novel/crawl/submit：提交抓取任务（异步，按 options.mode 分派单本 / 整站），立即返回任务 */
@@ -140,10 +140,25 @@ public class NovelCrawlController {
         return ResultResponses.handle(() -> ruleService.cancel(jobId), log, "取消 AI 解析任务失败");
     }
 
-    /** GET /api/novel/crawl/rules：学到的站点规则（最近更新在前） */
+    /** GET /api/novel/crawl/rules?status=PENDING|CONFIRMED（空 = 全部）：AI 解析出的站点规则，待确认在前 */
     @GetMapping("/rules")
-    public ResponseEntity<Result<List<CrawlSiteRule>>> rules() {
-        return ResultResponses.handle(ruleService::list, log, "查询站点规则失败");
+    public ResponseEntity<Result<List<CrawlSiteRule>>> rules(@RequestParam(required = false) String status) {
+        return ResultResponses.handle(() -> ruleService.list(status), log, "查询站点规则失败");
+    }
+
+    /** POST /api/novel/crawl/rules/{id}/confirm：确认待确认的规则（替换该域名原来已确认的） */
+    @PostMapping("/rules/{id}/confirm")
+    public ResponseEntity<Result<CrawlSiteRule>> confirmRule(@PathVariable Long id) {
+        return ResultResponses.handle(() -> ruleService.confirm(id), log, "确认站点规则失败，id=" + id);
+    }
+
+    /** POST /api/novel/crawl/rules/{id}/reject：不确认（丢弃待确认的规则） */
+    @PostMapping("/rules/{id}/reject")
+    public ResponseEntity<Result<Void>> rejectRule(@PathVariable Long id) {
+        return ResultResponses.handle(() -> {
+            ruleService.reject(id);
+            return null;
+        }, log, "丢弃站点规则失败，id=" + id);
     }
 
     /** POST /api/novel/crawl/rules/{id}/delete */
@@ -153,5 +168,34 @@ public class NovelCrawlController {
             ruleService.delete(id);
             return null;
         }, log, "删除站点规则失败，id=" + id);
+    }
+
+    // ---------------------------------------------------------------- 常用地址（用户收藏的可抓取网址）
+
+    /** GET /api/novel/crawl/saved-urls：最近用过的在前 */
+    @GetMapping("/saved-urls")
+    public ResponseEntity<Result<List<CrawlSavedUrl>>> savedUrls() {
+        return ResultResponses.handle(savedUrlService::list, log, "查询常用地址失败");
+    }
+
+    /** POST /api/novel/crawl/saved-urls/save {id?, url, name?, mode?: book|site, note?}：同地址已存在则更新 */
+    @PostMapping("/saved-urls/save")
+    public ResponseEntity<Result<CrawlSavedUrl>> saveUrl(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> savedUrlService.save(body), log, "保存常用地址失败");
+    }
+
+    /** POST /api/novel/crawl/saved-urls/{id}/use：选用计数（排序用） */
+    @PostMapping("/saved-urls/{id}/use")
+    public ResponseEntity<Result<CrawlSavedUrl>> useUrl(@PathVariable Long id) {
+        return ResultResponses.handle(() -> savedUrlService.use(id), log, "更新常用地址失败，id=" + id);
+    }
+
+    /** POST /api/novel/crawl/saved-urls/{id}/delete */
+    @PostMapping("/saved-urls/{id}/delete")
+    public ResponseEntity<Result<Void>> deleteUrl(@PathVariable Long id) {
+        return ResultResponses.handle(() -> {
+            savedUrlService.delete(id);
+            return null;
+        }, log, "删除常用地址失败，id=" + id);
     }
 }
