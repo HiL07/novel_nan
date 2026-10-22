@@ -17,6 +17,10 @@
           <el-input-number v-model="opts.maxPerChunk" :min="1" :max="5" />
           <span class="hint">条（每约 6000 字为一段）；越多越全，token 消耗也越高</span>
         </el-form-item>
+        <el-form-item label="候选上限">
+          <el-input-number v-model="opts.maxCandidates" :min="20" :max="3000" :step="100" />
+          <span class="hint">条；全书合并去重后超过时只保留出现章节最多的。同一本书再次提取时，与已有候选 / 素材重复的会自动跳过</span>
+        </el-form-item>
         <el-form-item label="特别关注">
           <el-input
             v-model="opts.focus"
@@ -46,7 +50,7 @@ defineProps({
 const emit = defineEmits(['update:modelValue', 'confirm'])
 
 // 记住上次的选择（同一会话内）
-const opts = reactive({ enabled: true, categories: MATERIAL_CATEGORIES.map((c) => c.code), maxPerChunk: 2, focus: '' })
+const opts = reactive({ enabled: true, categories: MATERIAL_CATEGORIES.map((c) => c.code), maxPerChunk: 2, focus: '', maxCandidates: 500 })
 
 function close() {
   emit('update:modelValue', false)

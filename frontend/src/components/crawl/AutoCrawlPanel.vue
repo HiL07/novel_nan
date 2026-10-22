@@ -46,9 +46,12 @@
           <span class="meta">（书目只存简介 / 标签 / 目录，不存正文；同一首页的数据存在 data/{{ catalog?.catalogDir || 'site-catalog/<域名>' }}/）</span>
         </div>
         <el-form :inline="true" size="small" @submit.prevent>
-          <el-form-item label="测试书数"><el-input-number v-model="test.maxBooks" :min="2" :max="30" /></el-form-item>
-          <el-form-item label="抽检正文"><el-input-number v-model="test.contentSamples" :min="0" :max="10" /> 本</el-form-item>
-          <el-form-item label="分类">
+          <el-form-item><template #label><HelpLabel text="测试书数" :tip="TIPS.testBooks" /></template><el-input-number v-model="test.maxBooks" :min="2" :max="30" /></el-form-item>
+          <el-form-item><template #label><HelpLabel text="抽检正文" :tip="TIPS.samples" /></template><el-input-number v-model="test.contentSamples" :min="0" :max="10" /> 本</el-form-item>
+          <el-form-item><template #label><HelpLabel text="请求间隔" :tip="TIPS.delay" /></template>
+            <el-input-number v-model="delay" :min="300" :max="30000" :step="100" /> 毫秒
+          </el-form-item>
+          <el-form-item><template #label><HelpLabel text="分类" :tip="TIPS.categories" /></template>
             <el-input-number v-model="test.maxCategories" :min="1" :max="50" /> 个 ×
             <el-input-number v-model="test.maxListPages" :min="1" :max="50" /> 页
           </el-form-item>
@@ -143,17 +146,30 @@
         <div class="section-title">3. 书目（共 {{ catalog.bookCount || 0 }} 本）：选择要抓取的小说</div>
 
         <el-form :inline="true" size="small" class="scan-form" @submit.prevent>
-          <el-form-item label="扩充书目">
+          <el-form-item><template #label><HelpLabel text="扩充书目" :tip="TIPS.scanBooks" /></template>
             <el-input-number v-model="scan.maxBooks" :min="1" :max="500" /> 本（已采集的跳过）
           </el-form-item>
-          <el-form-item label="分类">
+          <el-form-item><template #label><HelpLabel text="分类" :tip="TIPS.categories" /></template>
             <el-input-number v-model="scan.maxCategories" :min="1" :max="50" /> 个 ×
             <el-input-number v-model="scan.maxListPages" :min="1" :max="50" /> 页
+          </el-form-item>
+          <el-form-item><template #label><HelpLabel text="请求间隔" :tip="TIPS.delay" /></template>
+            <el-input-number v-model="delay" :min="300" :max="30000" :step="100" /> 毫秒
+          </el-form-item>
+          <el-form-item>
+            <el-switch v-model="scan.fast" active-text="快速（不打开目录页）" />
+            <HelpLabel :tip="TIPS.fast" class="ml6" />
           </el-form-item>
           <el-form-item>
             <el-button :disabled="running" :loading="running && catalog.phase === 'scan'" @click="doStart('scan')">采集更多书目</el-button>
           </el-form-item>
         </el-form>
+        <div class="meta scan-hint">
+          每次请求之间至少间隔「请求间隔」（避免被站点封禁），每本书要打开书籍页{{ scan.fast ? '' : ' + 目录页（目录分页时还要多翻几页）' }}，
+          {{ scan.maxBooks }} 本预计约 {{ scanEstimate }}。
+          <template v-if="scan.fast">快速模式只取书名 / 作者 / 简介 / 标签和目录页地址，章节数显示「抓取时获取」，真正抓取时再解析目录。</template>
+          <template v-else>间隔可调到 300 毫秒，或打开「快速」只取书目信息，速度能快好几倍。</template>
+        </div>
 
         <!-- 搜索：书名 / 作者（模糊）、类型（标签模糊）、具体情节（AI 选标签 · 省 token / AI 读简介 · 耗 token） -->
         <div class="search-box">
@@ -186,7 +202,7 @@
         <div class="meta search-hint">{{ SEARCH_FIELDS[search.field].hint }}</div>
 
         <el-form :inline="true" size="small" class="filter" @submit.prevent="applyFilter">
-          <el-form-item label="分类">
+          <el-form-item><template #label><HelpLabel text="分类" :tip="TIPS.filterCategory" /></template>
             <el-select v-model="filter.category" clearable placeholder="全部" style="width: 120px" @change="applyFilter">
               <el-option v-for="c in tagInfo.categories" :key="c.name" :label="`${c.name}（${c.count}）`" :value="c.name" />
             </el-select>
@@ -204,7 +220,8 @@
             </el-radio-group>
           </el-form-item>
           <el-form-item>
-            <el-switch v-model="filter.usable" active-text="只看目录可用" @change="applyFilter" />
+            <el-switch v-model="filter.usable" active-text="只看已取到目录的" @change="applyFilter" />
+            <HelpLabel :tip="TIPS.usable" class="ml6" />
           </el-form-item>
           <el-form-item>
             <el-button :loading="aiTagging" @click="doAiTag">
@@ -285,6 +302,7 @@
           <el-table-column label="目录" width="96">
             <template #default="{ row }">
               <el-button v-if="row.tocOk" link type="primary" size="small" @click="openToc(row)">{{ row.chapterCount }} 章</el-button>
+              <el-tag v-else-if="row.tocUrl && !row.error" size="small" type="info" title="快速采集没有打开目录页，抓取时再解析">抓取时获取</el-tag>
               <el-tag v-else size="small" type="danger">未取到</el-tag>
             </template>
           </el-table-column>
@@ -310,7 +328,7 @@
 
         <div class="submit-row">
           <span>已选 <b>{{ selected.length }}</b> 本</span>
-          <span class="unit">每本最多</span>
+          <HelpLabel class="unit" text="每本最多" :tip="TIPS.maxChapters" />
           <el-input-number v-model="maxChaptersPerBook" :min="0" :max="5000" size="small" />
           <span class="unit">章（0 = 全书）</span>
           <el-button type="primary" :loading="submitting" :disabled="!selected.length" @click="doSubmit">开始抓取（已选 {{ selected.length }} 本）</el-button>
@@ -338,8 +356,8 @@
 
 <script setup>
 import { computed, defineComponent, h, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox, ElTag } from 'element-plus'
-import { MagicStick, Refresh, Search } from '@element-plus/icons-vue'
+import { ElIcon, ElMessage, ElMessageBox, ElTag, ElTooltip } from 'element-plus'
+import { InfoFilled, MagicStick, Refresh, Search } from '@element-plus/icons-vue'
 import {
   aiTagCatalog,
   cancelCatalog,
@@ -396,6 +414,37 @@ const SEARCH_FIELDS = {
   }
 }
 
+// 表单参数的悬浮说明
+const TIPS = {
+  testBooks: '测试时最多找几本书来验证这套规律。找得越多越能确认规律适用于整个站点，但也越慢。',
+  samples: '在找到的书里挑前几本，真的去抓第一章正文，看能不能抓到正文。0 = 不试正文（最快），但无法确认正文规则是否可用。',
+  categories:
+    '「N 个 × M 页」：最多进入站点的 N 个分类（如 玄幻、都市、科幻…），每个分类的书单列表最多往后翻 M 页去找书。' +
+    '数字越大能找到的书越多，请求也越多、越慢；首页上的书始终会看。找够「测试书数 / 扩充书目」的数量就提前停止。',
+  delay: '两次请求之间至少等待的时间。越小越快，但太快容易被站点封 IP 或弹出人机验证；最小 300 毫秒，默认 1000 毫秒。',
+  scanBooks: '这次最多新增多少本书。已经在书目里的书会自动跳过，不会重复采集。',
+  fast:
+    '打开：每本书只打开书籍页，取书名 / 作者 / 简介 / 标签和目录页地址，每本 1 次请求。' +
+    '关闭：还会打开目录页（含分页），记录章节数和完整目录，通常慢 2~5 倍。快速采集的书照样能抓取，抓取时再解析目录。',
+  filterCategory: '按书所在的分类筛选（采集时这本书是在哪个分类页里找到的）。',
+  usable: '只显示已经采集到完整目录的书。快速模式采集的书没有打开目录页，打开这个开关会被隐藏。',
+  maxChapters: '每本书最多抓前多少章，0 = 整本。建议先用 3~10 章试抓，确认正文没问题再抓全书。'
+}
+
+/** 带 ⓘ 的标签：鼠标悬停显示说明 */
+const HelpLabel = defineComponent({
+  props: { text: { type: String, default: '' }, tip: { type: String, required: true } },
+  setup(p) {
+    return () =>
+      h('span', { class: 'help-label' }, [
+        p.text,
+        h(ElTooltip, { content: p.tip, placement: 'top', popperClass: 'help-tip' }, () =>
+          h(ElIcon, { class: 'help-icon' }, () => h(InfoFilled))
+        )
+      ])
+  }
+})
+
 /** 标签：站点标签实心，AI 标签虚线 */
 const TagList = defineComponent({
   props: { book: { type: Object, required: true } },
@@ -423,7 +472,15 @@ const loadingBooks = ref(false)
 const submitting = ref(false)
 const tagInfo = reactive({ tags: [], categories: [], total: 0, aiTagged: 0 })
 const test = reactive({ maxBooks: 8, contentSamples: 3, maxCategories: 10, maxListPages: 3 })
-const scan = reactive({ maxBooks: 50, maxCategories: 10, maxListPages: 5 })
+const scan = reactive({ maxBooks: 50, maxCategories: 10, maxListPages: 5, fast: true })
+// 全自动面板自己的请求间隔（默认取页面「高级选项」的值），测试与扩充共用
+const delay = ref(props.delayMs)
+/** 扩充预计耗时：每本书 1 次（快速）或约 2.5 次（书籍页 + 目录，含分页的平均）请求 × 间隔，外加列表页 */
+const scanEstimate = computed(() => {
+  const perBook = scan.fast ? 1 : 2.5
+  const secs = ((scan.maxBooks * perBook + scan.maxCategories * scan.maxListPages) * Math.max(delay.value, 300)) / 1000
+  return secs < 90 ? `${Math.ceil(secs)} 秒` : `${Math.round(secs / 60)} 分钟`
+})
 const filter = reactive(emptyFilter())
 const page = reactive({ current: 1, size: 50 })
 const maxChaptersPerBook = ref(0)
@@ -785,7 +842,9 @@ async function doStart(phase) {
       maxCategories: opts.maxCategories,
       maxListPages: opts.maxListPages,
       contentSamples: phase === 'test' ? test.contentSamples : 0,
-      delayMs: props.delayMs,
+      // 快速扩充：只看书籍页、不打开目录（tocPages = 0）
+      ...(phase === 'scan' && scan.fast ? { tocPages: 0 } : {}),
+      delayMs: delay.value,
       respectRobots: props.respectRobots
     })
     if (res.code !== 0) {
@@ -1048,6 +1107,22 @@ onBeforeUnmount(stopPoll)
 .search-field {
   width: 104px;
 }
+.help-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.help-label :deep(.help-icon) {
+  color: #a8abb2;
+  cursor: help;
+}
+.help-label :deep(.help-icon:hover) {
+  color: var(--el-color-primary);
+}
+.scan-hint {
+  margin: -6px 0 12px;
+  line-height: 1.6;
+}
 .search-hint {
   margin: 4px 0 10px;
 }
@@ -1090,5 +1165,13 @@ onBeforeUnmount(stopPoll)
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+</style>
+
+<style>
+/* 悬浮说明（el-tooltip 渲染在 body 下，scoped 样式管不到） */
+.help-tip {
+  max-width: 360px;
+  line-height: 1.6;
 }
 </style>

@@ -67,8 +67,10 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
     result = merge(text, chapters, chunk_results, state["failed"])
     result["model"] = cfg.model
     if material_opts and material_opts.enabled:
-        result["materials"] = materials.merge_candidates(
+        merged = materials.merge_candidates(
             [(chapters[ci]["title"], r) for (ci, _), r in zip(tasks, results) if r], material_opts)
+        result["materials"] = merged[:material_opts.maxCandidates]
+        result["materialsTotal"] = len(merged)   # 合并去重后共识别的条数（超过上限时 > len(materials)）
         result["materialOptions"] = material_opts.model_dump()
     return result
 

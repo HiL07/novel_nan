@@ -6,7 +6,9 @@
 1. 全自动书目采集（catalog.py）：按学习样例的书籍地址规律，首页 → 3 个分类 → 玄幻分类翻 2 页 → 书籍页
    （书名 / 作者 / 简介 / 标签）→ 目录（写入 data/site-catalog/<测试目录>/toc/）→ 抽检首章正文 → 测试报告；
    再以 scan 阶段 + knownUrls 扩充，只采集新书；
-2. 单本抓取：用采集结果里的目录地址提交任务，直到成功，取回全文并检查章节数与首尾内容。
+2. AI 解析的站点结构探查（_explore，不调用模型）：首页搜索框 → 用书名模拟 GET 搜索 → 结果页里有该书；
+   再换一个只有登录框的首页，确认不会把登录框当搜索框；
+3. 单本抓取：用采集结果里的目录地址提交任务，直到成功，取回全文并检查章节数与首尾内容。
 
 假站点不开真实网络：靠 CRAWL_ALLOW_PRIVATE=1 放行 127.0.0.1（fetcher 默认禁止内网地址）。
 """
@@ -24,7 +26,8 @@ os.environ["CRAWL_ALLOW_PRIVATE"] = "1"
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.crawler import catalog, service  # noqa: E402
+from app.crawler import ai_rules, catalog, parser, rules, service  # noqa: E402
+from app.crawler.fetcher import Fetcher  # noqa: E402
 
 CATEGORIES = [("玄幻", "xuanhuan"), ("都市", "dushi"), ("科幻", "kehuan")]
 BOOKS = {  # 分类 → 该分类下的书（含翻页）
@@ -48,7 +51,12 @@ def build_site(root: str) -> None:
             f.write(html)
 
     nav = "".join(f"<li><a href='/cat/{slug}.html'>{name}</a></li>" for name, slug in CATEGORIES)
-    write("index.html", page("首页", f"<ul class='channel-nav-list'>{nav}</ul><div>最新更新</div>"))
+    search = ("<form action='/search.html' method='get'><input type='text' name='searchkey' placeholder='书名 / 作者'>"
+              "<input type='hidden' name='t' value='articlename'><input type='submit' value='搜索'></form>")
+    write("index.html", page("首页", f"{search}<ul class='channel-nav-list'>{nav}</ul><div>最新更新</div>"))
+    login = ("<form action='/login.php' method='post'><input type='text' name='username'>"
+             "<input type='password' name='password'><input type='submit' value='登录'></form>")
+    write("login-only.html", page("只有登录框", login))
 
     def book_list(slug: str, items: list[tuple[str, str]], next_href: str | None) -> str:
         lis = "".join(f"<li><a href='/book/{b[1]}/'>{b[0]}</a></li>" for b in items)
@@ -59,7 +67,11 @@ def build_site(root: str) -> None:
         write(f"cat/{slug}.html", book_list(slug, BOOKS[slug], f"/cat/{slug}-2.html"))
         write(f"cat/{slug}-2.html", book_list(slug, PAGE2 if slug == "xuanhuan" else [], None))
 
-    for name, slug in [b for books in BOOKS.values() for b in books] + PAGE2:
+    all_books = [b for books in BOOKS.values() for b in books] + PAGE2
+    results = "".join(f"<li><a href='/book/{slug}/'>{name}</a> 测试作者</li>" for name, slug in all_books)
+    write("search.html", page("搜索结果", f"<ul class='result'>{results}</ul>"))
+
+    for name, slug in all_books:
         write(f"book/{slug}/index.html", page(name, (
             f"<div class='b-info'><h1>{name}</h1></div>"
             f"<a class='reader' href='/book/{slug}/toc.html'>开始阅读</a>"
@@ -130,7 +142,25 @@ def main() -> int:
         shutil.rmtree(catalog.DATA_DIR / catalog_dir, ignore_errors=True)
         site = {"books": res["books"]}
 
-        # ---------------- 2. 单本抓取（用采集结果里的目录地址） ----------------
+        # ---------------- 2. AI 解析的站点结构探查：站内搜索 ----------------
+        req = ai_rules.AnalyzeRequest(url=base + "/book/jw/", delayMs=300, respectRobots=False,
+                                      model={"baseUrl": "http://127.0.0.1:9/v1", "model": "unused"})
+        rule = rules.resolve("", None, "127.0.0.1")[1]
+        job = ai_rules.AnalyzeJob(jobId="selftest", url=req.url)
+        with ai_rules._CachedFetcher(300, False) as af:
+            trial = ai_rules._trial(af, req.url, rule)
+            sm = ai_rules._explore(af, req, rule, trial, job)
+        item = next(i for i in sm["items"] if i["key"] == "search")
+        print(f"\n站内搜索：{item['status']} {item['detail']} | {item['pattern']}")
+        assert item["status"] == "ok", f"站内搜索应可用：{item}"
+        assert "searchkey={书名}" in item["pattern"] and "t=articlename" in item["pattern"], item["pattern"]
+        assert sm["search"]["works"] and sm["search"]["field"] == "searchkey" and sm["search"]["method"] == "GET", sm["search"]
+        assert sm["search"]["testKeyword"] == "剑来", sm["search"]
+        with Fetcher(300, False) as f2:
+            _, html = f2.get_html(base + "/login-only.html")
+        assert parser.find_search_forms(html, base + "/login-only.html") == [], "登录框不应被当成搜索框"
+
+        # ---------------- 3. 单本抓取（用采集结果里的目录地址） ----------------
         target = site["books"][0]
         job = service.submit(service.CrawlRequest(url=target["tocUrl"], delayMs=300, startIndex=1, endIndex=3))
         deadline = time.time() + 60

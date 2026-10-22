@@ -474,18 +474,32 @@ public class MaterialService {
     /**
      * 提取任务成功后由 NovelExtractService 调用：把结果中的 materials 存为 PENDING 候选（同一任务内按 candidateId 去重）。
      */
-    public int createCandidates(Long extractId, Long fileId, String fileName, JsonNode result) {
+    /** 候选生成结果：新增条数、因与同一本书已有候选 / 素材重复而跳过的条数 */
+    public record CandidateStats(int created, int duplicates) {
+    }
+
+    /**
+     * 提取结果里的素材 → 待确认候选。同一本书（{@link #bookOf} 归一后的来源书名）重复提取时，
+     * 与这本书<b>还没处理的候选</b>或<b>已存的素材</b>同分类、同标题（去掉空白和标点后比较）的条目跳过，不再重复进候选箱。
+     */
+    public CandidateStats createCandidates(Long extractId, Long fileId, String fileName, JsonNode result) {
         JsonNode list = result.path("materials");
         if (!list.isArray() || list.isEmpty()) {
-            return 0;
+            return new CandidateStats(0, 0);
         }
+        Set<String> seen = existingKeysOfBook(bookOf(fileName));
         int n = 0;
+        int duplicates = 0;
         LocalDateTime now = LocalDateTime.now();
         for (JsonNode item : list) {
             String key = item.path("candidateId").asText("");
             String cat = item.path("category").asText("");
             String title = item.path("title").asText("").trim();
             if (key.isEmpty() || !CATEGORIES.containsKey(cat) || title.isEmpty()) {
+                continue;
+            }
+            if (!seen.add(cat + "|" + normTitle(title))) {
+                duplicates++;
                 continue;
             }
             boolean exists = candidateMapper.selectCount(new LambdaQueryWrapper<MaterialCandidate>()
@@ -507,8 +521,38 @@ public class MaterialService {
             candidateMapper.insert(c);
             n++;
         }
-        log.info("提取任务 {} 生成素材候选 {} 条", extractId, n);
-        return n;
+        log.info("提取任务 {} 生成素材候选 {} 条，跳过与本书已有候选 / 素材重复的 {} 条", extractId, n, duplicates);
+        return new CandidateStats(n, duplicates);
+    }
+
+    /** 这本书已有的「分类|归一化标题」：未处理的候选 + 已存素材（book 为空时只能精确到文件名，返回空集合） */
+    private Set<String> existingKeysOfBook(String book) {
+        Set<String> keys = new java.util.HashSet<>();
+        if (book == null) {
+            return keys;
+        }
+        for (MaterialCandidate c : candidateMapper.selectList(new LambdaQueryWrapper<MaterialCandidate>()
+                .select(MaterialCandidate::getId, MaterialCandidate::getFileName, MaterialCandidate::getCategory,
+                        MaterialCandidate::getTitle)
+                .eq(MaterialCandidate::getStatus, MaterialCandidate.PENDING))) {
+            if (book.equals(bookOf(c.getFileName()))) {
+                keys.add(c.getCategory() + "|" + normTitle(c.getTitle()));
+            }
+        }
+        for (Material m : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getCategory, Material::getTitle)
+                .eq(Material::getSourceBook, book))) {
+            keys.add(m.getCategory() + "|" + normTitle(m.getTitle()));
+        }
+        return keys;
+    }
+
+    /** 与 python-service/app/materials.py#_norm_title 同口径：去空白和常见标点、小写 */
+    private static final java.util.regex.Pattern TITLE_NOISE =
+            java.util.regex.Pattern.compile("[\\s·・,，。、:：\"'“”《》（）()]+");
+
+    static String normTitle(String title) {
+        return title == null ? "" : TITLE_NOISE.matcher(title).replaceAll("").toLowerCase(java.util.Locale.ROOT);
     }
 
     /** 候选列表；库中已有同分类同名素材时填充 duplicateOf 提示可能重复 */

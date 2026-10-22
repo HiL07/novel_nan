@@ -56,7 +56,9 @@ class CatalogRequest(BaseModel):
     maxCategories: int = Field(default=10, ge=1, le=50)
     maxListPages: int = Field(default=3, ge=1, le=50)
     contentSamples: int = Field(default=3, ge=0, le=10)           # 抽几本试抓首章正文
-    tocPages: int = Field(default=10, ge=1, le=service.MAX_TOC_PAGES)  # 每本目录最多翻几页
+    # 每本目录最多翻几页；0 = 快速模式：只看书籍页（书名 / 作者 / 简介 / 标签 + 目录页地址），不打开目录，
+    # 每本只要 1 次请求（目录在真正抓取时再取）。测试阶段要验证目录，Java 不会传 0
+    tocPages: int = Field(default=10, ge=0, le=service.MAX_TOC_PAGES)
     delayMs: int = Field(default=1000, ge=300, le=30000)
     respectRobots: bool = True
     catalogDir: str = Field(pattern=r"^site-catalog/[A-Za-z0-9._-]{1,120}$")
@@ -72,7 +74,8 @@ class CatalogJob(BaseModel):
     error: Optional[str] = None
     siteName: str = ""
     # 每本：{bookName, author, intro, tags[], category, bookUrl, tocUrl, chapterCount, firstChapter, latestChapter,
-    #        tocPages, tocPath, detailOk, tocOk, contentChecked, contentOk, contentChars, contentSample, error}
+    #        tocPages, tocPath, detailOk, tocOk, tocSkipped（快速模式没打开目录）, contentChecked, contentOk, contentChars,
+    #        contentSample, error}
     books: list[dict] = Field(default_factory=list)
     categories: list[dict] = Field(default_factory=list)   # 访问过的分类 [{name, url, pages, books, error}]
     categoriesAll: list[dict] = Field(default_factory=list)
@@ -277,7 +280,8 @@ def _collect(job: CatalogJob, req: CatalogRequest, f: Fetcher, rule: CrawlRule, 
         job.message = f"采集第 {i}/{len(links)} 本：{link['title'] or link['url']}"
         book = {"bookName": link["title"], "author": "", "intro": "", "tags": [], "category": link.get("category", ""),
                 "bookUrl": link["url"], "tocUrl": "", "chapterCount": 0, "firstChapter": "", "latestChapter": "",
-                "tocPages": 0, "tocPath": "", "detailOk": False, "tocOk": False, "contentChecked": False,
+                "tocPages": 0, "tocPath": "", "detailOk": False, "tocOk": False, "tocSkipped": False,
+                "contentChecked": False,
                 "contentOk": None, "contentChars": 0, "contentSample": "", "error": ""}
         try:
             chapters = _book(f, rule, req, book)
@@ -315,6 +319,9 @@ def _book(f: Fetcher, rule: CrawlRule, req: CatalogRequest, book: dict) -> list[
     book["tags"] = detail["tags"]
     book["detailOk"] = bool(detail["bookName"])
     toc_url = detail["tocUrl"] or final
+    if req.tocPages == 0:   # 快速模式：记下目录页地址就走，抓取时再解析目录
+        book["tocUrl"], book["tocSkipped"] = toc_url, True
+        return []
     try:
         toc = service._load_toc(f, toc_url, rule, max_pages=req.tocPages)
     except CrawlError:
@@ -391,7 +398,8 @@ def _report(job: CatalogJob, req: CatalogRequest, seconds: float) -> dict:
     problems: list[str] = []
     if total < 2:
         problems.append(f"只找到 {total} 本书，无法确认规律适用于多本书")
-    if total and count["toc"] < total:
+    fast = req.tocPages == 0
+    if total and not fast and count["toc"] < total:
         problems.append(f"{total - count['toc']} 本没解析出目录")
     if count["contentChecked"] and count["content"] < count["contentChecked"]:
         problems.append(f"抽检 {count['contentChecked']} 本首章正文，{count['contentChecked'] - count['content']} 本不合格")
@@ -404,19 +412,22 @@ def _report(job: CatalogJob, req: CatalogRequest, seconds: float) -> dict:
         problems.append(f"分类页打不开：{'、'.join(failed_cats[:5])}")
 
     toc_rate = _rate(count["toc"], total)
+    # 快速模式没打开目录：按书籍页（书名）是否取到判定
+    judge_rate = _rate(count["detail"], total) if fast else toc_rate
     content_rate = _rate(count["content"], count["contentChecked"]) if count["contentChecked"] else None
-    if total >= 2 and toc_rate >= 0.8 and (content_rate is None or content_rate >= 0.66):
+    if total >= 2 and judge_rate >= 0.8 and (content_rate is None or content_rate >= 0.66):
         verdict = "usable"
-    elif total >= 1 and toc_rate >= 0.5 and (content_rate is None or content_rate > 0):
+    elif total >= 1 and judge_rate >= 0.5 and (content_rate is None or content_rate > 0):
         verdict = "partial"
     else:
         verdict = "unusable"
     label = {"usable": "规律可用", "partial": "部分可用", "unusable": "规律不可用"}[verdict]
-    summary = (f"{label}：找到 {total} 本书，目录 {count['toc']}/{total}，简介 {count['intro']}/{total}，"
+    toc_text = "目录未采集（快速模式，抓取时再取）" if fast else f"目录 {count['toc']}/{total}"
+    summary = (f"{label}：找到 {total} 本书，{toc_text}，简介 {count['intro']}/{total}，"
                f"标签 {count['tags']}/{total}"
                + (f"，首章正文 {count['content']}/{count['contentChecked']}" if count["contentChecked"] else ""))
     return {"phase": req.phase, "verdict": verdict, "summary": summary, "problems": problems,
-            "books": total, "counts": count,
+            "books": total, "counts": count, "fast": fast,
             "rates": {"toc": toc_rate, "intro": _rate(count["intro"], total), "tags": _rate(count["tags"], total),
                       "author": _rate(count["author"], total), "detail": _rate(count["detail"], total),
                       "content": content_rate},

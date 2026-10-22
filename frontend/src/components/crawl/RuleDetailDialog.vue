@@ -84,6 +84,18 @@
             <el-descriptions-item label="书籍地址"><span class="mono">{{ rule.bookUrlPattern || '-' }}</span></el-descriptions-item>
             <el-descriptions-item label="目录地址"><span class="mono">{{ rule.tocUrlPattern || '-' }}</span></el-descriptions-item>
             <el-descriptions-item label="章节地址"><span class="mono">{{ rule.chapterUrlPattern || '-' }}</span></el-descriptions-item>
+            <el-descriptions-item label="站内搜索">
+              <template v-if="rule.siteMap?.search">
+                <el-tag size="small" :type="rule.siteMap.search.works ? 'success' : 'warning'">
+                  {{ rule.siteMap.search.works ? `已验证：搜「${rule.siteMap.search.testKeyword}」能搜到` : `能提交，但搜「${rule.siteMap.search.testKeyword}」没搜到` }}
+                </el-tag>
+                <div class="mono">{{ rule.siteMap.search.pattern }}</div>
+                <div class="meta">
+                  页面编码 {{ rule.siteMap.search.charset || '自动' }}（中文书名按这个编码提交）
+                </div>
+              </template>
+              <span v-else class="meta">{{ searchItem?.detail || '没有学到（旧记录未探查，重新解析一次即可）' }}</span>
+            </el-descriptions-item>
             <el-descriptions-item label="规则文件">
               <code v-if="rule.ruleFile">data/{{ rule.ruleFile }}</code><span v-else class="meta">-</span>
             </el-descriptions-item>
@@ -164,6 +176,7 @@ const failed = computed(() => props.rule?.status === 'FAILED')
 const log = computed(() => props.rule?.attemptLog || null)
 const attempts = computed(() => log.value?.attempts || [])
 const okCount = computed(() => attempts.value.filter((a) => a.ok).length)
+const searchItem = computed(() => (props.rule?.siteMap?.items || []).find((i) => i.key === 'search') || null)
 const ruleRows = computed(() =>
   Object.entries(props.rule?.rule || {})
     .filter(([, v]) => v && (!Array.isArray(v) || v.length))

@@ -20,16 +20,15 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
     "item": ("物品功法", ["类别", "作用", "代价"]),
     "plot": ("情节", ["套路", "冲突", "转折", "可借鉴之处"]),
 }
-MAX_CANDIDATES = 200
-
-
 class MaterialOptions(BaseModel):
-    """提取范围：是否提取素材、提取哪些分类、每块最多几条、额外关注点（自由文本）。"""
+    """提取范围：是否提取素材、提取哪些分类、每块最多几条、额外关注点（自由文本）、候选上限。"""
 
     enabled: bool = False
     categories: list[str] = Field(default_factory=lambda: list(CATEGORIES))
     maxPerChunk: int = Field(default=2, ge=1, le=5)
     focus: str = Field(default="", max_length=300)
+    # 合并去重后最多保留几条候选（按出现章节数从多到少）；超出的不进候选箱，任务说明里会写明
+    maxCandidates: int = Field(default=500, ge=20, le=3000)
 
     def active_categories(self) -> list[str]:
         return [c for c in self.categories if c in CATEGORIES] or list(CATEGORIES)
@@ -59,7 +58,8 @@ def _as_list(v) -> list[str]:
 
 
 def merge_candidates(chunks: list[tuple[str, dict]], opts: MaterialOptions) -> list[dict]:
-    """chunks: [(章节标题, 分块解析结果)]。同分类、标题相近的候选合并（属性取并集，记录出现的章节）。"""
+    """chunks: [(章节标题, 分块解析结果)]。同分类、标题相近的候选合并（属性取并集，记录出现的章节）。
+    返回全部合并结果（出现章节多的在前），截断到 maxCandidates 由调用方做，以便告诉用户共识别了多少条。"""
     allowed = set(opts.active_categories())
     merged: dict[tuple[str, str], dict] = {}
     for chapter_title, result in chunks:
@@ -96,7 +96,7 @@ def merge_candidates(chunks: list[tuple[str, dict]], opts: MaterialOptions) -> l
             if chapter_title not in cur["chapters"]:
                 cur["chapters"].append(chapter_title)
     # 出现章节越多越可能是核心设定，排在前面
-    return sorted(merged.values(), key=lambda c: -len(c["chapters"]))[:MAX_CANDIDATES]
+    return sorted(merged.values(), key=lambda c: -len(c["chapters"]))
 
 
 # ---------------------------------------------------------------- AI 语义检索

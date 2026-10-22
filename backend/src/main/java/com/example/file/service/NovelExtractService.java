@@ -92,7 +92,7 @@ public class NovelExtractService {
 
     /**
      * 提交提取任务，立即返回任务记录（QUEUED）。
-     * materials：素材候选提取范围 {enabled, categories, maxPerChunk, focus}，null 或 enabled=false 表示不提取素材。
+     * materials：素材候选提取范围 {enabled, categories, maxPerChunk, focus, maxCandidates}，null 或 enabled=false 表示不提取素材。
      */
     public NovelExtract submit(Long fileId, Map<String, Object> materials) {
         FileInfo file = fileService.getById(fileId);
@@ -265,9 +265,9 @@ public class NovelExtractService {
             return;
         }
         // 素材只生成「待确认候选」，由用户在提取结果 / 素材库页确认后才入库
-        int candidates = 0;
+        MaterialService.CandidateStats stats = new MaterialService.CandidateStats(0, 0);
         try {
-            candidates = materialService.createCandidates(taskId, file.getId(), file.getFileName(), result);
+            stats = materialService.createCandidates(taskId, file.getId(), file.getFileName(), result);
         } catch (Exception e) {
             log.error("保存素材候选失败，taskId={}", taskId, e);
         }
@@ -275,13 +275,14 @@ public class NovelExtractService {
         patch.setId(taskId);
         patch.setStatus(NovelExtract.SUCCEEDED);
         patch.setProgress(100);
-        patch.setMessage(candidates > 0 ? "提取完成，发现 " + candidates + " 条素材候选待确认" : "提取完成");
+        patch.setMessage(extractMessage(result, stats));
         patch.setResultPath(stored.relativePath());
         patch.setResultSize(stored.size());
         patch.setResultSha256(stored.sha256());
         patch.setWordCount(result.path("wordCount").isNumber() ? result.path("wordCount").asInt() : null);
         patch.setChapterCount(result.path("chapterCount").isNumber() ? result.path("chapterCount").asInt() : null);
-        patch.setCandidateCount(result.path("materials").isArray() ? result.path("materials").size() : null);
+        // 实际进入候选箱的条数（重复跳过的不算）
+        patch.setCandidateCount(result.path("materials").isArray() ? stats.created() : null);
         patch.setUpdateTime(LocalDateTime.now());
         try {
             extractMapper.updateById(patch);
@@ -289,6 +290,24 @@ public class NovelExtractService {
             resultStore.deleteQuietly(stored.relativePath());
             throw e;
         }
+    }
+
+    /** 「提取完成，发现 N 条素材候选待确认；跳过与本书已有候选 / 素材重复的 D 条；共识别 T 条，超过上限只保留出现最多的 M 条」 */
+    private static String extractMessage(JsonNode result, MaterialService.CandidateStats stats) {
+        StringBuilder sb = new StringBuilder("提取完成");
+        if (stats.created() > 0) {
+            sb.append("，发现 ").append(stats.created()).append(" 条素材候选待确认");
+        }
+        if (stats.duplicates() > 0) {
+            sb.append("；跳过与本书已有候选 / 素材重复的 ").append(stats.duplicates()).append(" 条");
+        }
+        int kept = result.path("materials").size();
+        int total = result.path("materialsTotal").asInt(kept);
+        if (total > kept) {
+            sb.append("；共识别 ").append(total).append(" 条，超过上限只保留出现章节最多的 ").append(kept)
+                    .append(" 条（可在提取选项里调高「候选上限」）");
+        }
+        return sb.toString();
     }
 
     private void update(Long taskId, String status, Integer progress, String message, String jobId) {

@@ -193,7 +193,8 @@ public class CrawlCatalogService {
         req.put("maxCategories", clamp(body.get("maxCategories"), 1, 50, 10));
         req.put("maxListPages", clamp(body.get("maxListPages"), 1, 50, test ? 3 : 5));
         req.put("contentSamples", clamp(body.get("contentSamples"), 0, 10, test ? 3 : 0));
-        req.put("tocPages", clamp(body.get("tocPages"), 1, 30, 10));
+        // 0 = 快速：只看书籍页、不打开目录（只用于扩充；测试要验证目录，至少 1 页）
+        req.put("tocPages", clamp(body.get("tocPages"), test ? 1 : 0, 30, 10));
         req.put("delayMs", clamp(body.get("delayMs"), 300, 30000, 1000));
         req.put("respectRobots", !Boolean.FALSE.equals(body.get("respectRobots")));
         req.put("catalogDir", catalog.getCatalogDir());

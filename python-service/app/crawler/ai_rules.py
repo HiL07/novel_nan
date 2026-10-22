@@ -4,7 +4,7 @@
 1. 已学到的规则（Java 传 knownRule，同域名之前成功过）→ 2. 内置预设 / 启发式 → 3+. 大模型根据
    页面结构（去脚本、折叠重复节点后的骨架 + 链接分组 / 正文候选的 XPath 提示）和之前每次失败的原因写 XPath。
 每次尝试都是一次真实的小规模抓取：解析目录（含分页）+ 试抓首章与中间一章，正文够长且两章不同才算成功。
-抓通后再从站点根地址（首页）出发摸清每层跳转规律并逐项实测（_explore：首页 / 分类 / 书籍 / 目录 / 目录分页 /
+抓通后再从站点根地址（首页）出发摸清每层跳转规律并逐项实测（_explore：首页 / 站内搜索（找到搜索框后用本书书名模拟搜索）/ 分类 / 书籍 / 目录 / 目录分页 /
 章节 / 正文分页 / 书籍信息 / 换一本书按同一套规则试抓），每项标明已掌握 / 部分掌握 / 未掌握 / 本站无此结构 / 未验证；
 最后让大模型结合实测结果总结地址规律与规则说明；总结失败不影响结果。
 
@@ -504,7 +504,7 @@ def _short(href: str) -> str:
 # ---------------------------------------------------------------- 成功后：摸清站点结构（根地址 + 每层跳转规律，逐项验证）
 
 # 每项状态：ok 已掌握 / partial 部分掌握 / failed 未掌握 / na 本站无此结构 / skipped 前置步骤失败未验证
-SITE_MAP_STEPS = (("home", "站点首页"), ("category", "分类页"), ("book", "书籍页"), ("toc", "目录页"),
+SITE_MAP_STEPS = (("home", "站点首页"), ("search", "站内搜索"), ("category", "分类页"), ("book", "书籍页"), ("toc", "目录页"),
                   ("tocPaging", "目录分页"), ("chapter", "章节页"), ("contentPaging", "正文分页"),
                   ("bookInfo", "书名 / 作者 / 简介"), ("generalize", "换一本书验证"))
 
@@ -556,6 +556,12 @@ def _explore(f: _CachedFetcher, req: AnalyzeRequest, rule: CrawlRule, trial: dic
                         "没找到与本书同格式的书籍链接，分类 → 书籍这一跳没掌握", pattern, cats[0]["url"])
             except (CrawlError, ValueError) as e:
                 put("category", "failed", f"分类页「{cats[0]['name']}」打不开：{e}", "", cats[0]["url"])
+
+    # 站内搜索：找到首页的搜索框，用本书书名真的搜一次，看结果里有没有这本书
+    search_cfg = None
+    if items["home"]["status"] == "ok":
+        job.message = "验证站点结构：模拟站内搜索…"
+        search_cfg = _probe_search(f, home_html, home_final, toc.get("bookName") or "", (req.url, toc_url), book_re, put)
 
     # 书籍页：输入地址的格式能否在站内找到其他实例
     book_pattern = url_pattern(req.url, generic=True)
@@ -633,9 +639,92 @@ def _explore(f: _CachedFetcher, req: AnalyzeRequest, rule: CrawlRule, trial: dic
     out = list(items.values())
     return {"homeUrl": home_url, "siteName": site_name, "items": out, "otherBooks": others[:5],
             "categories": [{"name": c["name"], "url": c["url"]} for c in cats[:12]],
+            # 学到的搜索方式（搜索可用或部分可用时）：{action, method, field, params, charset, pattern, testKeyword, works}
+            "search": search_cfg,
             "mastered": sum(1 for i in out if i["status"] == "ok"),
             "failed": sum(1 for i in out if i["status"] in ("failed", "partial")),
             "total": sum(1 for i in out if i["status"] != "na")}
+
+
+# 搜索结果页上表示「搜不了」的提示：限频 / 验证码 / 要登录
+_SEARCH_REFUSED = re.compile(r"搜索间隔|搜索太频繁|过于频繁|操作频繁|稍后再试|请输入验证码|验证码错误|captcha|请先登录|登录后才能",
+                             re.IGNORECASE)
+
+
+def _probe_search(f: _CachedFetcher, html: str, home_url: str, keyword: str, own_urls: tuple, book_re: re.Pattern,
+                  put) -> Optional[dict]:
+    """首页搜索框 → 模拟搜索（用本书书名），最多试 2 个最像搜索的表单。
+    ok = 结果里有本书（或直接跳到了本书页面）；partial = 搜索能用但没搜到；failed = 打不开 / 被拒；na = 没有搜索框。
+    → 搜索方式 {action, method, field, params, charset, pattern, testKeyword, works}（failed / na 时为 None）"""
+    forms = parser.find_search_forms(html, home_url)
+    if not forms:
+        put("search", "na", "首页上没有找到搜索框（站点可能没有站内搜索，或搜索框由脚本生成）")
+        return None
+    if not keyword:
+        put("search", "skipped", "找到了搜索框，但本书没取到书名，没法模拟搜索", _search_pattern(forms[0]))
+        return None
+    partial: Optional[tuple[dict, str, str]] = None
+    errors: list[str] = []
+    for form in forms[:2]:
+        pattern = _search_pattern(form)
+        cfg = {**{k: form[k] for k in ("action", "method", "field", "params", "charset")},
+               "pattern": pattern, "testKeyword": keyword, "works": False}
+        try:
+            final, page = f.submit_form(form["action"], form["method"], {**form["params"], form["field"]: keyword},
+                                        form["charset"], referer=home_url)
+        except (CrawlError, ValueError) as e:
+            errors.append(f"{pattern}：{e}")
+            continue
+        hit = _search_hit(page, final, keyword, own_urls, book_re)
+        if hit:
+            cfg["works"] = True
+            put("search", "ok", f"用书名「{keyword}」模拟搜索：{hit}", pattern, final)
+            return cfg
+        text = parser.parse_doc(page, final).text_content()
+        refused = _SEARCH_REFUSED.search(text)
+        if refused:
+            snippet = parser._clean_inline(text[max(0, refused.start() - 12):refused.end() + 18])
+            errors.append(f"{pattern}：搜索页提示「{snippet}」（限频 / 验证码 / 需要登录）")
+            continue
+        partial = partial or (cfg, pattern, final)
+    if partial:
+        cfg, pattern, final = partial
+        put("search", "partial", f"搜索能提交、结果页也打开了，但用「{keyword}」没搜到这本书（可能搜索只认作者 / 关键词，"
+                                 "或结果由脚本加载）" + (f"；另一个搜索框：{errors[0]}" if errors else ""), pattern, final)
+        return cfg
+    put("search", "failed", "找到搜索框，但模拟搜索失败：" + "；".join(errors)[:300], _search_pattern(forms[0]))
+    return None
+
+
+def _search_hit(page: str, final: str, keyword: str, own_urls: tuple, book_re: re.Pattern) -> Optional[str]:
+    """搜索结果里有没有这本书 → 说明文字；没有返回 None。"""
+    if any(parser._same_page(final, u) for u in own_urls):
+        return "直接跳到了这本书的页面"
+    tree = parser.parse_doc(page, final)
+    norm = re.sub(r"\s+", "", keyword)
+    exact, titled = False, 0
+    for a in tree.iter("a"):
+        href = (a.get("href") or "").split("#")[0]
+        if href and any(parser._same_page(href, u) for u in own_urls):
+            exact = True
+        text = re.sub(r"\s+", "", a.text_content())
+        if norm and norm in text and (not href or book_re.fullmatch(_path_of(href)) or len(text) <= len(norm) + 12):
+            titled += 1
+    if exact:
+        return f"结果里有这本书的链接（共 {titled or 1} 个相关结果）"
+    if titled:
+        return f"结果里有 {titled} 个标题含「{keyword}」的链接"
+    return None
+
+
+def _search_pattern(form: dict) -> str:
+    """搜索地址模板：GET 拼成 地址?字段={书名}&其他参数，POST 写成「POST 地址（字段={书名}，…）」。"""
+    from urllib.parse import urlencode
+    others = urlencode(form["params"]) if form["params"] else ""
+    if form["method"] == "POST":
+        return f"POST {form['action']}（{form['field']}={{书名}}" + (f"，{others}" if others else "") + "）"
+    sep = "&" if urlsplit(form["action"]).query else "?"
+    return f"{form['action']}{sep}{form['field']}={{书名}}" + (f"&{others}" if others else "")
 
 
 def _book_links(html: str, url: str, book_re: re.Pattern, exclude: tuple) -> list[str]:

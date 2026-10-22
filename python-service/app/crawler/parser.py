@@ -343,6 +343,66 @@ def _has_chapters(tree, url: str) -> bool:
     return len(_guess_chapter_links(tree, url)) >= 3
 
 
+# ---------------------------------------------------------------- 站内搜索框
+
+_SEARCH_HINT = re.compile(r"search|so(?:u)?|query|keyword|key|wd|kw|q|searchkey|搜索|搜书|查找|书名|作者", re.IGNORECASE)
+_TEXT_INPUT_TYPES = {"", "text", "search"}
+_PAGE_CHARSET = re.compile(r"""<meta[^>]+charset\s*=\s*["']?\s*([\w-]+)""", re.IGNORECASE)
+
+
+def find_search_forms(html: str, url: str) -> list[dict]:
+    """页面上的搜索表单 → [{action, method, field, params, charset, score, label}]，最像搜索的在前。
+
+    只认真正的 <form>：里面有文字输入框（type 为空 / text / search）；action / 输入框名 / 占位文字 / 按钮像「搜索」的加分。
+    params = 其余要一起提交的字段（hidden、select 的默认值、有 name 的提交按钮），模拟搜索时原样带上。
+    搜索框由脚本生成（没有 <form>）的站点这里找不到。"""
+    tree = parse_doc(html, url)
+    m = _PAGE_CHARSET.search(html[:4096])
+    page_charset = m.group(1).lower() if m else ""
+    out = []
+    for form in tree.iter("form"):
+        inputs = [i for i in form.iter("input") if i.get("name")]
+        texts = [i for i in inputs if (i.get("type") or "").lower() in _TEXT_INPUT_TYPES]
+        if not texts:
+            continue
+        # 有多个文字框时（如 用户名 + 密码 登录框里的用户名）挑最像搜索的
+        field = max(texts, key=lambda i: bool(_SEARCH_HINT.search(f"{i.get('name')} {i.get('placeholder', '')} {i.get('id', '')}")))
+        if any((i.get("type") or "").lower() == "password" for i in form.iter("input")):
+            continue   # 登录框
+        action = form.get("action") or url
+        if not _usable_href(action):
+            continue
+        params: dict[str, str] = {}
+        for i in inputs:
+            t = (i.get("type") or "").lower()
+            if i is field or t in ("checkbox", "radio", "file", "image", "reset", "button"):
+                continue
+            if t == "submit" and not i.get("value"):
+                continue
+            params[i.get("name")] = i.get("value") or ""
+        for sel in form.iter("select"):
+            if sel.get("name"):
+                opt = next((o for o in sel.iter("option") if o.get("selected") is not None), None) \
+                    or next(iter(sel.iter("option")), None)
+                params[sel.get("name")] = (opt.get("value") if opt is not None and opt.get("value") is not None
+                                           else _clean_inline(opt.text_content()) if opt is not None else "")
+        for btn in form.iter("button"):
+            if btn.get("name") and (btn.get("type") or "submit").lower() == "submit":
+                params[btn.get("name")] = btn.get("value") or ""
+        label = " ".join(filter(None, [field.get("placeholder"), _clean_inline(form.text_content())[:30]]))
+        score = 0
+        score += 3 if _SEARCH_HINT.search(action) else 0
+        score += 2 if _SEARCH_HINT.search(f"{field.get('name')} {field.get('placeholder', '')}") else 0
+        score += 1 if re.search(r"搜索|搜书|search", _clean_inline(form.text_content()) + " ".join(
+            b.get("value", "") for b in form.iter("input")), re.IGNORECASE) else 0
+        out.append({"action": action.split("#")[0], "method": (form.get("method") or "get").upper(),
+                    "field": field.get("name"), "params": params,
+                    "charset": (form.get("accept-charset") or page_charset).split(",")[0].strip().lower(),
+                    "score": score, "label": label[:60]})
+    out.sort(key=lambda f: -f["score"])
+    return out
+
+
 def _guess_site_name(tree) -> str:
     title = _first_text(tree, "//title")
     return re.split(r"\s+[-|—｜_]\s*|[_|｜]", title)[0].strip()[:60] if title else ""

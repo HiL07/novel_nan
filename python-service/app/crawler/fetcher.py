@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Optional
 from urllib import robotparser
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
 
@@ -103,6 +103,7 @@ class Fetcher:
         self.respect_robots = respect_robots
         self.encoding = encoding
         self.retries = retries
+        self.charset = ""   # 最近一个页面的编码（_decode 记录）
         self._robots: dict[str, Optional[robotparser.RobotFileParser]] = {}
         self._last = 0.0
         self._lock = threading.Lock()
@@ -121,15 +122,35 @@ class Fetcher:
 
     def get_html(self, url: str, referer: str = "") -> tuple[str, str]:
         """返回 (最终 URL, 解码后的 HTML)。4xx 直接失败，5xx / 网络错误重试。"""
+        return self._fetch("GET", url, referer)
+
+    def submit_form(self, action: str, method: str, fields: dict, charset: str = "", referer: str = "") -> tuple[str, str]:
+        """模拟提交表单（站内搜索）：字段按页面编码做百分号编码（GBK 站点的中文书名要按 GBK 编码，否则搜不到），
+        GET 拼到地址上、POST 放请求体。同样限速 / robots / 反爬页识别。→ (最终 URL, HTML)"""
+        enc = (charset or self.charset or "utf-8").lower()
+        enc = "gb18030" if enc in ("gb2312", "gbk", "gb18030") else enc
+        try:
+            query = urlencode(fields, encoding=enc, errors="replace")
+        except LookupError:
+            query = urlencode(fields)
+        if method.upper() == "POST":
+            return self._fetch("POST", action, referer, body=query)
+        sep = "&" if urlsplit(action).query else "?"
+        return self._fetch("GET", action.split("#")[0] + (sep + query if query else ""), referer)
+
+    def _fetch(self, method: str, url: str, referer: str = "", body: Optional[str] = None) -> tuple[str, str]:
         # 中文路径（如维基文库）要百分号编码：请求头（Referer）只能是 ASCII
         url, referer = quote_url(check_url(url)), quote_url(referer) if referer else ""
         if not self._allowed(url):
             raise CrawlError(f"该站点的 robots.txt 不允许抓取：{url}（如确认有权抓取，可在高级选项中关闭 robots 检查）")
+        headers = {"Referer": referer} if referer else {}
+        if body is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
         last_err: Exception = CrawlError("未知错误")
         for attempt in range(self.retries + 1):
             self._throttle()
             try:
-                resp = self.client.get(url, headers={"Referer": referer} if referer else None)
+                resp = self.client.request(method, url, headers=headers or None, content=body)
                 if resp.status_code == 404:
                     raise CrawlError(f"页面不存在（404）：{url}")
                 reason = blocked_reason(resp.status_code, resp.headers, resp.content)
@@ -174,14 +195,22 @@ class Fetcher:
         return self._robots[origin].can_fetch(DEFAULT_UA, url)
 
     def _decode(self, resp: httpx.Response) -> str:
+        """解码，并把用到的编码记在 self.charset（模拟搜索时按它编码关键词）。"""
         data = resp.content
         enc = self.encoding or _declared_charset(resp, data)
         if enc:
             try:
                 # gb2312 / gbk 页面常混入扩展字符，统一按超集 gb18030 解
-                return data.decode("gb18030" if enc.lower() in ("gb2312", "gbk") else enc, errors="replace")
+                text = data.decode("gb18030" if enc.lower() in ("gb2312", "gbk") else enc, errors="replace")
+                self.charset = enc.lower()
+                return text
             except LookupError:
                 pass
+        try:
+            data.decode("utf-8")
+            self.charset = "utf-8"
+        except UnicodeDecodeError:
+            self.charset = "gb18030"
         return decode_text(data)
 
 
