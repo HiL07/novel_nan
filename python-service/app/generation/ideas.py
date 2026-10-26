@@ -18,7 +18,7 @@ KINDS = ("title", "outline", "chapter", "fill", "direction", "hint_polish", "cha
 CHAT_TURNS = 20             # 角色试聊带上最近多少条消息
 CHAT_MESSAGE_CHARS = 1000
 CHAT_SETTING_CHARS = 1500   # 试聊时附带的世界观 / 核心设定上限
-FILL_MODES = ("field", "items", "category")
+FILL_MODES = ("field", "items", "category", "option")   # option：选择类字段的一个自定义选项
 FILL_TYPES = ("text", "textarea", "tags", "single", "multi")   # 数字 / 滑块是参数，不让 AI 填
 FILL_TYPE_HINTS = {
     "text": "字符串：简短的名称或短语（20 字内）",
@@ -366,6 +366,8 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
                      "\n".join(f"- {k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in current.items()))
     if hint:
         lines.append(f"作者的要求：{hint}")
+    if mode == "option":
+        return _custom_option(fields[0], fill, context, mat, lines, req, local)
     # 单个文本字段：polish = 在框内已写内容上扩写；generate = 框内文字只是大致方向（可为空）
     single_text = mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")
     seed = str(fill.get("seed") or "").strip()[:2000] if single_text else ""
@@ -439,7 +441,44 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
             "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]}}
 
 
-_SENTENCE_END = "。！？!?…」”"
+def _custom_option(field: dict, fill: dict, context: str, mat: list[str], lines: list[str], req: dict,
+                   local: dict | None) -> dict:
+    """选择类字段「自定义」：polish = 把作者写的整理成一个选项；generate = 按作者的方向 / 素材设计一个新选项。
+    素材只来自这个自定义框里选的（Java 按本次 materialIds 取）。→ {option: {label, desc}}"""
+    if field["type"] not in ("single", "multi"):
+        raise IdeaError("自定义选项只用于单选 / 多选字段")
+    seed = str(fill.get("seed") or "").strip()[:500]
+    if not seed and not mat:
+        raise IdeaError("先在自定义框里写点内容，或选择素材")
+    label = field.get("label") or field["key"]
+    existing = "、".join(str(o) for o in (field.get("options") or [])[:40])
+    if existing:
+        lines.append(f"「{label}」已有的选项：{existing}")
+    if fill.get("action") == "polish":
+        lines.append((f"作者为「{label}」写的自定义选项：「{seed}」——把它润色成一个可直接使用的选项：保留原意，"
+                      if seed else f"根据【素材库素材】为「{label}」整理出一个选项：")
+                     + "选项名简洁（12 字内），再写一句说明它具体是什么（60 字内）"
+                     + ("，说明可参考素材补充细节。" if mat and seed else "。"))
+    else:
+        lines.append(f"为「{label}」设计一个新的自定义选项，不要与已有选项重复"
+                     + (f"；按作者给的方向：「{seed}」" if seed else "")
+                     + ("；从【素材库素材】中提炼" if mat else "")
+                     + "。选项名简洁（12 字内），说明写清楚它具体是什么（60 字内）。")
+    lines.append('这里是新建选项，不要照搬已有选项。输出：{"label":"选项名","desc":"一句话说明"}')
+    user = (context + ("\n\n【素材库素材】\n" + "\n".join(mat) if mat else "") + "\n\n【任务：自定义选项】\n" +
+            "\n".join(x for x in lines if x))
+    messages = [{"role": "system", "content": FILL_SYSTEM}, {"role": "user", "content": user}]
+    r, model_name = (_run_local(local, messages, 250, temperature=0.6, use_adapter=False) if local
+                     else _run_api(req["api"], messages, 400))
+    data = _parse(r["text"], local)
+    name = str(data.get("label") or data.get("name") or data.get("option") or "").strip().strip("「」\"")[:30]
+    if not name:
+        raise IdeaError("模型没有给出选项，请重试")
+    return {"kind": "fill", "mode": "option", "result": {"option": {"label": name, "desc": str(data.get("desc") or "").strip()[:120]}},
+            "model": model_name, "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]}}
+
+
+_SENTENCE_END ="。！？!?…」”"
 
 
 def _plain_value(text: str, ftype: str, truncated: bool) -> str:

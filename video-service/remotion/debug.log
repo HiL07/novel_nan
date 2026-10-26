@@ -1,0 +1,28 @@
+[1026/202624.693:ERROR:net\disk_cache\simple\simple_backend_impl.cc:81] Failed to create directory: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\js
+[1026/202624.693:ERROR:net\disk_cache\simple\simple_backend_impl.cc:81] Failed to create directory: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\wasm
+[1026/202624.695:ERROR:content\browser\network_sandbox.cc:514] Failed to create network context data directory C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Network: 拒绝访问。 (0x5)
+[1026/202624.695:ERROR:net\disk_cache\simple\simple_backend_impl.cc:81] Failed to create directory: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\js
+[1026/202624.695:ERROR:net\disk_cache\simple\simple_backend_impl.cc:81] Failed to create directory: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\wasm
+[1026/202624.696:ERROR:net\disk_cache\simple\simple_backend_impl.cc:749] Simple Cache Backend: wrong file structure on disk: 1 path: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\js
+[1026/202624.696:ERROR:net\disk_cache\simple\simple_backend_impl.cc:749] Simple Cache Backend: wrong file structure on disk: 1 path: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Code Cache\wasm
+[1026/202624.696:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 系统找不到指定的路径。 (0x3)
+[1026/202624.696:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 操作成功完成。 (0x0)
+[1026/202624.697:ERROR:net\disk_cache\disk_cache.cc:293] Unable to create cache
+[1026/202624.697:ERROR:net\disk_cache\disk_cache.cc:293] Unable to create cache
+[1026/202624.759:ERROR:content\browser\devtools\devtools_http_handler.cc:316] Error writing DevTools active port to file C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\DevToolsActivePort: 拒绝访问。 (0x5)
+[1026/202624.763:ERROR:content\browser\network_sandbox_grant_result_helper.cc:108] Encountered error while migrating network context data or granting sandbox access for C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\Network. Result: 2: 操作成功完成。 (0x0)
+[1026/202624.763:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 系统找不到指定的路径。 (0x3)
+[1026/202624.764:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 系统找不到指定的路径。 (0x3)
+[1026/202624.764:ERROR:net\disk_cache\cache_util_win.cc:25] Unable to move the cache: 系统找不到指定的路径。 (0x3)
+[1026/202624.764:ERROR:net\disk_cache\disk_cache.cc:293] Unable to create cache
+[1026/202624.764:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[1026/202624.764:ERROR:net\disk_cache\disk_cache.cc:293] Unable to create cache
+[1026/202624.765:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[1026/202624.765:ERROR:net\disk_cache\disk_cache.cc:293] Unable to create cache
+[1026/202624.765:ERROR:gpu\ipc\host\gpu_disk_cache.cc:737] Gpu Cache Creation failed: -2
+[1026/202624.767:WARNING:content\browser\btm\btm_database.cc:129] Failed to initialize the BTM SQLite database.
+[1026/202627.761:WARNING:components\leveldb_proto\internal\leveldb_database.cc:102] Unable to open C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\PersistentOriginTrials: IO error: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\PersistentOriginTrials/LOCK: File not found. (ChromeMethodBFE: 15::LockFile::4)
+[1026/202630.788:WARNING:components\leveldb_proto\internal\leveldb_database.cc:102] Unable to open C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata: IO error: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata/LOCK: File not found. (ChromeMethodBFE: 15::LockFile::4)
+[1026/202633.820:WARNING:components\leveldb_proto\internal\leveldb_database.cc:102] Unable to open C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata: IO error: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata/LOCK: File not found. (ChromeMethodBFE: 15::LockFile::4)
+[1026/202636.853:WARNING:components\leveldb_proto\internal\leveldb_database.cc:102] Unable to open C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata: IO error: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata/LOCK: File not found. (ChromeMethodBFE: 15::LockFile::4)
+[1026/202639.873:WARNING:components\leveldb_proto\internal\leveldb_database.cc:102] Unable to open C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata: IO error: C:\Users\DAIJIA~1\AppData\Local\Temp\puppeteer_dev_chrome_profile-1pNZII\Default\shared_proto_db\metadata/LOCK: File not found. (ChromeMethodBFE: 15::LockFile::4)

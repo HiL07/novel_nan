@@ -48,6 +48,8 @@ public class SchemaMigrations {
         // 解析过程（每次尝试成败）+ 失败记录的原因：解析管理里直接查看
         addColumn("crawl_site_rule", "error", "TEXT");
         addColumn("crawl_site_rule", "attempt_log", "TEXT");
+        // 文件管理显示小说章节数（老文件由 FileService 启动后在后台补数）
+        addColumn("file", "chapter_count", "INTEGER");
     }
 
     /** 列不存在时添加，返回是否新加 */

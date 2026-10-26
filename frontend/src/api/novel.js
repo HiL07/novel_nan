@@ -39,3 +39,24 @@ export function getExtract(id) {
 export function updateExtractResult(id, result) {
   return request.post(`/api/novel/extract/${id}/result`, result).then((res) => res.data)
 }
+
+const SITE_TAG = /[[【(（][^\]】)）]*\.[A-Za-z]{2,}[^\]】)）]*[\]】)）]/g
+const COPY_SUFFIX = /(\s*[(（]\d{1,3}[)）]|\s*-\s*副本)+$/
+
+/**
+ * 文件名 → 书名（与后端 MaterialService.bookOf 一致）：去扩展名、站点标记、副本后缀、书名号，
+ * 用于判断同一本小说是否已提取过
+ */
+export function bookOf(fileName) {
+  if (!fileName || !fileName.trim()) return ''
+  let name = fileName.replace(/\\/g, '/')
+  name = name.substring(name.lastIndexOf('/') + 1)
+  const dot = name.lastIndexOf('.')
+  if (dot > 0) name = name.substring(0, dot)
+  const cleaned = name.replace(SITE_TAG, '').replace(COPY_SUFFIX, '').trim()
+  name = cleaned || name.trim()
+  if (name.startsWith('《') && name.endsWith('》') && name.length > 2) {
+    name = name.substring(1, name.length - 1).trim()
+  }
+  return name
+}

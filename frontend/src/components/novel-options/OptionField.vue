@@ -5,8 +5,9 @@
       <el-tag v-if="editMode" size="small" type="info" effect="plain">{{ typeLabel }}</el-tag>
       <el-tag v-if="field.custom" size="small" type="warning" effect="plain">自定义</el-tag>
       <span v-if="field.desc" class="field-desc">{{ field.desc }}</span>
-      <template v-if="ai?.enabled.value && aiFillable(field)">
-        <!-- 文本类：润色（在框内内容上扩写）/ 生成（框内文字当方向）；选择 / 标签类只有生成 -->
+      <template v-if="ai?.enabled.value && aiFillable(field) && !choice">
+        <!-- 文本类：润色（在框内内容上扩写）/ 生成（框内文字当方向）；标签只有生成；
+             单选 / 多选的 AI 在「自定义」里（只从已有选项里挑一个没有实际用处） -->
         <span v-if="isTextField(field)" class="ai-btn" :title="polishTip">
           <el-button
             link
@@ -49,7 +50,7 @@
 
     <!-- 选择类：选项 + 选中项的细分选项 -->
     <template v-if="choice">
-      <ChoiceWidget :field="field" :value="value" />
+      <ChoiceWidget :field="field" :value="value" :path="path" :container="container" :siblings="siblings" />
       <div v-for="o in expandedOptions" :key="o.value" class="sub-block">
         <div class="sub-title">「{{ o.label }}」的细分选项</div>
         <OptionField
@@ -167,7 +168,7 @@ const polishTip = computed(() => (hasText.value
   : 'AI 润色：先在框内写几句，AI 在此基础上扩写；框内为空时不可用') + serialTip.value)
 const generateTip = computed(() => (isTextField(props.field)
   ? 'AI 生成：把框内文字当作大致方向（可留空），结合其他设定写出新内容并替换，可撤销'
-  : 'AI 生成：结合其他设定为这一项选择 / 生成内容') + serialTip.value)
+  : 'AI 生成：结合其他设定生成标签') + serialTip.value)
 
 /** 选中的、且有细分选项（或处于编辑模式可添加细分）的选项 */
 const expandedOptions = computed(() =>

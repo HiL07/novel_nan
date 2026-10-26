@@ -15,11 +15,11 @@
         </el-form-item>
         <el-form-item label="每段最多">
           <el-input-number v-model="opts.maxPerChunk" :min="1" :max="5" />
-          <span class="hint">条（每约 6000 字为一段）；越多越全，token 消耗也越高</span>
+          <span class="hint">条 / 段。小说按约 6000 字切段逐段交给模型，每段最多挑出这么多条素材（各类型合计）；越大越全，也越费 token</span>
         </el-form-item>
         <el-form-item label="候选上限">
           <el-input-number v-model="opts.maxCandidates" :min="20" :max="3000" :step="100" />
-          <span class="hint">条；全书合并去重后超过时只保留出现章节最多的。同一本书再次提取时，与已有候选 / 素材重复的会自动跳过</span>
+          <span class="hint">条。全书提取完后同类同名的素材合并为一条，最多放这么多条进「待确认」，超出时保留出现章节最多的；再次提取同一本书时已有的会跳过</span>
         </el-form-item>
         <el-form-item label="特别关注">
           <el-input
@@ -69,7 +69,10 @@ function confirm() {
   color: #606266;
 }
 .hint {
+  flex: 1;
+  min-width: 0;
   margin-left: 10px;
+  line-height: 1.5;
   font-size: 12px;
   color: #909399;
 }

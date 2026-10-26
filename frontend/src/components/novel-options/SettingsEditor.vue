@@ -338,22 +338,24 @@ function aiModelReady() {
   return true
 }
 
-/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面；scope：会写到的位置（见 aiLocked） */
-async function aiCall(fill, busyKey, extraHint = '', scope = []) {
+/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面；scope：会写到的位置（见 aiLocked）；
+ *  overrides：替换请求里的字段（如自定义选项只用自己选的素材：{materialIds, autoMaterials: false}） */
+async function aiCall(fill, busyKey, extraHint = '', scope = [], overrides = {}) {
   if (aiRunning.has(busyKey) || aiLocked(scope)) {
     ElMessage.warning(aiCfg.source === 'local' ? '本地模型一次只能处理一个 AI 请求，请等上一个完成' : '这一处正在由 AI 生成，请稍候')
     return null
   }
   if (!aiModelReady()) return null
   const hint = [extraHint.trim(), aiCfg.hint.trim()].filter(Boolean).join('；').slice(0, 500)
-  if (aiCfg.autoMaterials && !hint) {
+  const autoMaterials = overrides.autoMaterials ?? aiCfg.autoMaterials
+  if (autoMaterials && !hint) {
     ElMessage.warning('自动匹配素材需要在「AI 填写设置」里填写补充要求')
     return null
   }
   aiRunning.set(busyKey, scope)
   try {
     const res = await generateIdeas(props.novelId, {
-      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: aiCfg.autoMaterials
+      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials, ...overrides
     })
     if (res.code !== 0) throw new Error(res.message || 'AI 填写失败')
     return res.data.result
@@ -413,6 +415,23 @@ async function aiFillField(field, container, siblings, path, action = 'generate'
       }
     }, '撤销')])
   })
+}
+
+/**
+ * 选择类字段「自定义」里的 AI：polish = 把框里写的整理成一个选项；generate = 按框里的方向 / 选的素材设计新选项。
+ * 素材只用这个自定义框自己选的（不用「AI 填写设置」里的素材和自动匹配）。返回 {label, desc} 草稿，由作者确认后再添加。
+ */
+async function aiCustomOption(field, { action, seed, materials, path, container, siblings }) {
+  if (!seed && !materials.length) {
+    ElMessage.warning('先在自定义框里写点内容，或选择素材')
+    return null
+  }
+  const r = await aiCall({
+    mode: 'option', path, fields: [fieldSchema(field)], action, seed,
+    current: siblings ? currentValues(siblings, container, field.key) : {}
+  }, `${busyKeyOf(path, field)}|option`, '', [...path, field.label],
+  { materialIds: materials.map((m) => m.id), autoMaterials: false })
+  return r?.option || null
 }
 
 /** 分组新增 count 项（如关键情节节点、角色），每项的文本 / 标签 / 选择字段都由 AI 填写；
@@ -506,7 +525,8 @@ async function fillCategory(cat) {
 provide(EDITOR_KEY, {
   editMode, addField, removeField, addOption, removeOption,
   ai: {
-    enabled: aiEnabled, loading: aiLoading, locked: aiLocked, busyKeyOf, fillField: aiFillField, genItems: aiGenItems, fillItem: aiFillItem,
+    enabled: aiEnabled, loading: aiLoading, locked: aiLocked, busyKeyOf, fillField: aiFillField, customOption: aiCustomOption,
+    excludeBooks: blockedBooks, genItems: aiGenItems, fillItem: aiFillItem,
     chat: aiChat, cfg: aiCfg, apiModel: computed(() => props.ai?.apiModel)
   }
 })

@@ -12,6 +12,9 @@ import { inject } from 'vue'
  *         loading(key) → 这个请求正在进行, locked(scope) → 写到 scope 的按钮要禁用
  *           （本地模型：有请求就全锁；大模型：只锁范围重叠的，见 aiFill.scopesOverlap），
  *         fillField(field, container, siblings, path, action: polish|generate),  // 文本：润色扩写 / 按方向生成
+ *         customOption(field, {action, seed, materials, path, container, siblings}) → {label, desc} | null,
+ *                                                         // 选择类「自定义」：AI 润色 / 生成一个选项（素材只用这次选的）
+ *         excludeBooks: Ref<string[]>,                    // 屏蔽的来源书（素材选择器用）
  *         genItems(field, list, path, count, concept?) → 新增项[],
  *         fillItem(field, item, path),                      // 补全分组中某一项（如某个角色）
  *         chat(character, messages, {scene, userRole}) → 回复文本 | null,   // 角色试聊

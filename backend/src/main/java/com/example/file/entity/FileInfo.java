@@ -34,6 +34,9 @@ public class FileInfo {
     /** 扩展名（不含点），如 png */
     private String fileExt;
 
+    /** 章节数（txt / md 自己逐个数出的标题行；0 = 未识别到章节，null = 未统计 / 非文本，-1 = 读不了） */
+    private Integer chapterCount;
+
     /** 上传时间 */
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime createTime;

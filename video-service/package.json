@@ -1,0 +1,16 @@
+{
+  "name": "nan-novel-video-service",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "生成视频：小说 → Opus 编剧分镜 → 视觉资产 → 视频镜头 → Claude Code 剪辑 → Remotion 成片",
+  "scripts": {
+    "start": "node src/server.js",
+    "setup": "cd remotion && npm install"
+  },
+  "dependencies": {
+    "express": "5.2.1",
+    "msedge-tts": "2.0.9",
+    "zod": "4.6.5"
+  }
+}

@@ -37,11 +37,22 @@
               :alt="item.fileName"
             />
             <el-icon v-else class="file-icon"><component :is="iconOf(item)" /></el-icon>
+            <span
+              v-if="isExtractable(item.fileExt) && extractInfo(item)"
+              class="extract-badge"
+              :class="`is-${extractInfo(item).state}`"
+              :title="extractInfo(item).tip"
+            >
+              {{ extractInfo(item).label }}
+            </span>
           </div>
 
           <div class="file-card-info">
             <span class="file-name">{{ item.fileName }}</span>
-            <span class="file-size">{{ formatSize(item.fileSize) }}</span>
+            <span class="file-size">
+              {{ formatSize(item.fileSize) }}
+              <template v-if="chapterText(item)"> · <span :title="chapterTip(item)">{{ chapterText(item) }}</span></template>
+            </span>
           </div>
 
           <el-icon
@@ -55,7 +66,7 @@
           <el-icon
             v-if="isExtractable(item.fileExt)"
             class="file-extract"
-            title="小说提取"
+            :title="extractInfo(item) ? `小说提取（${extractInfo(item).tip}，仍可再次提取）` : '小说提取'"
             @click.stop="startExtract(item)"
           >
             <MagicStick />
@@ -104,8 +115,11 @@
               {{ previewType === 'pdf' ? '复制地址' : '复制全文' }}
             </el-button>
             <el-button v-if="isExtractable(current.fileExt)" type="success" @click="startExtract(current)">
-              小说提取
+              {{ extractInfo(current)?.state === 'done' ? '再次提取' : '小说提取' }}
             </el-button>
+            <span v-if="isExtractable(current.fileExt) && extractInfo(current)" class="extract-hint">
+              {{ extractInfo(current).tip }}
+            </span>
           </div>
         </div>
       </template>
@@ -123,7 +137,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, fetchTextPage, listFiles, previewUrl } from '@/api/file'
-import { isExtractable, submitExtract } from '@/api/novel'
+import { bookOf, isExtractable, listExtracts, submitExtract } from '@/api/novel'
 import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
 import { errorMessage } from '@/api/request'
 
@@ -163,8 +177,46 @@ function countOf(name) {
     : files.value.filter((f) => classify(f.fileExt) === name).length
 }
 
+/**
+ * 已提取的小说：按书名（bookOf，去扩展名 / 站点标记 / 副本后缀）比对提取任务。
+ * 只做提示，不禁止再次提取（可能是同名的另一本书，或之前提取不完整）
+ */
+const extractsByBook = ref(new Map())
+async function loadExtracts() {
+  try {
+    const res = await listExtracts()
+    if (res.code !== 0) return
+    const map = new Map()
+    for (const t of res.data || []) {
+      const book = bookOf(t.fileName)
+      if (!book) continue
+      const e = map.get(book) || { done: 0, running: 0, last: null }
+      if (t.status === 'SUCCEEDED') {
+        e.done++
+        if (!e.last || (t.createTime || '') > (e.last.createTime || '')) e.last = t
+      } else if (t.status === 'QUEUED' || t.status === 'RUNNING') {
+        e.running++
+      }
+      map.set(book, e)
+    }
+    extractsByBook.value = map
+  } catch (e) {
+    // 只影响「已提取」标记，不打扰文件列表
+  }
+}
+
+function extractInfo(item) {
+  const e = extractsByBook.value.get(bookOf(item?.fileName))
+  if (!e) return null
+  if (e.running) return { state: 'running', label: '提取中', tip: `同名小说有 ${e.running} 个提取任务进行中` }
+  if (!e.done) return null
+  const time = e.last?.createTime ? `，最近 ${String(e.last.createTime).slice(0, 16)}` : ''
+  return { state: 'done', label: '已提取', tip: `同名小说已提取 ${e.done} 次${time}` }
+}
+
 async function loadFiles() {
   loading.value = true
+  loadExtracts()
   try {
     const res = await listFiles()
     if (res.code === 0) {
@@ -285,6 +337,19 @@ async function doExtract(options) {
   }
 }
 
+/** 章节数：后端逐个数章节标题行得出（不看最后一章写的序号）；null = 非 txt/md 或尚未统计 */
+function chapterText(item) {
+  const n = item.chapterCount
+  if (n == null || n < 0) return ''
+  return n > 0 ? `${n} 章` : '未识别章节'
+}
+
+function chapterTip(item) {
+  return item.chapterCount > 0
+    ? '按「第X章 / Chapter N」等标题行逐个数出的章节数，与小说提取切分的章节一致'
+    : '没有找到「第X章」之类的章节标题，提取时会整篇当作一章'
+}
+
 function formatSize(bytes) {
   if (bytes == null) return '-'
   if (bytes < 1024) return `${bytes} B`
@@ -403,6 +468,30 @@ onActivated(loadFiles)
 }
 .file-extract:hover {
   opacity: 1;
+}
+.file-card-preview {
+  position: relative;
+}
+.extract-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 8px;
+  color: #ffffff;
+}
+.extract-badge.is-done {
+  background: var(--el-color-success);
+}
+.extract-badge.is-running {
+  background: var(--el-color-warning);
+}
+.extract-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #909399;
 }
 
 /* 预览弹窗 */

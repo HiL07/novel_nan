@@ -1,12 +1,15 @@
 package com.example.file.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
 import com.example.file.entity.FileInfo;
 import com.example.file.mapper.FileMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -115,6 +118,7 @@ public class FileService {
         info.setFileSize(size);
         info.setContentType(contentType);
         info.setFileExt(fileExt);
+        info.setChapterCount(countChapters(fileExt, targetFile));
         info.setCreateTime(LocalDateTime.now());
         try {
             fileMapper.insert(info);
@@ -126,6 +130,54 @@ public class FileService {
 
         // 9. 返回（含自增 id）
         return info;
+    }
+
+    /** 只有 txt / md 能直接数章节（docx / pdf 在 Java 侧不解析） */
+    private static boolean isCountable(String ext) {
+        return "txt".equals(ext) || "md".equals(ext);
+    }
+
+    /** 数章节数；非文本返回 null，读取 / 解码失败返回 -1（不再重试） */
+    private Integer countChapters(String ext, Path file) {
+        if (!isCountable(ext)) {
+            return null;
+        }
+        try {
+            return ChapterCounter.count(decodeText(Files.readAllBytes(file)));
+        } catch (IOException | RuntimeException e) {
+            log.warn("统计章节数失败：{}", file, e);
+            return -1;
+        }
+    }
+
+    /** 启动后在后台给还没统计过的 txt / md 补章节数（老文件），不拖慢启动 */
+    @EventListener(ApplicationReadyEvent.class)
+    public void backfillChapterCounts() {
+        Thread t = new Thread(() -> {
+            List<FileInfo> pending = fileMapper.selectList(new LambdaQueryWrapper<FileInfo>()
+                    .isNull(FileInfo::getChapterCount)
+                    .in(FileInfo::getFileExt, "txt", "md"));
+            if (pending.isEmpty()) {
+                return;
+            }
+            Path rootPath = Paths.get(storagePath).toAbsolutePath().normalize();
+            int n = 0;
+            for (FileInfo f : pending) {
+                Path file = rootPath.resolve(f.getStoragePath()).normalize();
+                Integer count = file.startsWith(rootPath) ? countChapters(f.getFileExt(), file) : Integer.valueOf(-1);
+                try {
+                    fileMapper.update(null, new LambdaUpdateWrapper<FileInfo>()
+                            .eq(FileInfo::getId, f.getId())
+                            .set(FileInfo::getChapterCount, count));
+                    n++;
+                } catch (RuntimeException e) {
+                    log.warn("保存章节数失败，文件 id={}", f.getId(), e);
+                }
+            }
+            log.info("已补统计 {} 个文本文件的章节数", n);
+        }, "chapter-count-backfill");
+        t.setDaemon(true);
+        t.start();
     }
 
     /**
