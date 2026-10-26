@@ -66,7 +66,7 @@
             <div v-if="activeCategory.desc" class="cat-desc">{{ activeCategory.desc }}</div>
           </div>
           <el-tooltip v-if="aiEnabled" content="让 AI 填写本分类中还没填的文本 / 标签 / 选择项（分组用各自的「AI 生成」；数字和滑块请自己定）" placement="top">
-            <el-button :icon="MagicStick" type="primary" plain size="small" :loading="aiBusy === `cat:${activeCategory.key}`" :disabled="!!aiBusy" @click="fillCategory(activeCategory)">
+            <el-button :icon="MagicStick" type="primary" plain size="small" :loading="aiLoading(`cat:${activeCategory.key}`)" :disabled="aiLocked([activeCategory.label])" @click="fillCategory(activeCategory)">
               AI 补全本分类
             </el-button>
           </el-tooltip>
@@ -152,8 +152,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, provide, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, h, onMounted, provide, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { Collection, CopyDocument, Delete, Edit, MagicStick, Plus, RefreshLeft } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import FieldEditor from './FieldEditor.vue'
@@ -162,7 +162,7 @@ import SpecTree from './SpecTree.vue'
 import AiFillSettings from './AiFillSettings.vue'
 import { generateIdeas } from '@/api/novelGen'
 import { errorMessage } from '@/api/request'
-import { aiFillable, applyValue, currentValues, fieldSchema } from '@/novel-options/aiFill'
+import { NEW_ITEMS, aiFillable, applyValue, currentValues, fieldSchema, isTextField, scopesOverlap } from '@/novel-options/aiFill'
 import { getOptionSchema } from '@/api/novelOptions'
 import { EDITOR_KEY } from '@/novel-options/editor'
 import { applyMaterial } from '@/novel-options/materialApply'
@@ -304,7 +304,15 @@ watch(() => props.ai?.model, (m) => {
     adapterId: m.source === 'local' ? m.adapterId || '' : ''
   })
 }, { immediate: true })
-const aiBusy = ref('') // 正在进行的 AI 请求标识（同一时间只发一个）
+// 进行中的 AI 请求：标识 → 作用范围（位置路径）。本地模型一次只能处理一个（显卡上一个模型、生成串行）；
+// 大模型可以同时发多个，只锁住会写到同一处的按钮（范围互为前缀，见 aiFill.scopesOverlap）
+const aiRunning = reactive(new Map())
+const aiLoading = (key) => aiRunning.has(key)
+function aiLocked(scope) {
+  if (!aiRunning.size) return false
+  if (aiCfg.source === 'local') return true
+  return [...aiRunning.values()].some((s) => scopesOverlap(s, scope))
+}
 // 屏蔽的来源书（按工作区记住，与「AI 构思」共用）：这些书的素材不参与 AI 填写（保留的素材除外）
 const blockedBooks = useBlockedBooks(props.novelId)
 const setBlockedBooks = (v) => (blockedBooks.value = v)
@@ -330,10 +338,10 @@ function aiModelReady() {
   return true
 }
 
-/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面 */
-async function aiCall(fill, busyKey, extraHint = '') {
-  if (aiBusy.value) {
-    ElMessage.warning('上一个 AI 请求还没完成')
+/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面；scope：会写到的位置（见 aiLocked） */
+async function aiCall(fill, busyKey, extraHint = '', scope = []) {
+  if (aiRunning.has(busyKey) || aiLocked(scope)) {
+    ElMessage.warning(aiCfg.source === 'local' ? '本地模型一次只能处理一个 AI 请求，请等上一个完成' : '这一处正在由 AI 生成，请稍候')
     return null
   }
   if (!aiModelReady()) return null
@@ -342,7 +350,7 @@ async function aiCall(fill, busyKey, extraHint = '') {
     ElMessage.warning('自动匹配素材需要在「AI 填写设置」里填写补充要求')
     return null
   }
-  aiBusy.value = busyKey
+  aiRunning.set(busyKey, scope)
   try {
     const res = await generateIdeas(props.novelId, {
       ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: aiCfg.autoMaterials
@@ -353,26 +361,58 @@ async function aiCall(fill, busyKey, extraHint = '') {
     ElMessage.error({ message: errorMessage(e, 'AI 填写失败'), duration: 8000 })
     return null
   } finally {
-    aiBusy.value = ''
+    aiRunning.delete(busyKey)
   }
 }
 
 const busyKeyOf = (path, field) => `${path.join('/')}|${field.key}`
 
-/** 填写单个字段（已有内容时先确认覆盖）；siblings：同一容器的字段，用来告诉模型已填的内容 */
-async function aiFillField(field, container, siblings, path) {
-  if (isFilled(field, container)) {
+/**
+ * 填写单个字段；siblings：同一容器的字段，用来告诉模型已填的内容。
+ * 文本类字段（action）：polish = AI 润色，保留框内已写内容并扩写；generate = AI 生成，框内文字只当大致方向（可空）。
+ * 文本写入后可「撤销」；选择 / 标签字段已有内容时先确认覆盖。
+ */
+async function aiFillField(field, container, siblings, path, action = 'generate') {
+  const text = isTextField(field)
+  const before = container[field.key]
+  const seed = text ? String(before ?? '').trim() : ''
+  if (action === 'polish' && !seed) {
+    ElMessage.warning('框里还没有内容，无法润色；可以先写几句，或用「AI 生成」')
+    return
+  }
+  if (!text && isFilled(field, container)) {
     try {
       await ElMessageBox.confirm(`「${field.label}」已有内容，用 AI 生成的内容覆盖？`, 'AI 填写', { type: 'warning' })
     } catch {
       return
     }
   }
-  const r = await aiCall({ mode: 'field', path, fields: [fieldSchema(field)], current: currentValues(siblings, container, field.key) },
-    busyKeyOf(path, field))
+  const r = await aiCall({
+    mode: 'field', path, fields: [fieldSchema(field)], current: currentValues(siblings, container, field.key),
+    ...(text ? { action, seed } : {})
+  }, `${busyKeyOf(path, field)}|${action}`, '', [...path, field.label])
   if (!r) return
-  if (applyValue(field, container, r.values?.[field.key], addOption)) ElMessage.success(`AI 已填写「${field.label}」`)
-  else ElMessage.warning('模型没有给出这个字段的内容，请重试')
+  if (!applyValue(field, container, r.values?.[field.key], addOption)) {
+    ElMessage.warning('模型没有给出这个字段的内容，请重试')
+    return
+  }
+  if (!text) {
+    ElMessage.success(`AI 已填写「${field.label}」`)
+    return
+  }
+  // 文本：给一个「撤销」，恢复成 AI 写入前的内容
+  const n = ElNotification({
+    type: 'success',
+    title: `AI 已${action === 'polish' ? '润色' : '生成'}「${field.label}」`,
+    duration: 8000,
+    message: h('span', ['可以继续修改，或 ', h('a', {
+      style: 'cursor: pointer; color: var(--el-color-primary)',
+      onClick: () => {
+        container[field.key] = before
+        n.close()
+      }
+    }, '撤销')])
+  })
 }
 
 /** 分组新增 count 项（如关键情节节点、角色），每项的文本 / 标签 / 选择字段都由 AI 填写；
@@ -388,7 +428,7 @@ async function aiGenItems(field, list, path, count, concept = '') {
   const r = await aiCall({
     mode: 'items', path: [...path, field.label], itemLabel: label, count, fields: fields.map(fieldSchema),
     existing: nameField ? list.map((it) => it[nameField.key]).filter(Boolean) : []
-  }, busyKeyOf(path, field), concept ? `${label}构想：${concept}` : '')
+  }, busyKeyOf(path, field), concept ? `${label}构想：${concept}` : '', [...path, field.label, NEW_ITEMS])
   if (!r) return []
   const added = []
   for (const it of r.items || []) {
@@ -409,7 +449,7 @@ async function aiFillItem(field, item, path) {
     return
   }
   const r = await aiCall({ mode: 'category', path, fields: targets.map(fieldSchema), current: currentValues(field.fields, item) },
-    `item:${item._id}`)
+    `item:${item._id}`, '', path)
   if (!r) return
   const filled = targets.filter((f) => applyValue(f, item, r.values?.[f.key], addOption))
   ElMessage.success(`AI 补全了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)
@@ -457,7 +497,7 @@ async function fillCategory(cat) {
     return
   }
   const r = await aiCall({ mode: 'category', path: [cat.label], fields: targets.map(fieldSchema), current: currentValues(cat.fields, container) },
-    `cat:${cat.key}`)
+    `cat:${cat.key}`, '', [cat.label])
   if (!r) return
   const filled = targets.filter((f) => applyValue(f, container, r.values?.[f.key], addOption))
   ElMessage.success(`AI 填写了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)
@@ -466,7 +506,7 @@ async function fillCategory(cat) {
 provide(EDITOR_KEY, {
   editMode, addField, removeField, addOption, removeOption,
   ai: {
-    enabled: aiEnabled, busy: aiBusy, busyKeyOf, fillField: aiFillField, genItems: aiGenItems, fillItem: aiFillItem,
+    enabled: aiEnabled, loading: aiLoading, locked: aiLocked, busyKeyOf, fillField: aiFillField, genItems: aiGenItems, fillItem: aiFillItem,
     chat: aiChat, cfg: aiCfg, apiModel: computed(() => props.ai?.apiModel)
   }
 })

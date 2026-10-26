@@ -82,7 +82,9 @@
         <!-- ===================== 构思 ===================== -->
         <el-tab-pane label="AI 构思" name="ideas" lazy>
           <IdeaPanel
+            ref="ideaRef"
             :novel="novel"
+            :read-settings="readSettings"
             :local-models="localModels"
             :adapters="adapters"
             :api-model="apiModel"
@@ -375,8 +377,21 @@ const loadError = ref('')
 const tab = ref('write')
 const titleDraft = ref('')
 const editorRef = ref()
+const ideaRef = ref()
 const settingsDirty = ref(false)
 const savingSettings = ref(false)
+
+/** AI 构思用：设定编辑器里的全部分类（含未保存的新增分类）+ 当前设定（只含有内容的分类） */
+function readSettings() {
+  const editor = editorRef.value
+  const config = editor ? editor.getConfig() : novel.value?.settings.config
+  const spec = editor ? editor.getSpec() : novel.value?.settings.spec
+  return {
+    categories: (config?.categories || []).map((c) => ({ key: c.key, label: c.label, custom: !!c.custom })),
+    spec: spec || []
+  }
+}
+watch(tab, (t) => t === 'ideas' && ideaRef.value?.refreshSettings())
 
 const view = ref('new')
 const viewChapter = ref(null)

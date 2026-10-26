@@ -14,7 +14,7 @@ from ..local import inference, jobs as local_jobs, registry
 from . import chapter as chapter_mod, spec as spec_mod, store
 from .backends import GenerationError, GenParams, LocalHFGenerator
 
-KINDS = ("title", "outline", "chapter", "fill", "direction", "chat")
+KINDS = ("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat")
 CHAT_TURNS = 20             # 角色试聊带上最近多少条消息
 CHAT_MESSAGE_CHARS = 1000
 CHAT_SETTING_CHARS = 1500   # 试聊时附带的世界观 / 核心设定上限
@@ -31,6 +31,9 @@ FILL_TOKEN_BUDGET = {"text": 40, "textarea": 300, "tags": 60, "single": 25, "mul
 MAX_MATERIALS = 20
 MATERIAL_TEXT_CHARS = 260   # 单条素材写进提示词的上限，控制总长度
 LOCAL_MAX_OUTLINE = 15     # 本地小模型一次规划太多章容易跑题 / 超时
+HINT_CHARS = 3000          # 构思方向（可被 AI 润色扩写，较长）
+CURRENT_TAIL_CHARS = 400   # 「当前章节」附带的正文结尾
+MAX_CHOSEN = 10            # 选定的后续走向最多几条
 CATEGORY_LABELS = {"world": "世界观", "faction": "势力", "character": "角色", "monster": "怪物", "location": "地点",
                    "item": "物品功法", "plot": "情节"}
 
@@ -54,6 +57,14 @@ CHAT_SYSTEM = """你正在扮演一部小说中的角色，和作者进行角色
 2. 严格遵守下面的【角色卡】和【世界设定】；角色不知道的事情就表现得不知道，不要凭空给角色加设定之外的能力。
 3. 回复用简体中文，1~4 小段，合计 200 字以内；动作、神态写在（）里，台词直接写。
 4. 有来有往：可以反问、表露情绪、推进话题，让对话自然生动。"""
+
+
+HINT_POLISH_SYSTEM = """你是网络小说策划编辑，帮作者把粗略的构思扩写成完整、具体的故事构思。只输出 JSON，不要任何多余文字。
+规则：
+1. 只依据作者给出的这段构思，不要参考或假设任何其他设定、章节。
+2. 保留作者的全部想法、人物和走向，不换题材、不推翻原有情节。
+3. 大幅扩写：把每个要点展开——人物处境与动机、核心冲突、关键事件的前因后果、转折与悬念、情感线；
+   可以补充为原有情节服务的细节，但不要另起与原文无关的主线。"""
 
 
 FILL_PLAIN_SYSTEM = """你是资深网络小说策划编辑，正在帮作者补全小说设定。
@@ -81,8 +92,9 @@ def _material_lines(materials: list[dict]) -> list[str]:
     return lines
 
 
-def _context(novel: dict, spec: list | None = None) -> tuple[str, list[dict]]:
-    """工作区已有内容：书名、设定（核心 + 卡片；spec 为编辑器中尚未保存的当前设定时优先用它）、大纲、已写章节摘要。"""
+def _context(novel: dict, spec: list | None = None, current: bool = True, past: bool = True) -> tuple[str, list[dict]]:
+    """工作区已有内容：书名、设定（核心 + 卡片；spec 为编辑器中尚未保存的当前设定时优先用它）、大纲，
+    以及已写章节：past = 前情概要 + 更早章节的摘要，current = 最近写完的一章（摘要 + 结尾）。"""
     cons = spec_mod.build(spec if spec is not None else novel["settings"].get("spec"))
     parts = [f"【当前书名】{novel['title']}"]
     settings = cons.core + [c.text for c in cons.cards]
@@ -94,23 +106,45 @@ def _context(novel: dict, spec: list | None = None) -> tuple[str, list[dict]]:
         plan = "\n".join(f"第{c['index']}章《{c.get('title', '')}》：{c.get('goal', '')}" for c in outline["chapters"])
         parts.append(f"【已采用的大纲】\n一句话：{outline.get('logline', '')}\n{outline.get('synopsis', '')}\n{plan}")
     chapters = store.list_chapters(novel["id"])
-    if novel.get("arcSummary"):
-        parts.append(f"【前情概要（至第{novel['arcUpTo']}章）】{novel['arcSummary']}")
-    written = [c for c in chapters if c["index"] > novel.get("arcUpTo", 0) and c.get("summary")][-10:]
-    if written:
-        parts.append("【已写章节】\n" + "\n".join(f"第{c['index']}章《{c.get('title') or ''}》：{c['summary']}" for c in written))
+    last = chapters[-1] if chapters else None
+    if past:
+        if novel.get("arcSummary"):
+            parts.append(f"【前情概要（至第{novel['arcUpTo']}章）】{novel['arcSummary']}")
+        older = [c for c in chapters if c["index"] > novel.get("arcUpTo", 0) and c.get("summary")
+                 and c is not last][-10:]
+        if older:
+            parts.append("【过去章节】\n" + "\n".join(f"第{c['index']}章《{c.get('title') or ''}》：{c['summary']}" for c in older))
+    if current and last:
+        text = (store.get_chapter(novel["id"], last["index"]).get("text") or "").strip()
+        lines = [f"【当前章节：第{last['index']}章《{last.get('title') or ''}》（最近写完的一章）】"]
+        if last.get("summary"):
+            lines.append(f"摘要：{last['summary']}")
+        if text:
+            lines.append(f"结尾：…{text[-CURRENT_TAIL_CHARS:]}")
+        parts.append("\n".join(lines))
     return "\n\n".join(parts), chapters
 
 
-def _task(kind: str, hint: str, count: int, next_index: int, purpose: str = "") -> tuple[str, int]:
-    hint_line = f"作者的构思方向：{hint}\n" if hint else ""
+def _task(kind: str, hint: str, count: int, next_index: int, purpose: str = "", tone: str = "",
+          rejected: list[str] | None = None, chosen: list[str] | None = None) -> tuple[str, int]:
+    tone_line = f"作者定下的基调：{tone}（必须贴合这个基调）\n" if tone else ""
+    hint_line = tone_line + (f"作者的构思方向：{hint}\n" if hint else "")
+    if chosen:
+        hint_line += "作者选定的后续走向（必须沿着这些走向展开）：\n" + "\n".join(f"- {c}" for c in chosen) + "\n"
     if kind == "direction":
-        use = f"这些方向用于：{purpose}。\n" if purpose else ""
-        base = (f"作者已有的初步想法：「{hint}」——在它的基础上细化、发散出不同的走法。\n" if hint
-                else "作者还没有想法，请主动给出灵感。\n")
-        return (f"{base}{use}给出 {count} 个彼此差异明显的构思方向（可以从核心冲突、主角处境、反转设定、情感主线、"
-                "题材混搭、名场面等角度切入），贴合已有设定与素材，每个方向 30~80 字，写得具体，可直接当作后续生成的要求。\n"
-                '输出：{"directions":[{"label":"4~8 字的短标题","direction":"方向描述"}]}'), 1200
+        use = f"这些走向用于：{purpose}。\n" if purpose else ""
+        if hint:
+            base = (f"作者的构思方向：「{hint}」\n围绕这个构思，结合上面提供的设定和章节（如果有），"
+                    "构思故事接下来可能的发展走向——每个走向是一条不同的发展路线。\n")
+        elif tone:
+            base = "围绕这个基调，结合上面提供的设定和章节（如果有），从不同角度给出故事可能的发展走向。\n"
+        else:
+            base = "作者还没有想法，请结合上面提供的内容主动给出灵感。\n"
+        avoid = ("以下走向已经给过或被作者否定，不要给出相同或相似的：\n" + "\n".join(f"- {r}" for r in rejected) + "\n"
+                 if rejected else "")
+        return (f"{tone_line}{base}{avoid}{use}给出 {count} 个彼此差异明显的走向（可以从核心冲突、主角处境、反转、情感主线、"
+                "势力博弈、名场面等角度切入），每个 40~120 字，写清楚接下来发生什么、带来什么冲突或悬念。\n"
+                '输出：{"directions":[{"label":"4~8 字的短标题","direction":"走向描述"}]}'), 1500
     if kind == "title":
         return (f"{hint_line}为这部小说构思 {count} 个书名候选，风格各异，贴合设定和素材。\n"
                 '输出：{"titles":[{"title":"书名","pitch":"一句话卖点（30字内）","materials":["用到的素材标题"]}]}'), 1200
@@ -127,7 +161,7 @@ def _task(kind: str, hint: str, count: int, next_index: int, purpose: str = "") 
 
 
 def generate(novel_id: str, req: dict) -> dict:
-    """req: {kind, hint?, count?, materials: [...], api?: ModelConfig dict, local?: {baseId, adapterId}}"""
+    """req: {kind, hint?, tone?, rejected?[], count?, materials: [...], api?: ModelConfig dict, local?: {baseId, adapterId}}"""
     kind = req.get("kind")
     if kind not in KINDS:
         raise IdeaError(f"kind 只能是 {KINDS}")
@@ -139,16 +173,26 @@ def generate(novel_id: str, req: dict) -> dict:
         return _fill(novel, req, local)
     if kind == "chat":
         return _chat(novel, req, local)
+    hint = (req.get("hint") or "").strip()[:HINT_CHARS]
+    if kind == "hint_polish":
+        return _polish_hint(hint, req, local)
     spec = req.get("spec") if isinstance(req.get("spec"), list) else None
-    context, chapters = _context(novel, spec)
+    # 章节上下文：未指定时都带（AI 填写设定等旧调用）；章节题目必须承接已写章节，总是带
+    ctx = req.get("chapterContext") if isinstance(req.get("chapterContext"), dict) else {}
+    current = kind == "chapter" or ctx.get("current", True) is not False
+    past = kind == "chapter" or ctx.get("past", True) is not False
+    context, chapters = _context(novel, spec, current, past)
     next_index = (chapters[-1]["index"] + 1) if chapters else 1
     default_count = {"title": 5, "outline": 10, "chapter": 3, "direction": 5}[kind]
     max_count = (LOCAL_MAX_OUTLINE if local else 40) if kind == "outline" else 8
     count = max(1, min(int(req.get("count") or default_count), max_count))
     materials = req.get("materials") or []
     mat = _material_lines(materials)
-    task, max_tokens = _task(kind, (req.get("hint") or "").strip()[:500], count, next_index,
-                             (req.get("purpose") or "").strip()[:60])
+    rejected = [str(r).strip()[:200] for r in req.get("rejected") or [] if str(r).strip()][:30]
+    chosen = ([str(c).strip()[:300] for c in req.get("chosenDirections") or [] if str(c).strip()][:MAX_CHOSEN]
+              if kind != "direction" else [])
+    task, max_tokens = _task(kind, hint, count, next_index, (req.get("purpose") or "").strip()[:60],
+                             (req.get("tone") or "").strip()[:200], rejected, chosen)
     user = context + ("\n\n【素材库素材】\n" + "\n".join(mat) if mat else "\n\n【素材库素材】（未选择）") + "\n\n【任务】\n" + task
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
     r, model_name = _run_local(local, messages, max_tokens) if local else _run_api(req["api"], messages, max_tokens)
@@ -156,6 +200,22 @@ def generate(novel_id: str, req: dict) -> dict:
         raise IdeaError("模型输出被截断，请减少章节数后重试")
     data = _parse(r["text"], local)
     return {"kind": kind, "nextIndex": next_index, "result": _normalize(kind, data, next_index),
+            "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]},
+            "model": model_name}
+
+
+def _polish_hint(hint: str, req: dict, local: dict | None) -> dict:
+    """AI 润色构思方向：只看这段文字本身（不带设定 / 章节 / 素材 / 基调），保留原意大幅扩写。"""
+    if not hint:
+        raise IdeaError("请先在构思方向里写下大致情节再润色")
+    messages = [{"role": "system", "content": HINT_POLISH_SYSTEM},
+                {"role": "user", "content": f"作者的构思：\n{hint}\n\n把它扩写成 300~1200 字的完整构思"
+                                            '（原文越长扩写越多，最多 1500 字）。\n输出：{"text":"扩写后的构思",'
+                                            '"changes":"主要扩写了哪些方面（40 字内）"}'}]
+    r, model_name = _run_local(local, messages, 2500) if local else _run_api(req["api"], messages, 2500)
+    if r["finishReason"] == "length":
+        raise IdeaError("模型输出被截断，请缩短构思后重试")
+    return {"kind": "hint_polish", "result": _normalize("hint_polish", _parse(r["text"], local), 0),
             "usage": {"promptTokens": r["promptTokens"], "completionTokens": r["completionTokens"]},
             "model": model_name}
 
@@ -193,8 +253,10 @@ def _run_api(api: dict, messages: list[dict], max_tokens: int) -> tuple[dict, st
         raise IdeaError(f"大模型调用失败：{e}") from e
 
 
-def _run_local(local: dict, messages: list[dict], max_tokens: int, temperature: float = 0.8) -> tuple[dict, str]:
-    """本地模型（+ 适配器）：未加载 / 加载的不一致时先加载（同一基础模型只切换适配器）。"""
+def _run_local(local: dict, messages: list[dict], max_tokens: int, temperature: float = 0.8,
+               use_adapter: bool = True) -> tuple[dict, str]:
+    """本地模型（+ 适配器）：未加载 / 加载的不一致时先加载（同一基础模型只切换适配器）。
+    use_adapter=False：本次调用停用适配器（文风适配器会削弱按格式输出的能力，JSON 类请求用基础模型）。"""
     if chapter_mod.active_job():
         raise IdeaError("有章节正在生成或润色，完成后再用本地模型构思")
     if local_jobs.gpu_busy():
@@ -209,7 +271,7 @@ def _run_local(local: dict, messages: list[dict], max_tokens: int, temperature: 
             inference.wait_loaded(timeout=300)
         gen = LocalHFGenerator(base_id, adapter_id)
         g = gen.generate(messages, GenParams(max_new_tokens=min(max_tokens, 3000), temperature=temperature, top_p=0.9,
-                                             top_k=40, repetition_penalty=1.05))
+                                             top_k=40, repetition_penalty=1.05, use_adapter=use_adapter))
     except (RuntimeError, registry.RegistryError, GenerationError) as e:
         raise IdeaError(f"本地模型构思失败：{e}") from e
     return ({"text": g.text, "promptTokens": g.prompt_tokens, "completionTokens": g.completion_tokens,
@@ -283,7 +345,8 @@ def _field_line(f: dict) -> str:
 
 def _fill(novel: dict, req: dict, local: dict | None) -> dict:
     """req.fill: {mode: field|items|category, path: [位置], fields: [{key, label, type, options?, desc?, placeholder?}],
-    current?: {标签: 已有内容}, itemLabel?, count?, existing?: [已有项名称]}；req.spec：编辑器当前设定（可选）。"""
+    current?: {标签: 已有内容}, itemLabel?, count?, existing?: [已有项名称],
+    action?: polish|generate, seed?: 框内文字（只用于单个文本字段）}；req.spec：编辑器当前设定（可选）。"""
     fill = req.get("fill") or {}
     mode = fill.get("mode")
     if mode not in FILL_MODES:
@@ -303,7 +366,21 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
                      "\n".join(f"- {k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in current.items()))
     if hint:
         lines.append(f"作者的要求：{hint}")
+    # 单个文本字段：polish = 在框内已写内容上扩写；generate = 框内文字只是大致方向（可为空）
+    single_text = mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")
+    seed = str(fill.get("seed") or "").strip()[:2000] if single_text else ""
+    polish = single_text and fill.get("action") == "polish"
+    if polish and not seed:
+        raise IdeaError("框里还没有内容，无法润色；可以用「AI 生成」")
+    long_text = single_text and fields[0]["type"] == "textarea"
+    if polish:
+        lines.append(f"作者已写的内容：「{seed}」\n在保留全部已写内容和原意的基础上润色扩写：补充具体细节、理顺语句，不改变设定、"
+                     + ("篇幅约为原文的 2~3 倍（不超过 400 字）。" if long_text else "仍是简短的名称或短语（20 字内）。"))
+    elif seed:
+        lines.append(f"作者给的大致方向：「{seed}」——按这个方向来写，可以大幅展开。")
     field_lines = "\n".join(_field_line(f) for f in fields)
+    if polish and long_text:  # 润色扩写的篇幅以上面的要求为准，不受字段说明的 80~200 字限制
+        field_lines = field_lines.replace("（80~200 字）", "（约为原文的 2~3 倍，不超过 400 字）")
     plain_text = False
     if mode == "items":
         count = max(1, min(int(fill.get("count") or 3), 5 if local else 10))
@@ -319,17 +396,22 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
     elif plain_text := (local and mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")):
         # 本地小模型按 JSON 输出很不稳定：单个文本字段直接要正文
         f = fields[0]
-        size = "一个简短的名称或短语（20 字内）" if f["type"] == "text" else "一段 80~200 字的具体描述"
+        size = ("一个简短的名称或短语（20 字内）" if f["type"] == "text"
+                else "润色扩写后的完整内容" if polish else "一段 80~200 字的具体描述")
         lines.append(f"写出「{f.get('label', f['key'])}」：{size}。直接输出内容本身，不要 JSON、标题、引号或任何解释。")
-        max_tokens = 80 if f["type"] == "text" else 280  # 约 200 字；小模型容易越写越长、开始重复
+        # 约 200 字（润色最多 400 字）；小模型容易越写越长、开始重复
+        max_tokens = 80 if f["type"] == "text" else 520 if polish else 280
     else:
         lines.append(f"为以下字段生成内容：\n{field_lines}\n" + '输出：{"values":{"字段key":值}}')
-        max_tokens = 300 * len(fields) + 300
+        # 本地模型约 10~16 token/秒，且小模型写完 JSON 常不停：按字段类型估算上限，避免一直写到超时
+        max_tokens = (max(300, sum(FILL_TOKEN_BUDGET[f["type"]] for f in fields) + 200) if local
+                      else 300 * len(fields) + 300)
     user = (context + ("\n\n【素材库素材】\n" + "\n".join(mat) if mat else "") + "\n\n【任务：补全设定】\n" +
             "\n".join(x for x in lines if x))
     messages = [{"role": "system", "content": FILL_PLAIN_SYSTEM if plain_text else FILL_SYSTEM},
                 {"role": "user", "content": user}]
-    r, model_name = (_run_local(local, messages, max_tokens, temperature=0.5) if local
+    # 本地：JSON 输出用基础模型（文风适配器常写完 JSON 不停、格式出错）；单个文本字段直接要正文，保留适配器的文风
+    r, model_name = (_run_local(local, messages, max_tokens, temperature=0.5, use_adapter=bool(plain_text)) if local
                      else _run_api(req["api"], messages, max_tokens))
     if plain_text:
         value = _plain_value(r["text"], fields[0]["type"], truncated=r["finishReason"] == "length")
@@ -439,6 +521,11 @@ def _normalize(kind: str, data: dict, next_index: int) -> dict:
             elif isinstance(d, dict) and str(d.get("direction") or "").strip():
                 out.append({"label": str(d.get("label") or "").strip()[:20], "direction": str(d["direction"]).strip()})
         return {"directions": out}
+    if kind == "hint_polish":
+        text = str(data.get("text") or data.get("direction") or "").strip()[:3000]
+        if not text:
+            raise IdeaError("模型没有给出润色结果，请重试")
+        return {"text": text, "changes": str(data.get("changes") or "").strip()[:80]}
     if kind == "title":
         return {"titles": [{"title": str(t.get("title", "")).strip(), "pitch": str(t.get("pitch", "")),
                             "materials": _strs(t.get("materials"))}

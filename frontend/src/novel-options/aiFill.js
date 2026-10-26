@@ -8,6 +8,20 @@ import { summarizeFields } from './schema'
 export const AI_TYPES = ['text', 'textarea', 'tags', 'single', 'multi']
 
 export const aiFillable = (field) => AI_TYPES.includes(field.type)
+/** 文本类字段：有「AI 润色」（在框内内容上扩写）和「AI 生成」（框内文字当方向）两种 */
+export const isTextField = (field) => field.type === 'text' || field.type === 'textarea'
+
+/**
+ * AI 请求的作用范围 = 位置路径（如 ['角色', '主要角色', '角色 1：林墨', '性格']）。
+ * 两个范围一个是另一个的前缀（含相同）就会写到同一处，大模型并行时据此决定哪些按钮要锁住。
+ * 「生成 N 个新项」只往分组里追加，范围是 [...分组路径, NEW_ITEMS]，不和已有项的字段冲突。
+ */
+export const NEW_ITEMS = '__new__'
+export function scopesOverlap(a, b) {
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false
+  return true
+}
 
 /** 发给模型的字段说明：选择类带上选项文字 */
 export function fieldSchema(field) {

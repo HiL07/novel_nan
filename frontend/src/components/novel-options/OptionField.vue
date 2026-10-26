@@ -5,19 +5,35 @@
       <el-tag v-if="editMode" size="small" type="info" effect="plain">{{ typeLabel }}</el-tag>
       <el-tag v-if="field.custom" size="small" type="warning" effect="plain">自定义</el-tag>
       <span v-if="field.desc" class="field-desc">{{ field.desc }}</span>
-      <el-button
-        v-if="ai?.enabled.value && aiFillable(field)"
-        class="ai-btn"
-        link
-        type="primary"
-        size="small"
-        :icon="MagicStick"
-        :loading="ai.busy.value === ai.busyKeyOf(path, field)"
-        :disabled="!!ai.busy.value"
-        @click="ai.fillField(field, container, siblings || [], path)"
-      >
-        AI 生成
-      </el-button>
+      <template v-if="ai?.enabled.value && aiFillable(field)">
+        <!-- 文本类：润色（在框内内容上扩写）/ 生成（框内文字当方向）；选择 / 标签类只有生成 -->
+        <span v-if="isTextField(field)" class="ai-btn" :title="polishTip">
+          <el-button
+            link
+            type="primary"
+            size="small"
+            :icon="EditPen"
+            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|polish`)"
+            :disabled="locked || !hasText"
+            @click="ai.fillField(field, container, siblings || [], path, 'polish')"
+          >
+            AI 润色
+          </el-button>
+        </span>
+        <span class="ai-btn" :title="generateTip">
+          <el-button
+            link
+            type="primary"
+            size="small"
+            :icon="MagicStick"
+            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|generate`)"
+            :disabled="locked"
+            @click="ai.fillField(field, container, siblings || [], path, 'generate')"
+          >
+            AI 生成
+          </el-button>
+        </span>
+      </template>
       <el-button
         v-if="editMode && siblings"
         class="field-remove"
@@ -86,11 +102,11 @@
           split-button
           size="small"
           type="primary"
-          :disabled="!!ai.busy.value"
+          :disabled="ai.locked([...path, field.label, NEW_ITEMS])"
           @click="ai.genItems(field, value, path, 3)"
           @command="(n) => ai.genItems(field, value, path, n)"
         >
-          <el-icon v-if="ai.busy.value !== ai.busyKeyOf(path, field)"><MagicStick /></el-icon>
+          <el-icon v-if="!ai.loading(ai.busyKeyOf(path, field))"><MagicStick /></el-icon>
           <el-icon v-else class="is-loading"><Loading /></el-icon>
           AI 生成 3 个{{ field.itemLabel || '项' }}
           <template #dropdown>
@@ -112,14 +128,14 @@
 
 <script setup>
 import { computed } from 'vue'
-import { CopyDocument, Delete, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
+import { CopyDocument, Delete, EditPen, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
 import ChoiceWidget from './ChoiceWidget.vue'
 import InputWidget from './InputWidget.vue'
 import CharacterCards from './CharacterCards.vue'
 import { FIELD_TYPES, isChoice } from '@/novel-options/fieldTypes'
 import { clone, ensureValue, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
-import { aiFillable } from '@/novel-options/aiFill'
+import { NEW_ITEMS, aiFillable, isTextField } from '@/novel-options/aiFill'
 
 /**
  * 递归渲染一个选项项。
@@ -141,6 +157,17 @@ ensureValue(props.container, props.field)
 const value = computed(() => ensureValue(props.container, props.field))
 const choice = computed(() => isChoice(props.field))
 const typeLabel = computed(() => FIELD_TYPES[props.field.type]?.label || props.field.type)
+
+/* ---- AI 按钮：大模型时可同时生成别处，只锁会写到同一处的；本地模型一次一个 ---- */
+const locked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label]))
+const hasText = computed(() => String(props.container[props.field.key] ?? '').trim() !== '')
+const serialTip = computed(() => (ai?.cfg?.source === 'local' && locked.value ? '（本地模型一次只能处理一个 AI 请求）' : ''))
+const polishTip = computed(() => (hasText.value
+  ? 'AI 润色：保留框内已写的内容，在此基础上扩写、补充细节（参考其他设定保持一致），结果替换框内内容，可撤销'
+  : 'AI 润色：先在框内写几句，AI 在此基础上扩写；框内为空时不可用') + serialTip.value)
+const generateTip = computed(() => (isTextField(props.field)
+  ? 'AI 生成：把框内文字当作大致方向（可留空），结合其他设定写出新内容并替换，可撤销'
+  : 'AI 生成：结合其他设定为这一项选择 / 生成内容') + serialTip.value)
 
 /** 选中的、且有细分选项（或处于编辑模式可添加细分）的选项 */
 const expandedOptions = computed(() =>

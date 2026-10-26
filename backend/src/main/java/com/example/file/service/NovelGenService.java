@@ -34,11 +34,16 @@ public class NovelGenService {
     private static final Pattern NOVEL_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
     private static final List<String> CHAPTER_FIELDS = List.of("goal", "title", "targetChars");
     private static final List<String> POLISH_FIELDS = List.of("enabled", "baseId", "adapterId");
-    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "chat");
+    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat");
     private static final int MAX_MATERIALS = 20;
     private static final int AUTO_MATERIALS = 8;
     private static final int AUTO_MIN_SCORE = 50;
     private static final int DETAIL_CHARS = 300;
+    private static final int TONE_CHARS = 200;
+    private static final int MAX_REJECTED = 30;
+    private static final int MAX_CHOSEN = 10;
+    private static final int DIRECTION_CHARS = 300;
+    private static final int QUERY_CHARS = 500;
 
     private final AiModelConfigService modelService;
     private final MaterialService materialService;
@@ -77,11 +82,14 @@ public class NovelGenService {
 
     /**
      * AI 构思 / AI 填写设定 / 构思方向建议 / 角色试聊。
-     * req: {kind: title|outline|chapter|fill|direction|chat, source?: api|local, baseId?, adapterId?, hint?, count?, purpose?,
+     * req: {kind: title|outline|chapter|fill|direction|hint_polish|chat, source?: api|local, baseId?, adapterId?, hint?, tone?,
+     *       rejected?[], chosenDirections?[], chapterContext?{current, past}, count?, purpose?,
      *       materialIds?[], autoMaterials?, query?, excludeBooks?[], fill?{mode, path, fields, current, itemLabel, count, existing},
      *       chat?{character:{name, card}, messages[], scene?, userRole?}, spec?}
      * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）。
      * autoMaterials：用 query（为空时用 hint）在素材库做 AI 语义检索（总是用大模型），取相关度 ≥ 50 的前 8 条，与选中的合并。
+     * tone：作者定下的基调（≤200 字，所有构思都围绕它）；rejected：已给过 / 被拒绝的走向（≤30 条，生成走向时避开）；
+     * chosenDirections：作者选定的后续走向（≤10 条，书名 / 大纲 / 章节沿着它们展开）；hint_polish：只按 hint 扩写构思。
      * excludeBooks：屏蔽这些来源书的素材（选中的和自动匹配的都去掉；「保留」的素材不受影响）。
      * 返回 Python 的结果 + usedMaterials（实际提供给模型的素材）+ blockedMaterials（因屏蔽被去掉的选中素材数）。
      */
@@ -130,6 +138,9 @@ public class NovelGenService {
             if (query.isEmpty()) {
                 query = hint;
             }
+            if (query.length() > QUERY_CHARS) {  // 构思方向可能很长，语义检索只取开头
+                query = query.substring(0, QUERY_CHARS);
+            }
             if (query.isEmpty()) {
                 throw new BizException(400, "自动匹配素材需要填写构思方向（用它在素材库中检索）");
             }
@@ -166,6 +177,23 @@ public class NovelGenService {
             body.put("count", n.intValue());
         }
         body.put("materials", materials);
+        if (req.get("tone") instanceof String tone && !tone.isBlank()) {
+            String t = tone.trim();
+            body.put("tone", t.length() > TONE_CHARS ? t.substring(0, TONE_CHARS) : t);
+        }
+        List<String> rejected = strings(req.get("rejected"), MAX_REJECTED, TONE_CHARS);
+        if (!rejected.isEmpty()) {
+            body.put("rejected", rejected);
+        }
+        List<String> chosen = strings(req.get("chosenDirections"), MAX_CHOSEN, DIRECTION_CHARS);
+        if (!chosen.isEmpty()) {
+            body.put("chosenDirections", chosen);
+        }
+        // 构思时带哪些已写章节：{current: 最近一章, past: 更早章节 + 前情概要}；不传则 Python 默认都带
+        if (req.get("chapterContext") instanceof Map<?, ?> ctx) {
+            body.put("chapterContext", Map.of("current", Boolean.TRUE.equals(ctx.get("current")),
+                    "past", Boolean.TRUE.equals(ctx.get("past"))));
+        }
         if (req.get("purpose") instanceof String purpose && !purpose.isBlank()) {
             body.put("purpose", purpose.length() > 60 ? purpose.substring(0, 60) : purpose);
         }
@@ -248,5 +276,19 @@ public class NovelGenService {
             }
         }
         return "AI 服务拒绝请求（HTTP " + e.getStatusCode().value() + "）";
+    }
+
+    /** 请求里的字符串列表：去空白，最多 max 条，每条截到 chars 字 */
+    private static List<String> strings(Object value, int max, int chars) {
+        List<String> out = new ArrayList<>();
+        if (value instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof String str && !str.isBlank() && out.size() < max) {
+                    String t = str.trim();
+                    out.add(t.length() > chars ? t.substring(0, chars) : t);
+                }
+            }
+        }
+        return out;
     }
 }

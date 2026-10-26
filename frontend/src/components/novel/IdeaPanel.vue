@@ -11,6 +11,36 @@
       <el-button size="small" @click="emit('detect-api')">重新检测</el-button>
     </el-alert>
 
+    <!-- 右上角：使用说明（每个 AI 功能用到哪些内容） -->
+    <div class="panel-head">
+      <el-popover placement="bottom-end" :width="760" trigger="click">
+        <template #reference>
+          <el-button size="small" :icon="QuestionFilled">使用说明</el-button>
+        </template>
+        <div class="manual">
+          <div class="manual-title">AI 构思用到哪些内容</div>
+          <table class="manual-table">
+            <thead>
+              <tr><th>功能</th><th v-for="c in MANUAL_COLS" :key="c">{{ c }}</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in MANUAL_ROWS" :key="r.name">
+                <td><b>{{ r.name }}</b></td>
+                <td v-for="(v, i) in r.uses" :key="i" :class="{ no: v === '—' }">{{ v }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <ul class="manual-notes">
+            <li>「设定」「章节」只提供勾选的项；设定分类没有内容时，勾了也不会发送。</li>
+            <li>「已选走向」= 后续走向里点了「支持 / 追加」的项；没选的不会用到（等于拒绝）。</li>
+            <li>「已采用的大纲」有就会带上；书名、大纲、章节题目、后续走向都参考它。</li>
+            <li>「素材」= 下方选择的素材 + 「AI 自动匹配素材」（用 基调 + 构思方向 检索）；后续走向只有打开「参考素材库」才用。</li>
+            <li>设定页里的「AI 填写」不受本页选择影响：它使用全部当前设定、已写章节和大纲。</li>
+          </ul>
+        </div>
+      </el-popover>
+    </div>
+
     <!-- 构思输入：方向 + 素材 -->
     <el-form label-width="90px" class="idea-form">
       <el-form-item label="构思模型">
@@ -35,37 +65,128 @@
           </template>
         </div>
       </el-form-item>
-      <el-form-item label="构思方向">
+      <el-form-item label="设定">
+        <div class="setting-row">
+          <span v-if="!settingCats.length" class="muted">设定里还没有分类</span>
+          <el-check-tag
+            v-for="c in settingCats"
+            :key="c.key"
+            :checked="selectedCats.includes(c.key)"
+            :class="{ 'empty-cat': !filledKeys.has(c.key) }"
+            :title="filledKeys.has(c.key) ? '' : '这个分类还没有内容，勾选了也不会发送'"
+            @change="toggleCat(c.key)"
+          >
+            {{ c.label }}<span v-if="c.custom" class="cat-mark">自定义</span><span v-if="!filledKeys.has(c.key)" class="cat-mark">（空）</span>
+          </el-check-tag>
+          <template v-if="settingCats.length">
+            <el-button link size="small" @click="selectedCats = settingCats.map((c) => c.key)">全选</el-button>
+            <el-button link size="small" @click="selectedCats = []">清空</el-button>
+          </template>
+        </div>
+        <div class="muted">
+          勾选的设定分类会提供给 AI（使用设定页当前内容，含未保存的修改）；默认都不提供。已选 {{ selectedCats.length }} 项，实际提供给 AI：{{ sentCount }} 项
+        </div>
+      </el-form-item>
+      <el-form-item label="章节">
+        <div class="setting-row">
+          <span v-if="nextIndex <= 1" class="muted">还没有写好的章节</span>
+          <template v-else>
+            <el-check-tag :checked="useCurrent" @change="useCurrent = !useCurrent">
+              当前章节<span class="cat-mark">第{{ nextIndex - 1 }}章：摘要 + 结尾</span>
+            </el-check-tag>
+            <el-check-tag v-if="nextIndex > 2" :checked="usePast" @change="usePast = !usePast">
+              过去章节<span class="cat-mark">第1~{{ nextIndex - 2 }}章摘要 + 前情概要</span>
+            </el-check-tag>
+          </template>
+        </div>
+        <div v-if="nextIndex > 1" class="muted">勾选的章节提供给后续走向、书名和大纲；默认不提供。生成章节题目总会带上已写章节（要承接剧情）</div>
+      </el-form-item>
+      <el-form-item label="基调">
         <el-input
-          v-model="hint"
-          type="textarea"
-          :autosize="{ minRows: 2, maxRows: 5 }"
-          maxlength="500"
+          v-model="tone"
+          maxlength="200"
           show-word-limit
-          placeholder="可选：想要的方向、基调、卖点，如：废土末世 + 群像，主角是带着秘密的拾荒者，节奏紧凑、悬疑感强"
+          clearable
+          placeholder="可选：整体基调，如：黑暗压抑的废土求生，节奏快，带点黑色幽默（后续走向 / 书名 / 大纲 / 章节都会围绕它）"
         />
+      </el-form-item>
+      <el-form-item label="构思方向">
+        <div class="hint-box">
+          <el-input
+            v-model="hint"
+            type="textarea"
+            :autosize="{ minRows: 3, maxRows: 12 }"
+            maxlength="3000"
+            show-word-limit
+            placeholder="写下你想写的大致情节即可，如：末世，主角是带着秘密的拾荒者，被卷进两大势力的争夺……可以点右上角「AI 润色」扩写成完整构思"
+          />
+          <el-button
+            class="hint-polish-btn"
+            size="small"
+            type="primary"
+            plain
+            :icon="EditPen"
+            :loading="loading === 'hint_polish'"
+            :disabled="!!loading || !ready || !hint.trim()"
+            title="只根据框内文字扩写，不使用设定 / 基调 / 章节 / 素材"
+            @click="polishHint"
+          >AI 润色</el-button>
+        </div>
+        <div class="muted">「AI 润色」只根据框内的文字扩写，与设定、基调、章节、素材都无关</div>
+        <div v-if="polished" class="direction-card polished">
+          <div class="direction-text">
+            <div><b>扩写结果：</b><span class="pre">{{ polished.text }}</span></div>
+            <div v-if="polished.changes" class="muted">扩写了：{{ polished.changes }}</div>
+          </div>
+          <div class="direction-ops">
+            <el-button link type="primary" size="small" @click="hint = polished.text; polished = null">替换原文</el-button>
+            <el-button link size="small" @click="polished = null">放弃</el-button>
+          </div>
+        </div>
+
         <div class="direction-bar">
           <el-button size="small" :icon="MagicStick" :loading="loading === 'direction'" :disabled="!!loading || !ready" @click="suggestDirections">
-            {{ hint.trim() ? 'AI 细化 / 发散这个方向' : 'AI 给我几个方向' }}
+            {{ directionLabel }}
           </el-button>
-          <span class="muted">结合已有设定与素材给出 5 个构思方向，点一个即可填入（也可追加）</span>
+          <el-switch v-model="dirMaterials" size="small" active-text="参考素材库" />
+          <span class="muted">结合构思方向、基调、勾选的设定 / 章节{{ dirMaterials ? '和素材' : '（不用素材）' }}；可重复生成，每次给出不同的走向</span>
         </div>
         <div v-if="directions.length" class="directions">
-          <div v-for="(d, i) in directions" :key="i" class="direction-card">
-            <div class="direction-text"><b v-if="d.label">{{ d.label }}：</b>{{ d.direction }}</div>
+          <div class="dir-head">
+            <span class="muted">后续走向 {{ directions.length }} 个：「支持」= 只选这一个，「追加」= 再多选一个，「拒绝」= 删除并让 AI 之后避开；没选的不会用到</span>
+            <el-button link size="small" @click="clearUnchosen">清空未选的</el-button>
+          </div>
+          <div v-for="d in directions" :key="d.id" class="direction-card" :class="{ chosen: chosenIds.includes(d.id) }">
+            <div class="direction-text">
+              <el-tag v-if="chosenIds.includes(d.id)" size="small" type="success" effect="dark">已选</el-tag>
+              <b v-if="d.label">{{ d.label }}：</b>{{ d.direction }}
+            </div>
             <div class="direction-ops">
-              <el-button link type="primary" size="small" @click="useDirection(d, false)">采用</el-button>
-              <el-button link size="small" @click="useDirection(d, true)">追加</el-button>
+              <template v-if="chosenIds.includes(d.id)">
+                <el-button link size="small" @click="unchoose(d.id)">取消选择</el-button>
+              </template>
+              <template v-else>
+                <el-button link type="primary" size="small" @click="support(d.id)">支持</el-button>
+                <el-button link type="primary" size="small" @click="addChosen(d.id)">追加</el-button>
+                <el-button link type="danger" size="small" @click="rejectDirection(d.id)">拒绝</el-button>
+              </template>
             </div>
           </div>
-          <el-button link size="small" @click="directions = []">收起</el-button>
+        </div>
+        <div v-if="chosenTexts.length" class="chosen-box">
+          <b>已选后续走向（{{ chosenTexts.length }}）</b>
+          <span class="muted">将用于生成书名 / 大纲 / 章节题目</span>
+        </div>
+        <div v-if="rejected.length" class="muted">
+          已拒绝 {{ rejected.length }} 个走向，再生成时 AI 会避开类似的
+          <el-button link size="small" @click="rejected = []">清空记录</el-button>
         </div>
       </el-form-item>
       <el-form-item label="素材">
         <div class="mat-row">
           <el-button size="small" :icon="Collection" @click="pickerVisible = true">从素材库选择</el-button>
           <el-switch v-model="autoMaterials" active-text="AI 自动匹配素材" :disabled="!apiModel" />
-          <span class="muted">{{ !apiModel ? '自动匹配用大模型做语义检索，需先配置大模型' : autoMaterials ? '用构思方向在素材库中语义检索，取最相关的几条（需要填写构思方向）' : '' }}</span>
+          <span class="muted">{{ !apiModel ? '自动匹配用大模型做语义检索，需先配置大模型' : autoMaterials ? '用基调 + 构思方向在素材库中语义检索，取最相关的几条（至少填一项）' : '' }}</span>
         </div>
         <div class="mat-row blocked-row">
           <BlockedBooksSelect v-model="blockedBooks" class="blocked-select" />
@@ -160,10 +281,10 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, ref, watch } from 'vue'
+import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElInput, ElMessage, ElMessageBox, ElTag } from 'element-plus'
-import { Collection, MagicStick } from '@element-plus/icons-vue'
+import { Collection, EditPen, MagicStick, QuestionFilled } from '@element-plus/icons-vue'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import BlockedBooksSelect from '@/components/material/BlockedBooksSelect.vue'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
@@ -177,7 +298,9 @@ const props = defineProps({
   apiModel: { type: Object, default: null },
   localModels: { type: Array, default: () => [] },
   adapters: { type: Array, default: () => [] },
-  nextIndex: { type: Number, required: true }
+  nextIndex: { type: Number, required: true },
+  /** () => {categories: [{key, label, custom}], spec}：设定编辑器的当前分类与设定 */
+  readSettings: { type: Function, default: null }
 })
 const emit = defineEmits(['updated', 'use-chapter', 'detect-api'])
 const router = useRouter()
@@ -191,6 +314,9 @@ const ready = computed(() => (source.value === 'api' ? !!props.apiModel : !!base
 watch(() => props.localModels, (list) => { if (!baseId.value && list.length) baseId.value = list[0].id })
 
 const hint = ref('')
+const tone = ref('')
+const dirMaterials = ref(false)  // 生成后续走向时是否参考素材库
+const rejected = ref([])         // 拒绝过的走向，再生成时让 AI 避开
 const picked = ref([])
 const autoMaterials = ref(false)
 const outlineCount = ref(10)
@@ -203,24 +329,105 @@ const directions = ref([])
 const blockedBooks = useBlockedBooks(props.novel.id)
 const isBlocked = (m) => !m.pinned && !!m.sourceBook && blockedBooks.value.includes(m.sourceBook)
 
-/** 模型选择 + 素材 + 屏蔽书：所有构思请求共用 */
+/* ---- 设定：按分类勾选提供给 AI 的设定（默认都不选，按工作区记在本机） ---- */
+const settingCats = ref([])
+const filledKeys = ref(new Set())
+const selectedKey = `nan_novel.ideaSettings.${props.novel.id}`
+const selectedCats = ref(loadSelected())
+const sentCount = computed(() => selectedCats.value.filter((k) => filledKeys.value.has(k)).length)
+
+function loadSelected() {
+  try {
+    const v = JSON.parse(localStorage.getItem(selectedKey) || '[]')
+    return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
+}
+watch(selectedCats, (v) => {
+  try {
+    localStorage.setItem(selectedKey, JSON.stringify(v))
+  } catch {
+    // 存储不可用：本次会话内仍然有效
+  }
+})
+
+function toggleCat(key) {
+  selectedCats.value = selectedCats.value.includes(key)
+    ? selectedCats.value.filter((k) => k !== key)
+    : [...selectedCats.value, key]
+}
+
+function readSettings() {
+  return props.readSettings?.() || { categories: [], spec: [] }
+}
+
+/** 重新读取设定分类（切到本页时由工作区调用）：新增的分类默认不选，已删除的分类从选择中去掉 */
+function refreshSettings() {
+  const { categories, spec } = readSettings()
+  settingCats.value = categories
+  filledKeys.value = new Set(spec.map((c) => c.key))
+  if (categories.length) {
+    const keys = new Set(categories.map((c) => c.key))
+    const kept = selectedCats.value.filter((k) => keys.has(k))
+    if (kept.length !== selectedCats.value.length) selectedCats.value = kept
+  }
+}
+onMounted(refreshSettings)
+defineExpose({ refreshSettings })
+
+/** 发请求时现取设定，只保留勾选且有内容的分类；都没选时发 []（不提供设定） */
+function selectedSpec() {
+  refreshSettings()
+  const selected = new Set(selectedCats.value)
+  return readSettings().spec.filter((c) => selected.has(c.key))
+}
+
+/* ---- 章节：是否提供当前章节 / 过去章节（默认都不提供，按工作区记在本机） ---- */
+const chaptersKey = `nan_novel.ideaChapters.${props.novel.id}`
+const savedChapters = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(chaptersKey) || '{}') || {}
+  } catch {
+    return {}
+  }
+})()
+const useCurrent = ref(savedChapters.current === true)
+const usePast = ref(savedChapters.past === true)
+watch([useCurrent, usePast], ([current, past]) => {
+  try {
+    localStorage.setItem(chaptersKey, JSON.stringify({ current, past }))
+  } catch {
+    // 存储不可用：本次会话内仍然有效
+  }
+})
+
+/** 模型选择 + 设定 + 章节 + 素材 + 屏蔽书：所有构思请求共用 */
 function modelAndMaterials() {
   return {
-    source: source.value, baseId: source.value === 'local' ? baseId.value : undefined,
-    adapterId: source.value === 'local' ? adapterId.value || null : undefined,
+    ...modelOnly(),
+    spec: selectedSpec(),
+    chapterContext: { current: useCurrent.value, past: usePast.value },
     materialIds: picked.value.map((m) => m.id), excludeBooks: blockedBooks.value
   }
 }
+function modelOnly() {
+  return {
+    source: source.value, baseId: source.value === 'local' ? baseId.value : undefined,
+    adapterId: source.value === 'local' ? adapterId.value || null : undefined
+  }
+}
 
-/** AI 给构思方向：没填时给灵感，填了就在它基础上细化 / 发散 */
-async function suggestDirections() {
-  loading.value = 'direction'
+/** 自动匹配素材用的检索词：基调 + 构思方向（检索词最多 500 字） */
+const materialQuery = () => [tone.value.trim(), hint.value.trim()].filter(Boolean).join('；').slice(0, 500)
+
+/** AI 润色：只把构思方向框里的文字发给模型扩写（不带设定 / 基调 / 章节 / 素材），结果由作者决定是否替换 */
+const polished = ref(null)
+async function polishHint() {
+  loading.value = 'hint_polish'
   try {
-    const data = await call(generateIdeas(props.novel.id, {
-      ...modelAndMaterials(), kind: 'direction', hint: hint.value.trim(), count: 5, purpose: '构思书名、大纲与章节'
-    }), 'AI 生成方向失败')
-    directions.value = data.result.directions || []
-    if (!directions.value.length) ElMessage.warning('模型没有给出方向，请重试')
+    const data = await call(generateIdeas(props.novel.id, { ...modelOnly(), kind: 'hint_polish', hint: hint.value.trim() }), 'AI 润色失败')
+    polished.value = data.result
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 8000 })
   } finally {
@@ -228,10 +435,70 @@ async function suggestDirections() {
   }
 }
 
-function useDirection(d, append) {
-  const text = d.label ? `${d.label}：${d.direction}` : d.direction
-  hint.value = (append && hint.value.trim() ? `${hint.value.trim()}\n${text}` : text).slice(0, 500)
+/* ---- 后续走向：可重复生成（新的追加在后面），支持 / 追加 = 选中，拒绝 = 删除并让 AI 避开；没选的不使用 ---- */
+let directionSeq = 0
+const chosenIds = ref([])
+const directionText = (d) => (d.label ? `${d.label}：${d.direction}` : d.direction)
+const chosenTexts = computed(() => chosenIds.value
+  .map((id) => directions.value.find((d) => d.id === id))
+  .filter(Boolean)
+  .map(directionText))
+const directionLabel = computed(() => (hint.value.trim() ? 'AI 构思后续走向'
+  : tone.value.trim() ? 'AI 围绕基调给几个走向' : 'AI 给我几个走向'))
+
+async function suggestDirections() {
+  const query = materialQuery()
+  const useAuto = dirMaterials.value && autoMaterials.value && !!query
+  const base = modelAndMaterials()
+  // 已经给过的（含已选的）和拒绝过的都让 AI 避开，保证每次生成不同的走向
+  const avoid = [...rejected.value, ...directions.value.map(directionText)].slice(-30)
+  loading.value = 'direction'
+  try {
+    const data = await call(generateIdeas(props.novel.id, {
+      ...base, kind: 'direction', hint: hint.value.trim(), tone: tone.value.trim(), rejected: avoid,
+      count: 5, purpose: '作为后续走向，用于生成书名、大纲与章节',
+      materialIds: dirMaterials.value ? base.materialIds : [], autoMaterials: useAuto, query: useAuto ? query : undefined
+    }), 'AI 生成走向失败')
+    const list = (data.result.directions || []).map((d) => ({ ...d, id: ++directionSeq }))
+    if (!list.length) ElMessage.warning('模型没有给出走向，请重试')
+    directions.value = [...directions.value, ...list]
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 8000 })
+  } finally {
+    loading.value = ''
+  }
 }
+
+function support(id) {
+  chosenIds.value = [id]
+}
+function addChosen(id) {
+  if (!chosenIds.value.includes(id)) chosenIds.value = [...chosenIds.value, id]
+}
+function unchoose(id) {
+  chosenIds.value = chosenIds.value.filter((x) => x !== id)
+}
+function rejectDirection(id) {
+  const d = directions.value.find((x) => x.id === id)
+  if (!d) return
+  const text = directionText(d)
+  if (!rejected.value.includes(text)) rejected.value = [...rejected.value, text].slice(-20)
+  directions.value = directions.value.filter((x) => x.id !== id)
+}
+function clearUnchosen() {
+  directions.value = directions.value.filter((d) => chosenIds.value.includes(d.id))
+}
+
+/* ---- 使用说明：每个 AI 功能用到哪些内容（改请求内容时同步这里） ---- */
+const MANUAL_COLS = ['设定（勾选）', '章节（勾选）', '基调', '构思方向', '已选走向', '已采用大纲', '素材']
+const MANUAL_ROWS = [
+  { name: 'AI 润色', uses: ['—', '—', '—', '只用框内文字', '—', '—', '—'] },
+  { name: 'AI 构思后续走向', uses: ['✓', '✓', '✓', '✓', '避开已给出 / 已拒绝的', '✓', '开「参考素材库」时'] },
+  { name: '生成书名', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '✓'] },
+  { name: '生成大纲', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '✓'] },
+  { name: '生成章节题目', uses: ['✓', '总是带全部已写章节', '✓', '✓', '✓', '✓', '✓'] },
+  { name: 'AI 自动匹配素材', uses: ['—', '—', '检索词', '检索词', '—', '—', '在素材库中检索'] }
+]
 
 /** 大纲：一句话 + 梗概 + 分章表（readonly 时高亮下一章） */
 const OutlineEditor = defineComponent({
@@ -275,15 +542,17 @@ async function call(promise, fallback) {
 }
 
 async function run(kind) {
-  if (autoMaterials.value && !hint.value.trim()) {
-    ElMessage.warning('自动匹配素材需要先填写构思方向')
+  const query = materialQuery()
+  if (autoMaterials.value && !query) {
+    ElMessage.warning('自动匹配素材需要先填写基调或构思方向')
     return
   }
   loading.value = kind
   try {
     const data = await call(generateIdeas(props.novel.id, {
-      ...modelAndMaterials(), kind, hint: hint.value.trim(), count: kind === 'outline' ? outlineCount.value : undefined,
-      autoMaterials: autoMaterials.value
+      ...modelAndMaterials(), kind, hint: hint.value.trim(), tone: tone.value.trim(), chosenDirections: chosenTexts.value,
+      count: kind === 'outline' ? outlineCount.value : undefined,
+      autoMaterials: autoMaterials.value, query: autoMaterials.value ? query : undefined
     }), 'AI 构思失败')
     last.value = data
     if (kind === 'outline') draft.value = data.result
@@ -358,6 +627,26 @@ async function clearOutline() {
 .blocked-select {
   width: 300px;
 }
+.setting-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+}
+.setting-row .el-check-tag {
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: normal;
+}
+.setting-row .empty-cat {
+  opacity: 0.6;
+}
+.cat-mark {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #909399;
+}
 .direction-bar {
   display: flex;
   align-items: center;
@@ -379,6 +668,83 @@ async function clearOutline() {
   line-height: 1.6;
   background: #f7f8fa;
   border-radius: 6px;
+}
+.direction-card.polished {
+  margin-top: 6px;
+  width: 100%;
+  background: var(--el-color-primary-light-9);
+}
+.direction-card.chosen {
+  background: var(--el-color-success-light-9);
+  outline: 1px solid var(--el-color-success-light-5);
+}
+.direction-text .el-tag {
+  margin-right: 6px;
+}
+.pre {
+  white-space: pre-wrap;
+}
+.panel-head {
+  display: flex;
+  justify-content: flex-end;
+}
+.hint-box {
+  position: relative;
+  width: 100%;
+}
+.hint-box :deep(.el-textarea__inner) {
+  padding-right: 96px;
+}
+.hint-polish-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+.dir-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.chosen-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  font-size: 13px;
+}
+.manual {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.manual-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.manual-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.manual-table th,
+.manual-table td {
+  padding: 4px 6px;
+  text-align: center;
+  border: 1px solid var(--el-border-color-lighter);
+}
+.manual-table th:first-child,
+.manual-table td:first-child {
+  text-align: left;
+  white-space: nowrap;
+}
+.manual-table td.no {
+  color: var(--el-text-color-placeholder);
+}
+.manual-notes {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--el-text-color-regular);
 }
 .direction-text {
   flex: 1;

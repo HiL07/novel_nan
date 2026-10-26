@@ -13,11 +13,11 @@
         >
           <template #prefix><el-icon><MagicStick /></el-icon></template>
         </el-input>
-        <el-button type="primary" :loading="creating" :disabled="!!ai.busy.value && !creating" @click="createFromConcept">
+        <el-button type="primary" :loading="creating" :disabled="newLocked && !creating" @click="createFromConcept">
           AI 创建角色
         </el-button>
-        <el-dropdown trigger="click" :disabled="!!ai.busy.value" @command="genMany">
-          <el-button :disabled="!!ai.busy.value">
+        <el-dropdown trigger="click" :disabled="newLocked" @command="genMany">
+          <el-button :disabled="newLocked">
             批量生成<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
@@ -62,8 +62,8 @@
             v-if="ai?.enabled.value"
             size="small"
             :icon="MagicStick"
-            :loading="ai.busy.value === `item:${item._id}`"
-            :disabled="!!ai.busy.value"
+            :loading="ai.loading(`item:${item._id}`)"
+            :disabled="ai.locked(itemPath(item, i))"
             title="AI 补全这个角色还没填的项"
             @click="fillItem(item, i)"
           >
@@ -109,13 +109,14 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, ChatDotRound, CopyDocument, Delete, MagicStick, Plus } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import CharacterChat from './CharacterChat.vue'
 import { clone, isFilled, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
+import { NEW_ITEMS } from '@/novel-options/aiFill'
 
 /** 「主要角色」分组的角色卡视图（schema 中 display: 'characterCards'）：value 为角色数组，字段按 section 分页 */
 const props = defineProps({
@@ -172,6 +173,9 @@ function colorOf(item) {
   for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0
   return AVATAR_COLORS[h % AVATAR_COLORS.length]
 }
+
+/** 新建角色（一句话创建 / 批量生成）只往列表里追加：大模型时不影响补全已有角色 */
+const newLocked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label, NEW_ITEMS]))
 
 function itemPath(item, i) {
   return [...props.path, props.field.label, `${props.field.itemLabel || '角色'} ${i + 1}${item.name ? '：' + item.name : ''}`]

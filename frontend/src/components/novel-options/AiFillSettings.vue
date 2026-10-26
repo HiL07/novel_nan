@@ -23,6 +23,17 @@
         </el-select>
       </div>
 
+      <div class="muted">
+        {{ cfg.source === 'local' ? '本地模型一次只能处理一个 AI 请求，其他 AI 按钮会等它完成' : '大模型可以同时生成多处，只有会写到同一处的按钮暂时不可用' }}
+      </div>
+
+      <div class="row-title">文本项的两个按钮</div>
+      <div class="muted usage">
+        <div><b>AI 润色</b>：保留框里已写的内容，在此基础上扩写、补充细节（框里为空时不可用）。</div>
+        <div><b>AI 生成</b>：把框里的文字当作大致方向（可以留空），写出新的内容替换。</div>
+        <div>两者都会参考其他设定保持一致，写入后可以「撤销」。选择 / 标签类只有「AI 生成」。</div>
+      </div>
+
       <div class="row-title">
         补充要求（可选）
         <el-button link type="primary" size="small" :icon="MagicStick" :loading="suggesting" @click="runSuggest">
@@ -111,6 +122,9 @@ function onPick(list) {
   margin-left: 2px;
   font-size: 12px;
   color: #909399;
+}
+.usage {
+  line-height: 1.6;
 }
 .ai-settings {
   display: flex;

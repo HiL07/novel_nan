@@ -8,8 +8,11 @@ import { inject } from 'vue'
  *   removeField(targetFields, field)
  *   addOption(field, label) → option              // 给选择类字段追加自定义选项
  *   removeOption(field, value)
- *   ai: { enabled: Ref<boolean>, busy: Ref<string>, busyKeyOf(path, field),
- *         fillField(field, container, siblings, path), genItems(field, list, path, count, concept?) → 新增项[],
+ *   ai: { enabled: Ref<boolean>, busyKeyOf(path, field),
+ *         loading(key) → 这个请求正在进行, locked(scope) → 写到 scope 的按钮要禁用
+ *           （本地模型：有请求就全锁；大模型：只锁范围重叠的，见 aiFill.scopesOverlap），
+ *         fillField(field, container, siblings, path, action: polish|generate),  // 文本：润色扩写 / 按方向生成
+ *         genItems(field, list, path, count, concept?) → 新增项[],
  *         fillItem(field, item, path),                      // 补全分组中某一项（如某个角色）
  *         chat(character, messages, {scene, userRole}) → 回复文本 | null,   // 角色试聊
  *         cfg, apiModel }                                    // AI 填写设置（模型来源等）
