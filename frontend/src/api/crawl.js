@@ -32,9 +32,48 @@ export function submitSiteCrawl(options) {
   return request.post('/api/novel/crawl/site/submit', options).then((res) => res.data)
 }
 
-/** 任务列表（按创建时间倒序），GET /api/novel/crawl/list */
-export function listCrawls() {
-  return request.get('/api/novel/crawl/list').then((res) => res.data)
+/**
+ * 抓取进度分页（新的在前），GET /api/novel/crawl/list
+ * params = {page, size, status?（空 = 全部，ACTIVE = 排队 + 抓取中，或 SUCCEEDED / FAILED / CANCELLED）, mode?（book 整本 / site 整站）}
+ * → {records, total, page, size, active（全部任务里还在进行的个数）}
+ */
+export function listCrawls(params) {
+  return request.get('/api/novel/crawl/list', { params }).then((res) => res.data)
+}
+
+// ---------------------------------------------------------------- 整站工作区（一个首页一个工作区，同一首页再提交的书加入进行中的任务）
+
+/**
+ * 工作区列表（进行中的在前），GET /api/novel/crawl/workspaces
+ * → [{homeUrl, host, siteName, status: RUNNING|IDLE, activeTaskId, taskCount, resumable, words, lastTime,
+ *     books{total, queued, running, succeeded, failed, cancelled}, current?{bookName, message, chapterDone, chapterTotal, progress}}]
+ */
+export function listWorkspaces() {
+  return request.get('/api/novel/crawl/workspaces').then((res) => res.data)
+}
+
+/** 工作区里每本书的进度（抓取中的置顶），params = {home, status?（ACTIVE / SUCCEEDED / FAILED / CANCELLED / QUEUED）, keyword?, page, size} */
+export function listWorkspaceBooks(params) {
+  return request.get('/api/novel/crawl/workspaces/books', { params }).then((res) => res.data)
+}
+
+export function cancelWorkspace(home) {
+  return request.post('/api/novel/crawl/workspaces/cancel', { home }).then((res) => res.data)
+}
+
+/** 继续没抓完的书（断点续抓，已抓的章节不重抓） */
+export function resumeWorkspace(home) {
+  return request.post('/api/novel/crawl/workspaces/resume', { home }).then((res) => res.data)
+}
+
+/** 删除工作区（任务 / 书籍明细 / 断点；已存到文件管理的 txt 保留）→ {deleted, skipped, checkpointErrors} */
+export function deleteWorkspace(home) {
+  return request.post('/api/novel/crawl/workspaces/delete', { home }).then((res) => res.data)
+}
+
+/** 删除已结束的抓取任务（含书籍明细与断点，进行中的跳过，已存的 txt 不删）→ {deleted, skipped, checkpointErrors} */
+export function deleteCrawls(ids) {
+  return request.post('/api/novel/crawl/delete', { ids }).then((res) => res.data)
 }
 
 /** 整站任务的书籍明细，GET /api/novel/crawl/{id}/books（单本任务返回空数组） */
@@ -135,6 +174,26 @@ export function useSavedUrl(id) {
 /** 删除常用地址，POST /api/novel/crawl/saved-urls/{id}/delete */
 export function deleteSavedUrl(id) {
   return request.post(`/api/novel/crawl/saved-urls/${id}/delete`).then((res) => res.data)
+}
+
+// ---------------------------------------------------------------- 小说网站爬取（用户指定的网站，任意站内地址归一为首页）
+
+/**
+ * 网站列表（先加的在前），GET /api/novel/crawl/sites
+ * → [{id, homeUrl, host, name, sampleUrl, note, rule?{id, status, siteName, mastered, total, error}, catalog?{id, decision, status, bookCount}}]
+ */
+export function listSites() {
+  return request.get('/api/novel/crawl/sites').then((res) => res.data)
+}
+
+/** 新增 / 修改：{id?, url（站内任意地址）, name?, note?} → 存为首页；同一首页已存在则更新它 */
+export function saveSite(body) {
+  return request.post('/api/novel/crawl/sites/save', body).then((res) => res.data)
+}
+
+/** 删除网站记录（AI 解析规则 / 书目不受影响） */
+export function deleteSite(id) {
+  return request.post(`/api/novel/crawl/sites/${id}/delete`).then((res) => res.data)
 }
 
 // ---------------------------------------------------------------- 全自动爬虫：站点书目（/api/novel/crawl/catalogs/**）

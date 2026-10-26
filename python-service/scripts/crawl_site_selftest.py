@@ -61,7 +61,9 @@ def build_site(root: str) -> None:
     def book_list(slug: str, items: list[tuple[str, str]], next_href: str | None) -> str:
         lis = "".join(f"<li><a href='/book/{b[1]}/'>{b[0]}</a></li>" for b in items)
         nxt = f"<a class='next' href='{next_href}'>下一页</a>" if next_href else ""
-        return page("列表", f"<ul class='seeWell cf'>{lis}</ul>{nxt}")
+        # 侧栏排行：别的分类的书（书名 / 分类不能按这里算）
+        rank = "<div class='rank'>排行：<a href='/book/st/'>三体</a></div>" if slug == "xuanhuan" else ""
+        return page("列表", f"<ul class='seeWell cf'>{lis}</ul>{nxt}{rank}")
 
     for name, slug in CATEGORIES:
         write(f"cat/{slug}.html", book_list(slug, BOOKS[slug], f"/cat/{slug}-2.html"))
@@ -71,8 +73,12 @@ def build_site(root: str) -> None:
     results = "".join(f"<li><a href='/book/{slug}/'>{name}</a> 测试作者</li>" for name, slug in all_books)
     write("search.html", page("搜索结果", f"<ul class='result'>{results}</ul>"))
 
+    cat_of = {b[1]: c_name for c_name, c_slug in CATEGORIES for b in BOOKS[c_slug]}
+    cat_of.update({b[1]: "玄幻" for b in PAGE2})
     for name, slug in all_books:
         write(f"book/{slug}/index.html", page(name, (
+            "<div class='header'><h1>测试书城</h1><span>站长推荐 作者：站长</span></div>"
+            f"<div class='path'>当前位置：<a href='/'>首页</a> &gt; <a href='/cat/x.html'>{cat_of[slug]}小说</a> &gt; {name}</div>"
             f"<div class='b-info'><h1>{name}</h1></div>"
             f"<a class='reader' href='/book/{slug}/toc.html'>开始阅读</a>"
             f"<div id='intro'>这是《{name}》的简介。</div>"
@@ -131,6 +137,11 @@ def main() -> int:
             toc_file = catalog.DATA_DIR / b["tocPath"]
             assert toc_file.is_file(), f"目录文件没写：{toc_file}"
         assert any(b["bookName"] == "诡秘之主" for b in res["books"]), "分类列表翻页没有生效"
+        # 书名 / 作者 / 分类以书籍页为准：页头的站名 h1、「作者：站长」不能取；侧栏里的《三体》要按面包屑算科幻
+        for b in res["books"]:
+            assert b["bookName"] != "测试书城" and b["author"] == "测试作者", f"书名 / 作者取错：{b['bookName']} / {b['author']}"
+        st = next((b for b in res["books"] if b["bookName"] == "三体"), None)
+        assert st and st["category"] == "科幻", f"《三体》在玄幻页侧栏被发现，分类应按书籍页面包屑算科幻：{st}"
         # 扩充：已采集的书不再重复
         known = [b["bookUrl"] for b in res["books"]]
         more = _wait_catalog(catalog.submit(catalog.CatalogRequest(**common, phase="scan", maxBooks=20,
@@ -139,6 +150,20 @@ def main() -> int:
         assert more["status"] == "succeeded", more["error"]
         assert len(more["books"]) == 3, f"共 8 本、已采 5 本，应新增 3 本，实际 {len(more['books'])}"
         assert not {b["bookUrl"] for b in more["books"]} & set(known), "扩充时重复采集了已有的书"
+        # 目录后台补全：书先全部出来（tocSkipped），同一任务接着补目录，tocUpdates 每本一条
+        async_ = _wait_catalog(catalog.submit(catalog.CatalogRequest(**common, phase="scan", maxBooks=20, contentSamples=0,
+                                                                     tocAsync=True, tocPages=5)))
+        print(f"后台补全：{async_['report']['summary']}，tocUpdates {len(async_['tocUpdates'])} 条")
+        assert async_["status"] == "succeeded" and len(async_["books"]) == 8, async_.get("error")
+        assert len(async_["tocUpdates"]) == 8 and all(u["tocOk"] and u["chapterCount"] == 3 for u in async_["tocUpdates"]), async_["tocUpdates"]
+        assert all((catalog.DATA_DIR / u["tocPath"]).is_file() for u in async_["tocUpdates"]), "目录文件没写"
+        assert all(b["chapterCount"] == 3 and not b["tocSkipped"] for b in async_["books"]), "书目里的章节数没同步"
+        # 只补目录（phase=toc）：指定 2 本
+        targets = [{"bookUrl": b["bookUrl"], "tocUrl": b["tocUrl"], "bookName": b["bookName"]} for b in async_["books"][:2]]
+        only = _wait_catalog(catalog.submit(catalog.CatalogRequest(**common, phase="toc", tocTargets=targets)))
+        print(f"只补目录：{only['report']['summary']}")
+        assert only["status"] == "succeeded" and not only["books"] and len(only["tocUpdates"]) == 2, only
+        assert all(u["chapterCount"] == 3 for u in only["tocUpdates"]), only["tocUpdates"]
         shutil.rmtree(catalog.DATA_DIR / catalog_dir, ignore_errors=True)
         site = {"books": res["books"]}
 
@@ -156,6 +181,11 @@ def main() -> int:
         assert "searchkey={书名}" in item["pattern"] and "t=articlename" in item["pattern"], item["pattern"]
         assert sm["search"]["works"] and sm["search"]["field"] == "searchkey" and sm["search"]["method"] == "GET", sm["search"]
         assert sm["search"]["testKeyword"] == "剑来", sm["search"]
+        # 首页链接规律：分类导航 3 个（/cat/{slug}.html），文字是分类名
+        hl = {g["role"]: g for g in sm["homeLinks"]["groups"]}
+        print("首页链接规律：", [(g["label"], g["count"], g["pattern"]) for g in sm["homeLinks"]["groups"]])
+        assert hl["category"]["count"] == 3 and "/cat/" in hl["category"]["pattern"], hl.get("category")
+        assert [e["text"] for e in hl["category"]["examples"]] == ["玄幻", "都市", "科幻"], hl["category"]["examples"]
         with Fetcher(300, False) as f2:
             _, html = f2.get_html(base + "/login-only.html")
         assert parser.find_search_forms(html, base + "/login-only.html") == [], "登录框不应被当成搜索框"

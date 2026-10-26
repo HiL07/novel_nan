@@ -11,8 +11,10 @@ import AppMain from './AppMain.vue'
 </script>
 
 <style scoped>
+/* 整体固定一屏高：只有右侧内容区（AppMain）自己滚动，左侧导航栏不跟着动 */
 .app-wrapper {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 </style>

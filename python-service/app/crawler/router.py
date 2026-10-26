@@ -111,9 +111,9 @@ def catalog_submit(req: catalog.CatalogRequest):
 
 
 @router.get("/catalog/jobs/{job_id}")
-def catalog_get(job_id: str, since: int = 0):
-    """状态 + 第 since 本之后的书目（增量）+ 结束时的测试报告。"""
-    job = catalog.get(job_id, since)
+def catalog_get(job_id: str, since: int = 0, tocSince: int = 0):
+    """状态 + 第 since 本之后的书目、第 tocSince 条之后的目录补全结果（增量）+ 结束时的报告。"""
+    job = catalog.get(job_id, since, tocSince)
     if job is None:
         raise LocalError(404, "书目采集任务不存在（AI 服务可能已重启）")
     return ok(job)

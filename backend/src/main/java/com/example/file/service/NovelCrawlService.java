@@ -3,10 +3,12 @@ package com.example.file.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
+import com.example.file.entity.CrawlSite;
 import com.example.file.entity.CrawlSiteRule;
 import com.example.file.entity.FileInfo;
 import com.example.file.entity.NovelCrawl;
 import com.example.file.entity.NovelCrawlBook;
+import com.example.file.mapper.CrawlSiteMapper;
 import com.example.file.mapper.NovelCrawlBookMapper;
 import com.example.file.mapper.NovelCrawlMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -38,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,16 +81,26 @@ public class NovelCrawlService {
     private final AiServiceClient aiClient;
     private final CrawlRuleService ruleService;
     private final ObjectMapper objectMapper;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+    private final CrawlSiteMapper siteMapper;
+    /** 整站工作区：「同一首页加入进行中的任务」与「任务收尾」互斥，避免刚加入的书没人抓 */
+    private final Object workspaceLock = new Object();
+    /**
+     * 按首页分队列：同一首页（scheme://host[:port]/）的任务依次执行（照顾站点限速，整站工作区与单本共用一条队），
+     * 不同首页互不影响、并行执行。lanes 存每个首页队尾的 Future，新任务接在它后面。
+     */
+    private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "novel-crawl");
         t.setDaemon(true);
         return t;
     });
+    private final Map<String, CompletableFuture<Void>> lanes = new ConcurrentHashMap<>();
     /** 已被请求取消的整站任务（跨线程可见，抓完当前这本着循环检查） */
     private final Set<Long> siteCancels = ConcurrentHashMap.newKeySet();
 
     public NovelCrawlService(NovelCrawlMapper crawlMapper, NovelCrawlBookMapper bookMapper, FileService fileService,
-                             AiServiceClient aiClient, CrawlRuleService ruleService, ObjectMapper objectMapper) {
+                             AiServiceClient aiClient, CrawlRuleService ruleService, ObjectMapper objectMapper,
+                             CrawlSiteMapper siteMapper) {
+        this.siteMapper = siteMapper;
         this.crawlMapper = crawlMapper;
         this.bookMapper = bookMapper;
         this.fileService = fileService;
@@ -115,6 +128,36 @@ public class NovelCrawlService {
         if (n > 0 || books > 0) {
             log.warn("已将 {} 个中断的抓取任务、{} 本书籍标记为失败", n, books);
         }
+    }
+
+    /** 同一首页是否已有任务在排队 / 执行 */
+    private boolean laneBusy(String url) {
+        CompletableFuture<Void> tail = lanes.get(laneKey(url));
+        return tail != null && !tail.isDone();
+    }
+
+    private static String laneKey(String url) {
+        String home = homeOf(url);
+        return home == null ? "" : home;
+    }
+
+    /** 放进该首页的队列：等同一首页前面的任务结束（成功失败都算）再执行 */
+    private void enqueue(String url, Runnable job) {
+        String key = laneKey(url);
+        lanes.compute(key, (k, prev) -> {
+            CompletableFuture<Void> start = prev == null ? CompletableFuture.completedFuture(null)
+                    : prev.handle((v, e) -> null);
+            CompletableFuture<Void> next = start.thenRunAsync(() -> {
+                try {
+                    job.run();
+                } catch (RuntimeException e) {
+                    log.error("抓取任务异常退出（{}）", k, e);
+                }
+            }, executor);
+            // 队尾执行完且仍是队尾时移除，避免首页越积越多
+            next.whenComplete((v, e) -> lanes.remove(k, next));
+            return next;
+        });
     }
 
     @PreDestroy
@@ -154,12 +197,19 @@ public class NovelCrawlService {
         if (site && books.isEmpty()) {
             throw new BizException(400, "整站抓取需要先在站点书目里勾选要抓的书");
         }
+        if (site) {
+            NovelCrawl joined = joinActiveWorkspace(body, books);
+            if (joined != null) {
+                return joined;
+            }
+        }
         NovelCrawl task = new NovelCrawl();
         task.setUrl((String) body.get("url"));
         task.setOptions(toJson(body));
         task.setStatus(NovelCrawl.QUEUED);
         task.setProgress(0);
-        task.setMessage("排队中");
+        String waitHost = laneBusy(task.getUrl()) ? CrawlRuleService.hostOf(task.getUrl()) : null;
+        task.setMessage(waitHost == null ? "排队中" : "排队中：同一网站（" + waitHost + "）还有任务在抓，抓完接着抓这个");
         task.setCreateTime(LocalDateTime.now());
         task.setUpdateTime(task.getCreateTime());
         crawlMapper.insert(task);
@@ -167,7 +217,7 @@ public class NovelCrawlService {
             insertBooks(task.getId(), books);
         }
         Long taskId = task.getId();
-        executor.submit(() -> {
+        enqueue(task.getUrl(), () -> {
             if (site) {
                 runSite(taskId, body, null);
             } else {
@@ -175,6 +225,39 @@ public class NovelCrawlService {
             }
         });
         return decorate(task);
+    }
+
+    /**
+     * 一个首页只有一个工作区：该首页已有排队 / 抓取中的整站任务时，新勾选的书直接加入它（已在里面且没失败的跳过），
+     * 不再另开任务；runSite 会在抓完手头的书后接着抓新加入的。→ 加入的任务（message 说明加入了几本），没有进行中的返回 null
+     */
+    private NovelCrawl joinActiveWorkspace(Map<String, Object> body, List<Map<String, Object>> books) {
+        String home = homeOf(str(body.get("url")));
+        if (home == null) {
+            return null;
+        }
+        synchronized (workspaceLock) {
+            NovelCrawl active = crawlMapper.selectList(new LambdaQueryWrapper<NovelCrawl>()
+                            .in(NovelCrawl::getStatus, NovelCrawl.QUEUED, NovelCrawl.RUNNING)
+                            .like(NovelCrawl::getOptions, SITE_MARK).orderByAsc(NovelCrawl::getId))
+                    .stream().filter(t -> home.equals(homeOf(t.getUrl()))).findFirst().orElse(null);
+            if (active == null) {
+                return null;
+            }
+            Map<String, String> existing = new HashMap<>();
+            for (NovelCrawlBook b : bookMapper.selectList(new LambdaQueryWrapper<NovelCrawlBook>()
+                    .select(NovelCrawlBook::getTocUrl, NovelCrawlBook::getStatus).eq(NovelCrawlBook::getCrawlId, active.getId()))) {
+                existing.put(b.getTocUrl(), b.getStatus());
+            }
+            List<Map<String, Object>> fresh = books.stream()
+                    .filter(b -> !existing.containsKey((String) b.get("tocUrl"))).toList();
+            insertBooks(active.getId(), fresh);
+            NovelCrawl out = decorate(crawlMapper.selectById(active.getId()));
+            out.setMessage("已加入该网站正在进行的工作区：新增 " + fresh.size() + " 本"
+                    + (books.size() > fresh.size() ? "，" + (books.size() - fresh.size()) + " 本已在队列里" : ""));
+            log.info("整站工作区 {} 加入 {} 本（任务 {}）", home, fresh.size(), active.getId());
+            return out;
+        }
     }
 
     /** 整站抓取：强制 mode=site（不改调用方传入的 Map） */
@@ -256,8 +339,10 @@ public class NovelCrawlService {
                     .set(NovelCrawlBook::getMessage, "排队中（继续抓取）")
                     .set(NovelCrawlBook::getUpdateTime, LocalDateTime.now()));
         }
-        update(id, NovelCrawl.QUEUED, null, "排队中（从断点继续）");
-        executor.submit(() -> {
+        String resumeUrl = str(body.get("url"));
+        update(id, NovelCrawl.QUEUED, null, laneBusy(resumeUrl)
+                ? "排队中（从断点继续）：同一网站还有任务在抓，抓完接着抓这个" : "排队中（从断点继续）");
+        enqueue(resumeUrl, () -> {
             if (site) {
                 runSite(id, body, origin);
             } else {
@@ -344,9 +429,333 @@ public class NovelCrawlService {
         return getById(id);
     }
 
-    public List<NovelCrawl> list() {
-        return decorate(crawlMapper.selectList(new LambdaQueryWrapper<NovelCrawl>()
-                .orderByDesc(NovelCrawl::getCreateTime)));
+    /**
+     * 抓取进度分页：status 为空 = 全部，ACTIVE = 排队中 + 抓取中，其余按状态精确匹配；新的在前。
+     * → {records, total, page, size, active（全部任务里还在排队 / 抓取的个数，前端据此决定是否轮询）}
+     */
+    public Map<String, Object> page(int page, int size, String status, String mode) {
+        LambdaQueryWrapper<NovelCrawl> q = new LambdaQueryWrapper<NovelCrawl>().orderByDesc(NovelCrawl::getId);
+        if (NovelCrawl.MODE_SITE.equals(mode)) {
+            q.like(NovelCrawl::getOptions, SITE_MARK);
+        } else if (NovelCrawl.MODE_BOOK.equals(mode)) {
+            q.and(w -> w.isNull(NovelCrawl::getOptions).or().notLike(NovelCrawl::getOptions, SITE_MARK));
+        }
+        if ("ACTIVE".equalsIgnoreCase(status)) {
+            q.in(NovelCrawl::getStatus, NovelCrawl.QUEUED, NovelCrawl.RUNNING);
+        } else if (status != null && !status.isBlank()) {
+            q.eq(NovelCrawl::getStatus, status.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<NovelCrawl> p = crawlMapper.selectPage(
+                new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(Math.max(page, 1), Math.max(1, Math.min(size, 100))), q);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("records", decorate(p.getRecords()));
+        out.put("total", p.getTotal());
+        out.put("page", p.getCurrent());
+        out.put("size", p.getSize());
+        LambdaQueryWrapper<NovelCrawl> activeQ = new LambdaQueryWrapper<NovelCrawl>()
+                .in(NovelCrawl::getStatus, NovelCrawl.QUEUED, NovelCrawl.RUNNING);
+        if (NovelCrawl.MODE_SITE.equals(mode)) {
+            activeQ.like(NovelCrawl::getOptions, SITE_MARK);
+        } else if (NovelCrawl.MODE_BOOK.equals(mode)) {
+            activeQ.and(w -> w.isNull(NovelCrawl::getOptions).or().notLike(NovelCrawl::getOptions, SITE_MARK));
+        }
+        out.put("active", crawlMapper.selectCount(activeQ));
+        return out;
+    }
+
+    // ---------------------------------------------------------------- 整站工作区（一个首页一个工作区）
+
+    /** options JSON 里整站任务的标记（toJson 不加空格） */
+    private static final String SITE_MARK = "\"mode\":\"site\"";
+
+    /** 首页：scheme://host[:port]/，与小说网站 / 站点书目同口径 */
+    static String homeOf(String url) {
+        String origin = url == null ? null : originOf(url.trim());
+        return origin == null ? null : origin.toLowerCase(java.util.Locale.ROOT) + "/";
+    }
+
+    private List<NovelCrawl> siteTasks() {
+        return crawlMapper.selectList(new LambdaQueryWrapper<NovelCrawl>()
+                .like(NovelCrawl::getOptions, SITE_MARK).orderByDesc(NovelCrawl::getId));
+    }
+
+    /** 该首页的全部抓取任务（单本 + 整站），新的在前 */
+    private List<NovelCrawl> tasksOf(String home) {
+        String h = homeOf(home);
+        if (h == null) {
+            throw new BizException(400, "首页地址不合法");
+        }
+        return decorate(crawlMapper.selectList(new LambdaQueryWrapper<NovelCrawl>().orderByDesc(NovelCrawl::getId))
+                .stream().filter(t -> h.equals(homeOf(t.getUrl()))).toList());
+    }
+
+    private static boolean isSiteTask(NovelCrawl t) {
+        return t.getOptions() != null && t.getOptions().contains(SITE_MARK);
+    }
+
+    /**
+     * 抓取进度的工作区列表（按首页归组：单本抓取 + 整站抓取都在里面，进行中的在前）：
+     * [{homeUrl, host, siteName, status: RUNNING|IDLE, activeTaskId, taskCount, sources{book, site},
+     *   books{total, queued, running, succeeded, failed, cancelled}, words, current{bookName, source, message, chapterDone,
+     *   chapterTotal, progress}, lastTime, resumable}]
+     */
+    public List<Map<String, Object>> workspaces() {
+        Map<String, List<NovelCrawl>> groups = new LinkedHashMap<>();
+        for (NovelCrawl t : decorate(crawlMapper.selectList(new LambdaQueryWrapper<NovelCrawl>().orderByDesc(NovelCrawl::getId)))) {
+            String home = homeOf(t.getUrl());
+            if (home != null) {
+                groups.computeIfAbsent(home, k -> new ArrayList<>()).add(t);
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map.Entry<String, List<NovelCrawl>> e : groups.entrySet()) {
+            List<NovelCrawl> tasks = e.getValue();
+            List<Map<String, Object>> rows = progressRows(tasks);
+            NovelCrawl active = tasks.stream().filter(this::isActiveTask).findFirst().orElse(null);
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            for (String st : List.of("total", "queued", "running", "succeeded", "failed", "cancelled")) {
+                counts.put(st, 0);
+            }
+            int words = 0;
+            Map<String, Object> current = null;
+            for (Map<String, Object> r : rows) {
+                String st = (String) r.get("status");
+                counts.merge("total", 1, Integer::sum);
+                counts.merge(st == null ? "queued" : st.toLowerCase(java.util.Locale.ROOT), 1, Integer::sum);
+                words += NovelCrawl.SUCCEEDED.equals(st) ? (Integer) r.get("wordCount") : 0;
+                if (NovelCrawl.RUNNING.equals(st) && current == null) {
+                    current = new LinkedHashMap<>();
+                    for (String k : List.of("bookName", "source", "message", "chapterDone", "chapterTotal", "progress")) {
+                        current.put(k, r.get(k));
+                    }
+                }
+            }
+            Map<String, Integer> sources = new LinkedHashMap<>();
+            sources.put("book", (int) tasks.stream().filter(t -> !isSiteTask(t)).count());
+            sources.put("site", (int) tasks.stream().filter(NovelCrawlService::isSiteTask).count());
+            Map<String, Object> ws = new LinkedHashMap<>();
+            ws.put("homeUrl", e.getKey());
+            ws.put("host", CrawlRuleService.hostOf(e.getKey()));
+            ws.put("siteName", siteNameOf(e.getKey()));
+            ws.put("status", active != null ? "RUNNING" : "IDLE");
+            ws.put("activeTaskId", active == null ? null : active.getId());
+            ws.put("taskCount", tasks.size());
+            ws.put("sources", sources);
+            ws.put("books", counts);
+            ws.put("words", words);
+            if (current != null) {
+                ws.put("current", current);
+            }
+            ws.put("lastTime", tasks.get(0).getUpdateTime());
+            ws.put("resumable", tasks.stream().anyMatch(this::canResume));
+            out.add(ws);
+        }
+        out.sort((x, y) -> Boolean.compare("IDLE".equals(x.get("status")), "IDLE".equals(y.get("status"))));
+        return out;
+    }
+
+    /**
+     * 统一的进度行：整站任务的每本书一行（source=site），单本任务一行（source=book，带 task 供继续 / 重抓 / 改参数）。
+     * 每行 {key, source, crawlId, bookId, bookName, author, category, url, status, progress, message, chapterDone,
+     * chapterTotal, chapterFailed, wordCount, fileId, createTime, updateTime, task?}
+     */
+    private List<Map<String, Object>> progressRows(List<NovelCrawl> tasks) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<Long> siteIds = tasks.stream().filter(NovelCrawlService::isSiteTask).map(NovelCrawl::getId).toList();
+        if (!siteIds.isEmpty()) {
+            for (NovelCrawlBook b : bookMapper.selectList(new LambdaQueryWrapper<NovelCrawlBook>().in(NovelCrawlBook::getCrawlId, siteIds))) {
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("key", "b" + b.getId());
+                r.put("source", NovelCrawl.MODE_SITE);
+                r.put("crawlId", b.getCrawlId());
+                r.put("bookId", b.getId());
+                r.put("bookName", b.getBookName());
+                r.put("author", b.getAuthor());
+                r.put("category", b.getCategory());
+                r.put("url", b.getTocUrl());
+                r.put("status", b.getStatus());
+                r.put("progress", nz(b.getProgress()));
+                r.put("message", b.getMessage());
+                r.put("chapterDone", nz(b.getChapterDone()));
+                r.put("chapterTotal", nz(b.getChapterTotal()));
+                r.put("chapterFailed", nz(b.getChapterFailed()));
+                r.put("wordCount", nz(b.getWordCount()));
+                r.put("fileId", b.getFileId());
+                r.put("createTime", b.getCreateTime());
+                r.put("updateTime", b.getUpdateTime());
+                rows.add(r);
+            }
+        }
+        for (NovelCrawl t : tasks) {
+            if (isSiteTask(t)) {
+                continue;
+            }
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("key", "t" + t.getId());
+            r.put("source", NovelCrawl.MODE_BOOK);
+            r.put("crawlId", t.getId());
+            r.put("bookId", null);
+            r.put("bookName", t.getBookName());
+            r.put("author", t.getAuthor());
+            r.put("category", null);
+            r.put("url", t.getUrl());
+            r.put("status", t.getStatus());
+            r.put("progress", nz(t.getProgress()));
+            r.put("message", t.getMessage());
+            r.put("chapterDone", nz(t.getChapterDone()));
+            r.put("chapterTotal", nz(t.getChapterTotal()));
+            r.put("chapterFailed", nz(t.getChapterFailed()));
+            r.put("wordCount", nz(t.getWordCount()));
+            r.put("fileId", t.getFileId());
+            r.put("createTime", t.getCreateTime());
+            r.put("updateTime", t.getUpdateTime());
+            r.put("task", t);
+            rows.add(r);
+        }
+        return rows;
+    }
+
+    /**
+     * 工作区里的每本小说（该首页的单本抓取 + 整站抓取的每本书）：抓取中的置顶，其余新的在前。
+     * status 空 = 全部，ACTIVE = 排队 + 抓取中；source = book（单本抓取）/ site（整站抓取）/ 空；keyword 书名模糊。
+     * → {records, total, page, size}
+     */
+    public Map<String, Object> workspaceBooks(String home, String status, String keyword, String source, int page, int size) {
+        String st = status == null ? "" : status.trim().toUpperCase(java.util.Locale.ROOT);
+        String kw = keyword == null ? "" : keyword.trim();
+        String src = source == null ? "" : source.trim();
+        List<Map<String, Object>> rows = progressRows(tasksOf(home)).stream()
+                .filter(r -> st.isEmpty() || ("ACTIVE".equals(st)
+                        ? NovelCrawl.QUEUED.equals(r.get("status")) || NovelCrawl.RUNNING.equals(r.get("status"))
+                        : st.equals(r.get("status"))))
+                .filter(r -> src.isEmpty() || src.equals(r.get("source")))
+                .filter(r -> kw.isEmpty() || (r.get("bookName") != null && ((String) r.get("bookName")).contains(kw)))
+                .sorted(java.util.Comparator
+                        .comparing((Map<String, Object> r) -> NovelCrawl.RUNNING.equals(r.get("status")) ? 0 : 1)
+                        .thenComparing(r -> (LocalDateTime) r.get("createTime"),
+                                java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .toList();
+        int sz = Math.max(1, Math.min(size, 100));
+        int pg = Math.max(page, 1);
+        int from = Math.min((pg - 1) * sz, rows.size());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("records", rows.subList(from, Math.min(from + sz, rows.size())));
+        out.put("total", rows.size());
+        out.put("page", pg);
+        out.put("size", sz);
+        return out;
+    }
+
+    /** 取消工作区里所有排队 / 抓取中的任务（单本 + 整站）→ {cancelled} */
+    public Map<String, Object> workspaceCancel(String home) {
+        List<NovelCrawl> active = tasksOf(home).stream().filter(this::isActiveTask).toList();
+        if (active.isEmpty()) {
+            throw new BizException(400, "这个工作区没有正在进行的抓取");
+        }
+        active.forEach(t -> cancel(t.getId()));
+        return Map.of("cancelled", active.size());
+    }
+
+    /** 继续工作区里所有没抓完的：失败 / 取消的单本、还有书没成功的整站任务，都从断点接着抓（同一网站依次排队）→ {resumed} */
+    public Map<String, Object> workspaceResume(String home) {
+        List<NovelCrawl> targets = tasksOf(home).stream().filter(this::canResume).toList();
+        if (targets.isEmpty()) {
+            throw new BizException(400, tasksOf(home).stream().anyMatch(this::isActiveTask)
+                    ? "这个工作区正在抓取中" : "这个工作区的小说都抓完了");
+        }
+        // 先旧后新，排队顺序与提交顺序一致
+        List<NovelCrawl> ordered = new ArrayList<>(targets);
+        java.util.Collections.reverse(ordered);
+        ordered.forEach(t -> resume(t.getId(), null));
+        return Map.of("resumed", ordered.size());
+    }
+
+    /** 删除工作区（该首页的全部单本 / 整站任务、书籍明细和断点；进行中的不能删；已存的 txt 保留） */
+    public Map<String, Object> workspaceDelete(String home) {
+        List<NovelCrawl> tasks = tasksOf(home);
+        if (tasks.stream().anyMatch(this::isActiveTask)) {
+            throw new BizException(400, "这个工作区正在抓取中，请先取消");
+        }
+        return delete(tasks.stream().map(NovelCrawl::getId).toList());
+    }
+
+    /** 能从断点继续：不在进行中，且（单本）失败 / 取消，或（整站）还有书没成功 */
+    private boolean canResume(NovelCrawl t) {
+        if (isActiveTask(t)) {
+            return false;
+        }
+        if (isSiteTask(t)) {
+            return countBooks(t.getId(), NovelCrawlBook.SUCCEEDED) < countAllBooks(t.getId());
+        }
+        return NovelCrawl.FAILED.equals(t.getStatus()) || NovelCrawl.CANCELLED.equals(t.getStatus());
+    }
+
+    private boolean isActiveTask(NovelCrawl t) {
+        return NovelCrawl.QUEUED.equals(t.getStatus()) || NovelCrawl.RUNNING.equals(t.getStatus());
+    }
+
+    private int countAllBooks(Long crawlId) {
+        return Math.toIntExact(bookMapper.selectCount(new LambdaQueryWrapper<NovelCrawlBook>().eq(NovelCrawlBook::getCrawlId, crawlId)));
+    }
+
+    /** 工作区显示名：小说网站里填的名称 → 该站 AI 解析规则的站点名 → 域名 */
+    private String siteNameOf(String home) {
+        CrawlSite site = siteMapper.selectOne(new LambdaQueryWrapper<CrawlSite>().eq(CrawlSite::getHomeUrl, home).last("LIMIT 1"));
+        if (site != null && site.getName() != null && !site.getName().isBlank()) {
+            return site.getName();
+        }
+        CrawlSiteRule rule = ruleService.findForUrl(home);
+        if (rule != null && rule.getSiteName() != null && !rule.getSiteName().isBlank()) {
+            return rule.getSiteName();
+        }
+        return CrawlRuleService.hostOf(home);
+    }
+
+    /**
+     * 删除抓取任务（可多选）：只删已结束的（排队 / 抓取中的要先取消），连同整站任务的书籍明细和 AI 服务里的断点
+     * （data/crawl-cache/&lt;key&gt;/）；已保存到文件管理的 txt 不删。→ {deleted, skipped（进行中跳过的）, checkpointErrors}
+     */
+    public Map<String, Object> delete(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            throw new BizException(400, "请选择要删除的任务");
+        }
+        int deleted = 0;
+        int skipped = 0;
+        int checkpointErrors = 0;
+        for (Long id : ids) {
+            NovelCrawl task = crawlMapper.selectById(id);
+            if (task == null) {
+                continue;
+            }
+            if (NovelCrawl.QUEUED.equals(task.getStatus()) || NovelCrawl.RUNNING.equals(task.getStatus())) {
+                skipped++;
+                continue;
+            }
+            List<String> keys = new ArrayList<>();
+            keys.add(resumeKey(id, null));
+            for (NovelCrawlBook book : bookMapper.selectList(new LambdaQueryWrapper<NovelCrawlBook>()
+                    .select(NovelCrawlBook::getId).eq(NovelCrawlBook::getCrawlId, id))) {
+                keys.add(resumeKey(id, book.getId()));
+            }
+            for (String key : keys) {
+                try {
+                    aiClient.deleteCrawlCheckpoint(key);
+                } catch (Exception e) {
+                    // AI 服务没开 / 断点正被使用：数据库照删，断点文件留着（不影响以后的任务，key 不会重复）
+                    checkpointErrors++;
+                    log.warn("删除抓取断点 {} 失败：{}", key, e.getMessage());
+                }
+            }
+            bookMapper.delete(new LambdaQueryWrapper<NovelCrawlBook>().eq(NovelCrawlBook::getCrawlId, id));
+            crawlMapper.deleteById(id);
+            deleted++;
+        }
+        log.info("删除抓取任务 {} 个，跳过进行中的 {} 个", deleted, skipped);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("deleted", deleted);
+        out.put("skipped", skipped);
+        out.put("checkpointErrors", checkpointErrors);
+        return out;
     }
 
     public NovelCrawl getById(Long id) {
@@ -481,7 +890,6 @@ public class NovelCrawlService {
         Map<String, Object> base = singleBookBody(body);
         String saveDir = str(body.get("saveDir"));
         Integer cap = intOrNull(body.get("maxChaptersPerBook"));
-        int total = books.size();
         int done = 0, failed = 0, chapters = 0, chapterFailed = 0, words = 0;
         // 继续抓取：已成功的书不再抓，统计直接计入
         for (NovelCrawlBook book : books) {
@@ -492,19 +900,29 @@ public class NovelCrawlService {
                 words += nz(book.getWordCount());
             }
         }
-        update(taskId, NovelCrawl.RUNNING, done * 100 / total, done > 0
+        // 这次要抓的：开始时没成功的（含上次失败 / 取消的），加上抓的过程中新加入工作区的（QUEUED）
+        Set<Long> initial = new java.util.HashSet<>();
+        books.stream().filter(bk -> !NovelCrawlBook.SUCCEEDED.equals(bk.getStatus())).forEach(bk -> initial.add(bk.getId()));
+        Set<Long> handled = new java.util.HashSet<>();
+        int total = books.size();
+        update(taskId, NovelCrawl.RUNNING, done * 100 / Math.max(total, 1), done > 0
                 ? "整站抓取：从断点继续，已完成 " + done + "/" + total + " 本"
                 : "整站抓取：共 " + total + " 本，开始");
         log.info("整站抓取开始 crawlId={} 共 {} 本，已完成 {} 本", taskId, total, done);
         try {
-            for (NovelCrawlBook book : books) {
-                if (NovelCrawlBook.SUCCEEDED.equals(book.getStatus())) {
-                    continue;
+            while (true) {
+                NovelCrawlBook book;
+                synchronized (workspaceLock) {
+                    book = siteCancels.contains(taskId) ? null : nextSiteBook(taskId, initial, handled);
+                    total = Math.toIntExact(bookMapper.selectCount(new LambdaQueryWrapper<NovelCrawlBook>()
+                            .eq(NovelCrawlBook::getCrawlId, taskId)));
+                    if (book == null) {
+                        // 收尾在锁里写状态：之后再提交的同首页书会另开任务，不会加进一个已经结束的任务
+                        finishSite(taskId, done, total, failed, chapters, chapterFailed, words);
+                        return;
+                    }
                 }
-                if (siteCancels.contains(taskId)) {
-                    patchBook(book.getId(), NovelCrawlBook.CANCELLED, null, "已取消");
-                    break;
-                }
+                handled.add(book.getId());
                 String label = book.getBookName() == null || book.getBookName().isBlank()
                         ? book.getTocUrl() : book.getBookName();
                 patchBook(book.getId(), NovelCrawlBook.RUNNING, 0, "提交中…");
@@ -553,32 +971,13 @@ public class NovelCrawlService {
                     patchBook(book.getId(), NovelCrawlBook.FAILED, null, truncate("失败：" + e.getMessage()));
                 }
                 done++;
-                NovelCrawl patch = patch(taskId, NovelCrawl.RUNNING, Math.min(99, done * 100 / total),
+                NovelCrawl patch = patch(taskId, NovelCrawl.RUNNING, Math.min(99, done * 100 / Math.max(total, 1)),
                         "第 " + done + "/" + total + " 本：" + label);
                 patch.setChapterTotal(chapters);
                 patch.setChapterFailed(chapterFailed);
                 patch.setWordCount(words);
                 crawlMapper.updateById(patch);
-                if (siteCancels.contains(taskId)) {
-                    break;
-                }
             }
-
-            if (siteCancels.contains(taskId)) {
-                update(taskId, NovelCrawl.CANCELLED, null,
-                        "已取消：完成 " + done + "/" + total + " 本（已抓到的书保留为文件，进度已保存，可继续抓取）");
-                return;
-            }
-            int ok = countBooks(taskId, NovelCrawlBook.SUCCEEDED);
-            String message = "整站抓取完成：成功 " + ok + "/" + total + " 本"
-                    + (failed > 0 ? "，失败 " + failed + " 本" : "")
-                    + (words > 0 ? "，共 " + words + " 字" : "");
-            NovelCrawl patch = patch(taskId, ok == 0 ? NovelCrawl.FAILED : NovelCrawl.SUCCEEDED, 100, message);
-            patch.setChapterTotal(chapters);
-            patch.setChapterFailed(chapterFailed);
-            patch.setWordCount(words);
-            crawlMapper.updateById(patch);
-            log.info("整站抓取结束 crawlId={} {}", taskId, message);
         } catch (Exception e) {
             log.error("整站抓取异常 crawlId={}", taskId, e);
             update(taskId, NovelCrawl.FAILED, null, "整站抓取异常：" + e.getMessage());
@@ -593,6 +992,36 @@ public class NovelCrawlService {
                     .set(NovelCrawlBook::getUpdateTime, LocalDateTime.now()));
             siteCancels.remove(taskId);
         }
+    }
+
+    /** 下一本要抓的书：这次开始时没成功的，或抓的过程中新加入的（QUEUED），按加入顺序；抓过的不再抓 */
+    private NovelCrawlBook nextSiteBook(Long taskId, Set<Long> initial, Set<Long> handled) {
+        return bookMapper.selectList(new LambdaQueryWrapper<NovelCrawlBook>()
+                        .eq(NovelCrawlBook::getCrawlId, taskId).ne(NovelCrawlBook::getStatus, NovelCrawlBook.SUCCEEDED)
+                        .orderByAsc(NovelCrawlBook::getId))
+                .stream()
+                .filter(bk -> !handled.contains(bk.getId())
+                        && (NovelCrawlBook.QUEUED.equals(bk.getStatus()) || initial.contains(bk.getId())))
+                .findFirst().orElse(null);
+    }
+
+    /** 整站任务收尾：取消 / 完成 / 全部失败 */
+    private void finishSite(Long taskId, int done, int total, int failed, int chapters, int chapterFailed, int words) {
+        if (siteCancels.contains(taskId)) {
+            update(taskId, NovelCrawl.CANCELLED, null,
+                    "已取消：完成 " + done + "/" + total + " 本（已抓到的书保留为文件，进度已保存，可继续抓取）");
+            return;
+        }
+        int ok = countBooks(taskId, NovelCrawlBook.SUCCEEDED);
+        String message = "整站抓取完成：成功 " + ok + "/" + total + " 本"
+                + (failed > 0 ? "，失败 " + failed + " 本" : "")
+                + (words > 0 ? "，共 " + words + " 字" : "");
+        NovelCrawl patch = patch(taskId, ok == 0 ? NovelCrawl.FAILED : NovelCrawl.SUCCEEDED, 100, message);
+        patch.setChapterTotal(chapters);
+        patch.setChapterFailed(chapterFailed);
+        patch.setWordCount(words);
+        crawlMapper.updateById(patch);
+        log.info("整站抓取结束 crawlId={} {}", taskId, message);
     }
 
     /** 轮询一本书的 Python 任务直到终态，过程中持续更新子行。 */

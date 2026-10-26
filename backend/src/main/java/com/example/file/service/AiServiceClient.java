@@ -108,6 +108,11 @@ public class AiServiceClient {
         client.post().uri("/api/crawl/jobs/{id}/release", jobId).retrieve().toBodilessEntity();
     }
 
+    /** POST /api/crawl/checkpoints/{key}/delete：删除抓取断点（删任务时；断点正被任务使用时 Python 返回 400） */
+    public void deleteCrawlCheckpoint(String key) {
+        client.post().uri("/api/crawl/checkpoints/{key}/delete", key).retrieve().toBodilessEntity();
+    }
+
     /** GET /api/crawl/checkpoints/{key} → {code, data: {exists, url, bookName, chapterTotal, chapterSaved}} */
     public JsonNode crawlCheckpoint(String key) {
         return client.get().uri("/api/crawl/checkpoints/{key}", key).retrieve().body(JsonNode.class);
@@ -135,9 +140,10 @@ public class AiServiceClient {
         return client.post().uri("/api/crawl/catalog/jobs").body(body).retrieve().body(JsonNode.class);
     }
 
-    /** GET /api/crawl/catalog/jobs/{jobId}?since=N → {code, data: 状态 + 第 N 本之后的书目 + report} */
-    public JsonNode getCatalogJob(String jobId, int since) {
-        return client.get().uri("/api/crawl/catalog/jobs/{id}?since={since}", jobId, since).retrieve().body(JsonNode.class);
+    /** GET /api/crawl/catalog/jobs/{jobId}?since=N&tocSince=M → {code, data: 状态 + 第 N 本之后的书目 + 第 M 条之后的目录补全 + report} */
+    public JsonNode getCatalogJob(String jobId, int since, int tocSince) {
+        return client.get().uri("/api/crawl/catalog/jobs/{id}?since={since}&tocSince={tocSince}", jobId, since, tocSince)
+                .retrieve().body(JsonNode.class);
     }
 
     /** POST /api/crawl/catalog/jobs/{jobId}/cancel */

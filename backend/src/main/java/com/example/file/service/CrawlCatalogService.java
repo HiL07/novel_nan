@@ -72,7 +72,8 @@ public class CrawlCatalogService {
     /** 最长跟踪 6 小时（500 本 × 详情 + 目录分页，按 1 秒间隔约 30~60 分钟） */
     private static final long WATCH_LIMIT_MS = 6 * 3600 * 1000L;
     private static final int TAG_BATCH = 20;
-    private static final Set<String> PHASES = Set.of("test", "scan");
+    /** test 测试 / scan 扩充书目 / toc 给书目里还没目录的书补目录 */
+    private static final Set<String> PHASES = Set.of("test", "scan", "toc");
 
     private final CrawlSiteCatalogMapper catalogMapper;
     private final CrawlCatalogBookMapper bookMapper;
@@ -188,13 +189,31 @@ public class CrawlCatalogService {
             req.put("categories", cats);
         }
         req.put("phase", phase);
-        req.put("knownUrls", test ? List.of() : bookUrls(catalog.getId()));
+        // refresh = 已采集过的书也重新采（书名 / 作者 / 分类按最新规则更新，AI 标签保留）
+        boolean refresh = Boolean.TRUE.equals(body.get("refresh"));
+        req.put("knownUrls", test || refresh ? List.of() : bookUrls(catalog.getId()));
         req.put("maxBooks", test ? clamp(body.get("maxBooks"), 2, 30, 8) : clamp(body.get("maxBooks"), 1, 500, 50));
         req.put("maxCategories", clamp(body.get("maxCategories"), 1, 50, 10));
         req.put("maxListPages", clamp(body.get("maxListPages"), 1, 50, test ? 3 : 5));
         req.put("contentSamples", clamp(body.get("contentSamples"), 0, 10, test ? 3 : 0));
-        // 0 = 快速：只看书籍页、不打开目录（只用于扩充；测试要验证目录，至少 1 页）
-        req.put("tocPages", clamp(body.get("tocPages"), test ? 1 : 0, 30, 10));
+        // 扩充时的目录：tocMode = async（默认，书先出来、同一任务里接着补目录）/ sync（每本当场开目录页）/
+        // skip（不取目录，抓取时再取）；老前端传 tocPages=0 视为 skip。测试要验证目录，总是当场取
+        String tocMode = str(body.get("tocMode"));
+        if (tocMode == null || tocMode.isEmpty()) {
+            tocMode = Integer.valueOf(0).equals(intOrNull(body.get("tocPages"))) ? "skip" : "async";
+        }
+        boolean skipToc = !test && "skip".equals(tocMode);
+        req.put("tocPages", skipToc ? 0 : clamp(body.get("tocPages"), 1, 30, 10));
+        req.put("tocAsync", !test && "async".equals(tocMode));
+        if ("toc".equals(phase)) {
+            List<Map<String, Object>> targets = tocTargets(catalog.getId(), body.get("bookIds"));
+            if (targets.isEmpty()) {
+                throw new BizException(400, "没有需要补目录的书（都已经有目录了）");
+            }
+            req.put("tocTargets", targets);
+            req.put("tocAsync", false);
+            req.put("knownUrls", List.of());
+        }
         req.put("delayMs", clamp(body.get("delayMs"), 300, 30000, 1000));
         req.put("respectRobots", !Boolean.FALSE.equals(body.get("respectRobots")));
         req.put("catalogDir", catalog.getCatalogDir());
@@ -212,7 +231,7 @@ public class CrawlCatalogService {
         catalog.setPhase(phase);
         catalog.setJobId(jobId);
         catalog.setProgress(0);
-        catalog.setMessage(test ? "测试规律：排队中" : "扩充书目：排队中");
+        catalog.setMessage(test ? "测试规律：排队中" : "toc".equals(phase) ? "补全目录：排队中" : "扩充书目：排队中");
         catalog.setUpdateTime(LocalDateTime.now());
         catalogMapper.updateById(catalog);
         Long catalogId = catalog.getId();
@@ -285,6 +304,7 @@ public class CrawlCatalogService {
         long deadline = System.currentTimeMillis() + WATCH_LIMIT_MS;
         int unreachable = 0;
         int saved = 0;
+        int tocSaved = 0;
         try {
             while (!Thread.currentThread().isInterrupted()) {
                 Thread.sleep(POLL_INTERVAL_MS);
@@ -294,7 +314,7 @@ public class CrawlCatalogService {
                 }
                 JsonNode job;
                 try {
-                    job = aiClient.getCatalogJob(jobId, saved).path("data");
+                    job = aiClient.getCatalogJob(jobId, saved, tocSaved).path("data");
                     unreachable = 0;
                 } catch (HttpClientErrorException.NotFound e) {
                     finish(catalogId, jobId, CrawlSiteCatalog.FAILED, "AI 服务已重启，采集中断（已采集的书目已保存）", null);
@@ -307,6 +327,7 @@ public class CrawlCatalogService {
                     continue;
                 }
                 saved += saveBooks(catalogId, job.path("books"));
+                tocSaved += saveTocUpdates(catalogId, job.path("tocUpdates"));
                 String status = job.path("status").asText();
                 if ("queued".equals(status) || "running".equals(status)) {
                     progress(catalogId, jobId, job);
@@ -370,6 +391,53 @@ public class CrawlCatalogService {
     }
 
     /** 新采集到的书入库：同一书目按书籍地址去重（再次采集时更新，AI 补的标签保留）→ 本次处理的条数 */
+    /** 补全目录的结果写回书目（按书籍地址找到那本书）→ 本次处理的条数 */
+    private int saveTocUpdates(Long catalogId, JsonNode updates) {
+        if (!updates.isArray()) {
+            return 0;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        int n = 0;
+        for (JsonNode u : updates) {
+            n++;
+            LambdaUpdateWrapper<CrawlCatalogBook> w = new LambdaUpdateWrapper<CrawlCatalogBook>()
+                    .eq(CrawlCatalogBook::getCatalogId, catalogId).eq(CrawlCatalogBook::getBookUrl, u.path("bookUrl").asText())
+                    .set(CrawlCatalogBook::getUpdateTime, now);
+            if (u.path("tocOk").asBoolean()) {
+                w.set(CrawlCatalogBook::getTocUrl, text(u, "tocUrl"))
+                        .set(CrawlCatalogBook::getChapterCount, u.path("chapterCount").asInt())
+                        .set(CrawlCatalogBook::getFirstChapter, text(u, "firstChapter"))
+                        .set(CrawlCatalogBook::getLatestChapter, text(u, "latestChapter"))
+                        .set(CrawlCatalogBook::getTocPath, text(u, "tocPath"))
+                        .set(CrawlCatalogBook::getTocOk, true)
+                        .set(CrawlCatalogBook::getError, null);
+            } else {
+                w.set(CrawlCatalogBook::getError, truncate(text(u, "error")));
+            }
+            bookMapper.update(null, w);
+        }
+        return n;
+    }
+
+    /** 要补目录的书：没取到目录、有目录页地址的；bookIds 非空时只补这几本 */
+    private List<Map<String, Object>> tocTargets(Long catalogId, Object bookIds) {
+        LambdaQueryWrapper<CrawlCatalogBook> q = new LambdaQueryWrapper<CrawlCatalogBook>()
+                .select(CrawlCatalogBook::getId, CrawlCatalogBook::getBookUrl, CrawlCatalogBook::getTocUrl, CrawlCatalogBook::getBookName)
+                .eq(CrawlCatalogBook::getCatalogId, catalogId).eq(CrawlCatalogBook::getTocOk, false)
+                .isNotNull(CrawlCatalogBook::getTocUrl).orderByAsc(CrawlCatalogBook::getId);
+        if (bookIds instanceof List<?> ids && !ids.isEmpty()) {
+            q.in(CrawlCatalogBook::getId, ids.stream().filter(Number.class::isInstance)
+                    .map(x -> ((Number) x).longValue()).toList());
+        }
+        return bookMapper.selectList(q).stream().limit(5000).map(b -> {
+            Map<String, Object> t = new LinkedHashMap<>();
+            t.put("bookUrl", b.getBookUrl());
+            t.put("tocUrl", b.getTocUrl());
+            t.put("bookName", Objects.requireNonNullElse(b.getBookName(), ""));
+            return t;
+        }).toList();
+    }
+
     private int saveBooks(Long catalogId, JsonNode books) {
         if (!books.isArray()) {
             return 0;
@@ -398,15 +466,19 @@ public class CrawlCatalogService {
             b.path("tags").forEach(t -> tags.add(t.asText()));
             row.setTags(tags);
             row.setIntro(text(b, "intro"));
-            row.setTocUrl(text(b, "tocUrl"));
-            row.setChapterCount(b.path("chapterCount").asInt());
-            row.setFirstChapter(text(b, "firstChapter"));
-            row.setLatestChapter(text(b, "latestChapter"));
-            // 这次没解析出目录时保留上次的目录文件
-            if (text(b, "tocPath") != null || insert) {
-                row.setTocPath(text(b, "tocPath"));
+            // 这次没打开目录页（快速 / 后台补全，目录稍后单独写回）时，已有的目录原样保留
+            boolean keepToc = !insert && b.path("tocSkipped").asBoolean() && Boolean.TRUE.equals(row.getTocOk());
+            if (!keepToc) {
+                row.setTocUrl(text(b, "tocUrl"));
+                row.setChapterCount(b.path("chapterCount").asInt());
+                row.setFirstChapter(text(b, "firstChapter"));
+                row.setLatestChapter(text(b, "latestChapter"));
+                // 这次没解析出目录时保留上次的目录文件
+                if (text(b, "tocPath") != null || insert) {
+                    row.setTocPath(text(b, "tocPath"));
+                }
+                row.setTocOk(b.path("tocOk").asBoolean());
             }
-            row.setTocOk(b.path("tocOk").asBoolean());
             if (b.path("contentChecked").asBoolean()) {
                 row.setContentOk(b.path("contentOk").asBoolean());
                 row.setContentChars(b.path("contentChars").asInt());
@@ -450,6 +522,10 @@ public class CrawlCatalogService {
         Page<CrawlCatalogBook> p = bookMapper.selectPage(
                 new Page<>(Math.max(page, 1), Math.max(1, Math.min(size, 500))), q);
         decorateCrawl(p.getRecords());
+        // 书目正在采集 / 补目录时，还没目录、没出错的书标「补全中」
+        boolean running = CrawlSiteCatalog.RUNNING.equals(catalogMapper.selectById(catalogId).getStatus());
+        p.getRecords().forEach(b -> b.setTocPending(running && !Boolean.TRUE.equals(b.getTocOk())
+                && b.getTocUrl() != null && (b.getError() == null || b.getError().isEmpty())));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("records", p.getRecords());
         out.put("total", p.getTotal());
@@ -507,7 +583,7 @@ public class CrawlCatalogService {
         return q;
     }
 
-    /** 标签云与分类：{tags:[{tag, count, site, ai}], categories:[{name, count}], total, aiTagged（有 AI 标签的本数）} */
+    /** 标签云与分类：{tags:[{tag, count, site, ai}], categories:[{name, count}], total, aiTagged（有 AI 标签的本数）, tocMissing（还没目录的本数）} */
     public Map<String, Object> tags(Long catalogId) {
         require(catalogId);
         List<CrawlCatalogBook> rows = bookMapper.selectList(new LambdaQueryWrapper<CrawlCatalogBook>()
@@ -542,7 +618,11 @@ public class CrawlCatalogService {
                 .sorted((a, b) -> b.getValue() - a.getValue())
                 .map(e -> Map.<String, Object>of("name", e.getKey(), "count", e.getValue()))
                 .toList();
-        return Map.of("tags", tagList, "categories", catList, "total", rows.size(), "aiTagged", aiTagged);
+        long tocMissing = bookMapper.selectCount(new LambdaQueryWrapper<CrawlCatalogBook>()
+                .eq(CrawlCatalogBook::getCatalogId, catalogId).eq(CrawlCatalogBook::getTocOk, false)
+                .isNotNull(CrawlCatalogBook::getTocUrl));
+        return Map.of("tags", tagList, "categories", catList, "total", rows.size(), "aiTagged", aiTagged,
+                "tocMissing", tocMissing);
     }
 
     /** 一本书的完整目录（采集时保存的 JSON）：{bookName, tocUrl, chapterCount, chapters[{title, url}], savedAt} */

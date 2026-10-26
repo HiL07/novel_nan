@@ -44,6 +44,12 @@ CATALOG_ROOT = (DATA_DIR / "site-catalog").resolve()
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 
+class TocTarget(BaseModel):
+    bookUrl: str = Field(min_length=8, max_length=2000)
+    tocUrl: str = Field(min_length=8, max_length=2000)
+    bookName: str = ""
+
+
 class CatalogRequest(BaseModel):
     homeUrl: str = Field(min_length=8, max_length=2000)           # 站点首页（规则的 homeUrl）
     preset: str = ""
@@ -51,7 +57,8 @@ class CatalogRequest(BaseModel):
     sampleUrl: str = Field(default="", max_length=2000)           # AI 解析时的书籍地址：推出书籍地址规律
     categories: list[dict] = Field(default_factory=list, max_length=60)  # 解析时发现的分类 [{name, url}]（首页没找到时用）
     knownUrls: list[str] = Field(default_factory=list, max_length=5000)  # 已采集的书（scan 时跳过）
-    phase: Literal["test", "scan"] = "test"
+    # test 测试 / scan 扩充 / toc 只给已有的书补目录（tocTargets），不找书
+    phase: Literal["test", "scan", "toc"] = "test"
     maxBooks: int = Field(default=8, ge=1, le=500)
     maxCategories: int = Field(default=10, ge=1, le=50)
     maxListPages: int = Field(default=3, ge=1, le=50)
@@ -59,6 +66,10 @@ class CatalogRequest(BaseModel):
     # 每本目录最多翻几页；0 = 快速模式：只看书籍页（书名 / 作者 / 简介 / 标签 + 目录页地址），不打开目录，
     # 每本只要 1 次请求（目录在真正抓取时再取）。测试阶段要验证目录，Java 不会传 0
     tocPages: int = Field(default=10, ge=0, le=service.MAX_TOC_PAGES)
+    # 目录后台补全：先只开书籍页把书目全部出完（同快速模式），再在同一个任务里逐本补目录（tocUpdates 增量返回）。
+    # 同一站点共用请求间隔，总耗时不变，但书名 / 简介 / 标签先出来
+    tocAsync: bool = False
+    tocTargets: list[TocTarget] = Field(default_factory=list, max_length=5000)   # phase=toc 时要补目录的书
     delayMs: int = Field(default=1000, ge=300, le=30000)
     respectRobots: bool = True
     catalogDir: str = Field(pattern=r"^site-catalog/[A-Za-z0-9._-]{1,120}$")
@@ -80,6 +91,11 @@ class CatalogJob(BaseModel):
     categories: list[dict] = Field(default_factory=list)   # 访问过的分类 [{name, url, pages, books, error}]
     categoriesAll: list[dict] = Field(default_factory=list)
     bookPattern: str = ""          # 用来认书的地址规律（正则）
+    # 目录补全（tocAsync / phase=toc）：每补完一本追加一条 {bookUrl, tocUrl, chapterCount, firstChapter, latestChapter,
+    # tocPages, tocPath, tocOk, error}，Java 用 tocSince 增量取
+    tocUpdates: list[dict] = Field(default_factory=list)
+    tocTotal: int = 0
+    tocDone: int = 0
     report: Optional[dict] = None  # 结束时的测试报告（见 _report）
     createTime: datetime = Field(default_factory=datetime.now)
     finishTime: Optional[datetime] = None
@@ -104,15 +120,17 @@ def submit(req: CatalogRequest) -> CatalogJob:
     return job
 
 
-def get(job_id: str, since: int = 0) -> Optional[dict]:
-    """任务状态；books 只返回第 since 本之后的（Java 增量入库），booksTotal 为总数。"""
+def get(job_id: str, since: int = 0, toc_since: int = 0) -> Optional[dict]:
+    """任务状态；books 只返回第 since 本之后的、tocUpdates 只返回第 toc_since 条之后的（Java 增量入库）。"""
     job = _jobs.get(job_id)
     if job is None:
         return None
-    data = job.model_dump(exclude={"books"})
+    data = job.model_dump(exclude={"books", "tocUpdates"})
     data["books"] = job.books[max(since, 0):]
     data["booksSince"] = max(since, 0)
     data["booksTotal"] = len(job.books)
+    data["tocUpdates"] = job.tocUpdates[max(toc_since, 0):]
+    data["tocUpdatesTotal"] = len(job.tocUpdates)
     return data
 
 
@@ -160,6 +178,11 @@ def _run(job: CatalogJob, req: CatalogRequest) -> None:
         if req.sampleUrl and req.phase == "test":
             known.discard(req.sampleUrl.split("#")[0].rstrip("/"))
         with _RecentFetcher(req.delayMs, req.respectRobots, rule.encoding) as f:
+            if req.phase == "toc":
+                _fill_tocs(job, req, f, rule, [t.model_dump() for t in req.tocTargets])
+                job.report = _toc_report(job, req, time.monotonic() - started)
+                job.status, job.progress, job.message = "succeeded", 100, job.report["summary"]
+                return
             links = _discover(job, req, f, rule, book_re, known)
             if not links and book_re is not None:
                 # 列表页上的书籍地址和学习样例不是同一种格式（如样例给的是目录页）：退回列表页启发式再找一遍
@@ -171,16 +194,23 @@ def _run(job: CatalogJob, req: CatalogRequest) -> None:
                                  + ("页面上没有与学习样例同格式的书籍地址，" if book_re else "")
                                  + "可能站点改版、分类导航是脚本生成的，或需要在规则里写「书籍链接」XPath")
             _collect(job, req, f, rule, links)
+            if req.tocAsync:
+                targets = [{"bookUrl": b["bookUrl"], "tocUrl": b["tocUrl"], "bookName": b["bookName"]}
+                           for b in job.books if b.get("tocSkipped") and b.get("tocUrl")]
+                _fill_tocs(job, req, f, rule, targets)
         job.report = _report(job, req, time.monotonic() - started)
         job.status, job.progress = "succeeded", 100
         job.message = job.report["summary"]
     except _Cancelled:
-        job.report = _report(job, req, time.monotonic() - started)
-        job.status, job.message = "cancelled", f"已取消（已采集 {len(job.books)} 本）"
+        job.report = (_toc_report if req.phase == "toc" else _report)(job, req, time.monotonic() - started)
+        job.status = "cancelled"
+        job.message = (f"已取消（补了 {job.tocDone}/{job.tocTotal} 本的目录）" if req.phase == "toc"
+                       else f"已取消（已采集 {len(job.books)} 本）")
     except Exception as e:  # 任何异常都落到 failed，供 Java 轮询拿到原因；已采集的书目照常返回
         if not isinstance(e, (CrawlError, ValueError)):
             log.exception("书目采集失败 jobId=%s url=%s", job.jobId, req.homeUrl)
-        job.report = _report(job, req, time.monotonic() - started) if job.books else None
+        job.report = (_toc_report(job, req, time.monotonic() - started) if req.phase == "toc"
+                      else _report(job, req, time.monotonic() - started) if job.books else None)
         job.status, job.error = "failed", str(e) or e.__class__.__name__
     finally:
         _cancel.discard(job.jobId)
@@ -212,7 +242,7 @@ def _discover(job: CatalogJob, req: CatalogRequest, f: Fetcher, rule: CrawlRule,
 
     job.message = "读取站点首页…"
     home_final, home_html = f.get_html(req.homeUrl)
-    site = parser.parse_site(home_html, home_final, rule)
+    site = parser.parse_site(home_html, home_final, rule, book_re)
     job.siteName = site["siteName"]
     cats = site["categories"] or [c for c in req.categories if c.get("url")]
     job.categoriesAll = [{"name": c.get("name", ""), "url": c["url"]} for c in cats]
@@ -307,20 +337,27 @@ def _collect(job: CatalogJob, req: CatalogRequest, f: Fetcher, rule: CrawlRule, 
         if book["category"] and book["category"] not in book["tags"]:
             book["tags"] = [book["category"], *book["tags"]][:parser.MAX_TAGS]
         job.books.append(book)
-        job.progress = min(99, 15 + i * 84 // len(links))
+        job.progress = min(99, 15 + i * (35 if req.tocAsync else 84) // len(links))
 
 
 def _book(f: Fetcher, rule: CrawlRule, req: CatalogRequest, book: dict) -> list[dict]:
     """书籍页 → 书名 / 作者 / 简介 / 标签 / 目录页 → 目录（≤ tocPages 页）。→ 章节清单"""
     final, html = f.get_html(book["bookUrl"], referer=req.homeUrl)
+    if _redirected_away(book["bookUrl"], final):
+        raise CrawlError(f"书籍页被跳转到了 {final}，页面内容不属于这本书")
     detail = parser.parse_book_detail(html, final, rule)
-    book["bookName"] = detail["bookName"] or book["bookName"]
+    # 书名 / 作者 / 分类一律以书籍页自己为准；列表页上的链接文字、所在分类只在书籍页取不到时兜底
+    # （列表页常有侧栏排行 / 推荐，链接文字和所在分类都可能是别的书的）
+    list_title = book["bookName"]
+    book["bookName"] = detail["bookName"]
     book["author"], book["intro"] = detail["author"], (detail["intro"] or "")[:2000]
+    book["category"] = detail["category"] or book["category"]
     book["tags"] = detail["tags"]
     book["detailOk"] = bool(detail["bookName"])
     toc_url = detail["tocUrl"] or final
-    if req.tocPages == 0:   # 快速模式：记下目录页地址就走，抓取时再解析目录
+    if req.tocPages == 0 or req.tocAsync:   # 快速 / 后台补全：先记下目录页地址，目录稍后（或抓取时）再解析
         book["tocUrl"], book["tocSkipped"] = toc_url, True
+        book["bookName"] = book["bookName"] or list_title
         return []
     try:
         toc = service._load_toc(f, toc_url, rule, max_pages=req.tocPages)
@@ -333,11 +370,79 @@ def _book(f: Fetcher, rule: CrawlRule, req: CatalogRequest, book: dict) -> list[
     book["tocUrl"], book["tocPages"] = toc_url, toc.get("tocPages", 1)
     book["chapterCount"], book["tocOk"] = len(chapters), bool(chapters)
     book["firstChapter"], book["latestChapter"] = chapters[0]["title"], chapters[-1]["title"]
-    # 详情页取到的书名 / 作者更可信（目录页 <title> 常带「目录」后缀），目录页只做兜底
-    book["bookName"] = book["bookName"] or toc.get("bookName") or ""
+    # 详情页取到的书名 / 作者更可信（目录页 <title> 常带「目录」后缀），目录页、列表页链接文字只做兜底
+    book["bookName"] = book["bookName"] or toc.get("bookName") or list_title or ""
     book["author"] = book["author"] or toc.get("author") or ""
     book["intro"] = book["intro"] or (toc.get("intro") or "")[:2000]
     return chapters
+
+
+def _redirected_away(requested: str, final: str) -> bool:
+    """书籍页被跳到了明显不是这本书的地方（首页 / 别的域名 / 地址里的书号没了），这时页面上的书名作者都不可信。"""
+    a, b = urlsplit(requested), urlsplit(final)
+    if parser._same_page(requested, final):
+        return False
+    if (a.hostname or "").removeprefix("www.") != (b.hostname or "").removeprefix("www."):
+        return True
+    if b.path in ("", "/"):
+        return True
+    ids = re.findall(r"\d{3,}", a.path)   # 书号：地址里较长的数字段，跳转后至少要保留一个
+    return bool(ids) and not any(i in b.path + b.query for i in ids)
+
+
+def _fill_tocs(job: CatalogJob, req: CatalogRequest, f: Fetcher, rule: CrawlRule, targets: list[dict]) -> None:
+    """逐本解析目录（≤ tocPages 页，至少 1 页）并写目录文件，每本结果追加到 job.tocUpdates；
+    同一任务里的书（tocAsync）在 job.books 里同步更新，报告按补完的算。单本失败记原因继续下一本，
+    连续 MAX_NETWORK_FAILS 本网络失败就停下（已补的照常返回）。"""
+    folder = _catalog_dir(req.catalogDir) / "toc"
+    by_url = {b["bookUrl"]: b for b in job.books}
+    job.tocTotal = len(targets)
+    base = 50 if req.phase != "toc" else 2
+    net_fails = 0
+    for i, t in enumerate(targets, 1):
+        _check_cancel(job)
+        job.message = f"补全目录 {i}/{len(targets)}：《{t.get('bookName') or t['tocUrl']}》"
+        upd = {"bookUrl": t["bookUrl"], "tocUrl": t["tocUrl"], "chapterCount": 0, "firstChapter": "", "latestChapter": "",
+               "tocPages": 0, "tocPath": "", "tocOk": False, "error": ""}
+        try:
+            try:
+                toc = service._load_toc(f, t["tocUrl"], rule, max_pages=max(req.tocPages, 1))
+            except CrawlError:
+                if parser._same_page(t["tocUrl"], t["bookUrl"]):
+                    raise
+                upd["tocUrl"] = t["bookUrl"]   # 目录链接没认对：书籍页本身可能就是目录
+                toc = service._load_toc(f, t["bookUrl"], rule, max_pages=max(req.tocPages, 1))
+            chapters = toc["chapters"]
+            upd.update(chapterCount=len(chapters), firstChapter=chapters[0]["title"], latestChapter=chapters[-1]["title"],
+                       tocPages=toc.get("tocPages", 1), tocOk=True)
+            book = by_url.get(t["bookUrl"]) or {"bookName": t.get("bookName") or "", "author": "", "bookUrl": t["bookUrl"]}
+            upd["tocPath"] = _save_toc(folder, req.catalogDir, {**book, "tocUrl": upd["tocUrl"]}, chapters)
+            net_fails = 0
+        except NetworkError as e:
+            upd["error"] = f"目录解析失败：{e}"
+            net_fails += 1
+        except (CrawlError, ValueError) as e:
+            upd["error"] = f"目录解析失败：{e}"
+        except OSError as e:
+            raise CrawlError(f"目录文件写入失败（{folder}）：{e.strerror or e}") from e
+        job.tocUpdates.append(upd)
+        job.tocDone = i
+        if t["bookUrl"] in by_url:
+            b = by_url[t["bookUrl"]]
+            b.update({k: upd[k] for k in ("tocUrl", "chapterCount", "firstChapter", "latestChapter", "tocPages", "tocPath", "tocOk")})
+            b["tocSkipped"] = not upd["tocOk"]
+            if upd["error"]:
+                b["error"] = upd["error"]
+        job.progress = min(99, base + i * (99 - base) // len(targets))
+        if net_fails >= MAX_NETWORK_FAILS:
+            raise CrawlError(f"连续 {net_fails} 本因网络问题没补上目录，已停止（已补的保留）。最后错误：{upd['error']}")
+
+
+def _toc_report(job: CatalogJob, req: CatalogRequest, seconds: float) -> dict:
+    ok = sum(1 for u in job.tocUpdates if u["tocOk"])
+    return {"phase": "toc", "verdict": "usable" if ok else "unusable", "books": job.tocTotal,
+            "summary": f"补全目录：成功 {ok}/{job.tocTotal} 本" + (f"，失败 {len(job.tocUpdates) - ok} 本" if len(job.tocUpdates) > ok else ""),
+            "problems": [u["error"] for u in job.tocUpdates if u["error"]][:5], "seconds": round(seconds, 1)}
 
 
 def _check_content(f: Fetcher, rule: CrawlRule, book: dict, chapters: list[dict]) -> None:
@@ -422,7 +527,8 @@ def _report(job: CatalogJob, req: CatalogRequest, seconds: float) -> dict:
     else:
         verdict = "unusable"
     label = {"usable": "规律可用", "partial": "部分可用", "unusable": "规律不可用"}[verdict]
-    toc_text = "目录未采集（快速模式，抓取时再取）" if fast else f"目录 {count['toc']}/{total}"
+    toc_text = ("目录未采集（快速模式，抓取时再取）" if fast
+                else f"目录后台补全 {count['toc']}/{total}" if req.tocAsync else f"目录 {count['toc']}/{total}")
     summary = (f"{label}：找到 {total} 本书，{toc_text}，简介 {count['intro']}/{total}，"
                f"标签 {count['tags']}/{total}"
                + (f"，首章正文 {count['content']}/{count['contentChecked']}" if count["contentChecked"] else ""))

@@ -525,13 +525,14 @@ def _explore(f: _CachedFetcher, req: AnalyzeRequest, rule: CrawlRule, trial: dic
         items[key].update(status=status, detail=detail, pattern=pattern, example=example)
 
     # 首页 + 分类导航 + 首页上的其他书
-    site_name, others, cats = "", [], []
+    site_name, others, cats, home_links = "", [], [], None
     job.message = "验证站点结构：读取站点首页…"
     try:
         home_final, home_html = f.get_html(home_url)
-        site = parser.parse_site(home_html, home_final, CrawlRule())
+        site = parser.parse_site(home_html, home_final, CrawlRule(), book_re)
         site_name, cats = site["siteName"], site["categories"]
         others = _book_links(home_html, home_final, book_re, (req.url, toc_url))
+        home_links = home_link_rules(home_html, home_final, book_re, cats)
         put("home", "ok", f"首页可访问，标题「{site_name or '-'}」；首页上找到 {len(others)} 个同格式的书籍链接",
             home_url, home_final)
     except (CrawlError, ValueError) as e:
@@ -641,6 +642,8 @@ def _explore(f: _CachedFetcher, req: AnalyzeRequest, rule: CrawlRule, trial: dic
             "categories": [{"name": c["name"], "url": c["url"]} for c in cats[:12]],
             # 学到的搜索方式（搜索可用或部分可用时）：{action, method, field, params, charset, pattern, testKeyword, works}
             "search": search_cfg,
+            # 首页链接规律：首页上每一类链接的地址规律、显示文字规律、数量和例子（见 home_link_rules）
+            "homeLinks": home_links,
             "mastered": sum(1 for i in out if i["status"] == "ok"),
             "failed": sum(1 for i in out if i["status"] in ("failed", "partial")),
             "total": sum(1 for i in out if i["status"] != "na")}
@@ -771,8 +774,130 @@ def _common_pattern(urls: list[str]) -> str:
 
 
 def _site_map_text(site_map: dict) -> str:
-    return "\n".join(f"- {i['label']}：{_STATUS_TEXT[i['status']]}；{i['pattern'] or ''} {i['detail']}"
-                     for i in site_map["items"])
+    lines = [f"- {i['label']}：{_STATUS_TEXT[i['status']]}；{i['pattern'] or ''} {i['detail']}" for i in site_map["items"]]
+    hl = site_map.get("homeLinks") or {}
+    if hl.get("groups"):
+        lines.append(f"首页链接规律（共 {hl['total']} 个链接）：")
+        lines += [f"  · {g['label']} {g['count']} 个：地址 {g['pattern']}；文字 {g['textRule']}；例：" +
+                  "、".join(e["text"] for e in g["examples"][:3] if e["text"]) for g in hl["groups"]]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 首页链接规律（以首页为核心，每一类链接的地址 / 文字规律）
+
+ROLE_LABEL = {"category": "分类导航", "book": "书籍", "chapter": "章节", "list": "列表 / 分页", "nav": "站内其他",
+              "external": "站外", "script": "脚本链接（地址要执行脚本才知道）"}
+ROLE_ORDER = ["category", "book", "chapter", "list", "nav", "external", "script"]
+
+
+def home_link_rules(html: str, url: str, book_re: re.Pattern, cats: list[dict]) -> dict:
+    """首页上所有 <a> 按「类型 + 地址规律」归类：分类导航 / 书籍 / 章节 / 列表分页 / 站内其他 / 站外 / 脚本链接。
+    每类给出地址规律（数字段 → {n}）、显示文字的规律（长度、共同前后缀、「第N章」格式、截断的「…」）、
+    数量、出现在页面哪些区块、最多 8 个例子。→ {total, groups:[{role, label, pattern, count, textRule, areas, examples}]}"""
+    tree = parser.parse_doc(html, url)
+    host = urlsplit(url).hostname
+    cat_urls = {c["url"].split("#")[0].rstrip("/") for c in cats}
+    buckets: dict[tuple[str, str], dict] = {}
+    total = 0
+    for a in tree.iter("a"):
+        raw = (a.get("href") or "").strip()
+        text = parser._clean_inline(a.text_content())
+        if not raw or raw.startswith("#"):
+            continue
+        total += 1
+        if raw.lower().startswith("javascript") or not parser._usable_href(raw):
+            role, pattern = "script", raw[:40]
+        else:
+            href = raw.split("#")[0]
+            parts = urlsplit(href)
+            if parts.hostname != host:
+                role, pattern = "external", f"{parts.scheme}://{parts.netloc}/…"
+            else:
+                path = _path_of(href)
+                if href.rstrip("/") in cat_urls:
+                    role = "category"
+                elif book_re.fullmatch(path):
+                    role = "book"
+                elif parser._looks_like_chapter(a) or re.search(r"/\d+\.html?$", parts.path):
+                    role = "chapter"
+                elif re.fullmatch(r"上一页|下一页|下页|\d{1,4}", text) or re.search(r"(page|list|sort|class|top|rank)", parts.path, re.I):
+                    role = "list"
+                else:
+                    role = "nav"
+                pattern = url_pattern(href, generic=role not in ("nav",))
+        b = buckets.setdefault((role, pattern), {"role": role, "pattern": pattern, "texts": [], "examples": [],
+                                                 "areas": {}, "images": 0})
+        if text:
+            b["texts"].append(text)
+        else:
+            b["images"] += 1
+        area = _area_label(parser._container(a))
+        b["areas"][area] = b["areas"].get(area, 0) + 1
+        if text and len(b["examples"]) < 8:
+            b["examples"].append({"text": text, "url": raw})
+        elif not text and not b.get("imageExample"):
+            b["imageExample"] = {"text": "", "url": raw}
+    groups = []
+    for b in buckets.values():
+        if not b["examples"] and b.get("imageExample"):   # 全是图片链接时，至少给一个例子
+            b["examples"].append(b["imageExample"])
+        count = len(b["texts"]) + b["images"]
+        groups.append({"role": b["role"], "label": ROLE_LABEL[b["role"]], "pattern": b["pattern"], "count": count,
+                       "textRule": _text_rule(b["role"], b["texts"], b["images"]),
+                       "areas": [f"{k}（{v}）" for k, v in sorted(b["areas"].items(), key=lambda kv: -kv[1])[:4]],
+                       "examples": b["examples"]})
+    # 站内其他里地址各不相同的零散链接（首页 / 登录 / 手机版…）合成一组，规律表才不会被单个链接刷屏
+    nav = [g for g in groups if g["role"] == "nav" and g["count"] == 1]
+    groups = [g for g in groups if not (g["role"] == "nav" and g["count"] == 1)]
+    if nav:
+        groups.append({"role": "nav", "label": ROLE_LABEL["nav"], "pattern": "（地址各不相同）", "count": len(nav),
+                       "textRule": "零散的站内链接：" + "、".join(g["examples"][0]["text"] or "图片" for g in nav[:8]),
+                       "areas": [], "examples": [g["examples"][0] for g in nav[:8]]})
+    groups.sort(key=lambda g: (ROLE_ORDER.index(g["role"]), -g["count"]))
+    return {"total": total, "groups": groups[:20]}
+
+
+def _area_label(el) -> str:
+    """链接所在区块的简短名字：标签 + id / 首个 class，如 div#list、ul.nav。"""
+    if el is None or not isinstance(el.tag, str):
+        return "页面"
+    if el.get("id"):
+        return f"{el.tag}#{el.get('id')}"[:30]
+    cls = (el.get("class") or "").split()
+    return f"{el.tag}.{cls[0]}"[:30] if cls else el.tag
+
+
+def _text_rule(role: str, texts: list[str], images: int) -> str:
+    """一组链接显示文字的规律：长度范围、共同前缀 / 后缀、第N章格式、长书名截断。"""
+    if not texts:
+        return f"没有文字（{images} 个图片 / 封面链接）"
+    lens = sorted(len(t) for t in texts)
+    span = f"{lens[0]} 字" if lens[0] == lens[-1] else f"{lens[0]}~{lens[-1]} 字"
+    rule = {"category": "分类名", "book": "书名", "chapter": "章节名", "list": "列表 / 分页文字"}.get(role, "文字")
+    notes = []
+    if role == "chapter" and sum(1 for t in texts if parser.CHAPTER_TITLE_RE.search(t)) * 2 >= len(texts):
+        notes.append("「第N章 + 标题」格式")
+    if len(texts) >= 3:
+        pre = _common_prefix(texts)
+        suf = _common_prefix([t[::-1] for t in texts])[::-1]
+        if len(pre) >= 1 and pre.strip():
+            notes.append(f"都以「{pre}」开头")
+        if len(suf) >= 1 and suf.strip() and not suf.startswith("…") and suf not in ("...",):
+            notes.append(f"都以「{suf}」结尾")
+    cut = sum(1 for t in texts if t.endswith(("...", "…")))
+    if cut:
+        notes.append(f"{cut} 个太长被截断成「…」")
+    if images:
+        notes.append(f"另有 {images} 个图片 / 封面链接")
+    return f"{rule}，{span}" + ("；" + "；".join(notes) if notes else "")
+
+
+def _common_prefix(texts: list[str]) -> str:
+    first = min(texts, key=len)
+    for i, ch in enumerate(first):
+        if any(t[i] != ch for t in texts):
+            return first[:i]
+    return first
 
 
 _STATUS_TEXT = {"ok": "已掌握", "partial": "部分掌握", "failed": "未掌握", "na": "本站无此结构", "skipped": "未验证"}
@@ -850,5 +975,6 @@ def url_pattern(url: str, generic: bool = False) -> str:
         segs = parts.path.rstrip("/").split("/")
         if len(segs) > 1 and segs[-1]:
             tail = "/" if parts.path.endswith("/") else ""
-            out = f"{parts.scheme}://{parts.netloc}" + "/".join(segs[:-1]) + "/{slug}" + tail
+            ext = re.search(r"\.[A-Za-z0-9]{1,6}$", segs[-1])   # 保留扩展名：/cat/xuanhuan.html → /cat/{slug}.html
+            out = f"{parts.scheme}://{parts.netloc}" + "/".join(segs[:-1]) + "/{slug}" + (ext.group(0) if ext else "") + tail
     return out

@@ -25,7 +25,8 @@ MAX_TOC_PAGES = 30          # 目录分页上限
 MAX_SUB_PAGES = 20          # 一章内分页上限
 MAX_CHAPTERS = 5000         # 单任务章节上限
 MAX_CONSECUTIVE_FAILS = 10  # 连续失败这么多章即判定被封 / 规则不对，终止任务
-KEEP_TEXTS = 3              # 内存中最多保留几份未取走的全文
+KEEP_TEXTS = 8              # 内存中最多保留几份未取走的全文（不同站点并行，Java 3 秒内取走）
+MAX_PARALLEL_SITES = 6      # 同时抓取的站点数上限
 NETWORK_WAITS = (10, 20, 30, 60, 60, 120)  # 断网 / 站点暂时不可达时，同一章的等待重试间隔（秒，共约 5 分钟）
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
@@ -73,7 +74,9 @@ _jobs: dict[str, CrawlJob] = {}
 _texts: dict[str, str] = {}
 _cancel: set[str] = set()
 _lock = threading.Lock()
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crawl")
+# 不同站点并行、同一站点（scheme://host:port）串行：每个站点一把锁，任务在线程里先拿锁再抓
+_executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_SITES * 2, thread_name_prefix="crawl")
+_site_locks: dict[str, threading.Lock] = {}
 
 
 # ---------------------------------------------------------------- 预览
@@ -168,8 +171,31 @@ def submit(req: CrawlRequest) -> CrawlJob:
                        resumeKey=req.resumeKey)
         _jobs[job.jobId] = job
         _evict()
-    _executor.submit(_run, job, req, rule)
+    _executor.submit(_run_in_lane, job, req, rule)
     return job
+
+
+def _site_key(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{(parts.netloc or '').lower()}"
+
+
+def _run_in_lane(job: CrawlJob, req: CrawlRequest, rule: CrawlRule) -> None:
+    """同一站点的任务一个接一个（共用站点的请求间隔），不同站点互不等待。"""
+    key = _site_key(job.url)
+    with _lock:
+        lock = _site_locks.setdefault(key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        job.message = f"排队中：同一网站（{urlsplit(job.url).hostname}）还有任务在抓"
+        while not lock.acquire(timeout=1):
+            if job.jobId in _cancel:
+                _cancel.discard(job.jobId)
+                job.status, job.message, job.finishTime = "cancelled", "已取消（排队中）", datetime.now()
+                return
+    try:
+        _run(job, req, rule)
+    finally:
+        lock.release()
 
 
 def get(job_id: str) -> Optional[CrawlJob]:

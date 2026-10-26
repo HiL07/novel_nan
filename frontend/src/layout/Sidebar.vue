@@ -20,12 +20,29 @@
         text-color="#a6adb4"
         active-text-color="#ffffff"
       >
-        <el-menu-item v-for="item in menuItems" :key="item.path" :index="item.path">
-          <el-icon v-if="item.meta?.icon">
-            <component :is="item.meta.icon" />
-          </el-icon>
-          <template #title>{{ item.meta?.title }}</template>
-        </el-menu-item>
+        <template v-for="item in menuItems" :key="item.path">
+          <!-- meta.children：带子菜单的项（如「小说抓取」），子项各自是一个路由地址 -->
+          <el-sub-menu v-if="item.meta?.children" :index="item.path">
+            <template #title>
+              <el-icon v-if="item.meta.icon">
+                <component :is="item.meta.icon" />
+              </el-icon>
+              <span>{{ item.meta.title }}</span>
+            </template>
+            <el-menu-item v-for="child in item.meta.children" :key="child.path" :index="child.path">
+              <el-icon v-if="child.icon">
+                <component :is="child.icon" />
+              </el-icon>
+              <template #title>{{ child.title }}</template>
+            </el-menu-item>
+          </el-sub-menu>
+          <el-menu-item v-else :index="item.path">
+            <el-icon v-if="item.meta?.icon">
+              <component :is="item.meta.icon" />
+            </el-icon>
+            <template #title>{{ item.meta?.title }}</template>
+          </el-menu-item>
+        </template>
       </el-menu>
     </el-scrollbar>
   </aside>
@@ -47,6 +64,7 @@ const activeMenu = computed(() => route.path)
 .sidebar {
   width: 220px;
   flex: 0 0 220px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: #001529;
@@ -98,5 +116,16 @@ const activeMenu = computed(() => route.path)
 .sidebar-menu :deep(.el-menu-item.is-active) {
   background-color: var(--el-color-primary);
   color: #ffffff;
+}
+/* 子菜单：标题与普通菜单项同色，展开后的子项背景略深 */
+.sidebar-menu :deep(.el-sub-menu__title:hover) {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+.sidebar-menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
+  color: #ffffff;
+}
+.sidebar-menu :deep(.el-menu--inline) {
+  background-color: #000c17;
 }
 </style>

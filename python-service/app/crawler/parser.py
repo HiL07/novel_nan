@@ -37,9 +37,10 @@ def parse_toc(html: str, url: str, rule: CrawlRule) -> dict:
     """→ {bookName, author, intro, chapters: [{title, url}], nextUrl}"""
     tree = parse_doc(html, url)
     chapters = _rule_links(tree, rule.chapterLinks) if rule.chapterLinks else _guess_chapter_links(tree, url)
+    name, name_el = _detail_book_name(tree, rule)
     return {
-        "bookName": _first_text(tree, rule.bookName) or _guess_book_name(tree),
-        "author": _first_text(tree, rule.author) or _guess_author(tree),
+        "bookName": name or _guess_book_name(tree),
+        "author": _detail_author(tree, rule, name, name_el),
         "intro": _join_text(tree, rule.intro) if rule.intro else _guess_intro(tree),
         "chapters": dedupe_keep_last(chapters, url),
         "nextUrl": _rule_href(tree, rule.tocNext) if rule.tocNext else _guess_next(tree, url, same_stem=False),
@@ -203,11 +204,12 @@ _TOC_TEXT = re.compile(r"开始阅读|点击阅读|章节目录|全部章节|查
 _PAGE_TEXT = re.compile(r"^(?:上一页|下一页|首页|末页|尾页|\d+)$")
 
 
-def parse_site(html: str, url: str, rule: CrawlRule) -> dict:
-    """站点首页 → {siteName, categories: [{name, url}], fromRule}。"""
+def parse_site(html: str, url: str, rule: CrawlRule, book_re=None) -> dict:
+    """站点首页 → {siteName, categories: [{name, url}], fromRule}。
+    book_re：已知的书籍地址规律（AI 解析 / 全自动都知道），符合它的链接是书，不会被当成分类。"""
     tree = parse_doc(html, url)
     cats = ([{"name": c["title"][:20], "url": c["url"]} for c in _rule_links(tree, rule.categoryLinks)]
-            if rule.categoryLinks else _guess_categories(tree, url))
+            if rule.categoryLinks else _guess_categories(tree, url, book_re))
     return {"siteName": _guess_site_name(tree), "categories": _dedupe_dicts(cats),
             "fromRule": bool(rule.categoryLinks)}
 
@@ -226,12 +228,158 @@ def parse_book_detail(html: str, url: str, rule: CrawlRule) -> dict:
     toc = (_rule_href(tree, rule.tocLink) if rule.tocLink else _guess_toc_link(tree, url)) or ""
     if not toc and _has_chapters(tree, url):
         toc = url
-    name = _first_text(tree, rule.bookName) or _guess_book_name(tree)
-    author = _first_text(tree, rule.author) or _guess_author(tree)
-    return {"bookName": name, "author": author,
+    name, name_el = _detail_book_name(tree, rule)
+    author = _detail_author(tree, rule, name, name_el)
+    category = _detail_category(tree, name, name_el)
+    tags = _tags(tree, rule, {name, author})
+    if category and category not in tags:
+        tags = [category, *tags][:MAX_TAGS]
+    return {"bookName": name, "author": author, "category": category,
             "intro": _join_text(tree, rule.intro) if rule.intro else _guess_intro(tree),
-            "tags": _tags(tree, rule, {name, author}),
-            "tocUrl": toc}
+            "tags": tags, "tocUrl": toc}
+
+
+# 书籍页上的书名 / 作者 / 分类：以这本书自己的页面为准。站点自己写的 og:novel:* 最可靠；没有时，候选（规则 XPath、
+# 每个 h1 / h2）要和 <title> 对得上——<title> 第一段几乎总是书名（「剑来最新章节_剑来全文阅读_某某书城」），
+# 页头的站名 h1、侧栏推荐书的标题、别处的「作者：」都排除掉。
+_TITLE_NOISE = re.compile(r"(最新章节.*|全文阅读.*|全文免费阅读.*|无弹窗.*|章节目录.*|目录.*|小说.*|全集.*|txt.*)$", re.IGNORECASE)
+_BREADCRUMB_HINT = re.compile(r"path|bread|crumb|location|weizhi", re.IGNORECASE)
+_BREADCRUMB_SEP = re.compile(r"当前位置|您的位置|>|»|›|→")
+_AUTHOR_RE = re.compile(r"作\s*者\s*[:：]\s*([^\s|/，,<>：:]{1,30})")
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s《》「」【】]", "", text or "")
+
+
+def _title_parts(tree) -> tuple[str, str]:
+    """<title> / og:title → (第一段去掉「最新章节 / 全文阅读」等后缀, 最后一段 = 多半是站名)"""
+    title = _first_text(tree, "//meta[@property='og:title']/@content") or _first_text(tree, "//title")
+    segs = [s for s in re.split(r"\s*[-|—｜_]\s*", title) if s.strip()]
+    if not segs:
+        return "", ""
+    first = _TITLE_NOISE.sub("", _clean_inline(segs[0])).strip("《》 ")
+    return first, (_clean_inline(segs[-1]) if len(segs) > 1 else "")
+
+
+# 有的站把搜索词拼进书名：「港综世界大枭雄小说全文阅读顶点」「我只会拍烂片啊最新章节无弹窗免费阅读」。
+# 只去掉含「阅读 / 下载 / 最新章节 / 无弹窗」的组合尾巴，正常书名（哪怕以「小说」结尾）不动。
+_SEO_TAIL = re.compile(
+    r"(?:最新章节.*|无弹窗.*|(?:小说)?(?:全文|全本|全集|txt|TXT)?(?:免费)?(?:全文)?(?:在线)?(?:阅读|下载)(?:顶点|笔趣阁|全文|免费)*)$")
+
+
+def clean_book_name(name: str) -> str:
+    cleaned = _SEO_TAIL.sub("", name or "").strip(" 《》_-|")
+    return cleaned if len(cleaned) >= 2 else (name or "")
+
+
+def _detail_book_name(tree, rule: CrawlRule) -> tuple[str, Optional[object]]:
+    """→ (书名, 书名所在元素或 None)，书名去掉搜索词尾巴（clean_book_name）。"""
+    name, el = _detail_book_name_raw(tree, rule)
+    return clean_book_name(name), el
+
+
+def _detail_book_name_raw(tree, rule: CrawlRule) -> tuple[str, Optional[object]]:
+    """→ (书名, 书名所在元素或 None)。元素用来在它附近找作者 / 分类。"""
+    meta = _first_text(tree, "//meta[@property='og:novel:book_name']/@content")
+    first, site = _title_parts(tree)
+    cands: list[tuple[str, Optional[object]]] = []
+    if rule.bookName:
+        for node in _xpath(tree, rule.bookName)[:3]:
+            el = node if isinstance(node, etree._Element) else (node.getparent() if hasattr(node, "getparent") else None)
+            text = _clean_inline(node.text_content() if isinstance(node, etree._Element) else str(node))
+            if text:
+                cands.append((text[:80], el))
+    for h in tree.xpath("//h1|//h2")[:12]:
+        text = _clean_inline(h.text_content())
+        if 1 <= len(text) <= 60:
+            cands.append((text, h))
+
+    def el_for(name: str):
+        return next((el for text, el in cands if _norm(text) == _norm(name) and el is not None), None)
+
+    if meta:
+        return meta[:80], el_for(meta)
+    nf, ns = _norm(first), _norm(site)
+    # 与 <title> 第一段对得上的（第一段里包含它，或它包含第一段），且不是站名；取最长的
+    good = [(t, el) for t, el in cands if _norm(t) and _norm(t) != ns and nf and (_norm(t) in nf or nf in _norm(t))]
+    if good:
+        return max(good, key=lambda c: len(_norm(c[0])))
+    if first and _norm(first) != ns:
+        return first[:80], el_for(first)
+    rest = [(t, el) for t, el in cands if _norm(t) != ns]
+    return rest[0] if rest else ("", None)
+
+
+def _lines(el) -> str:
+    """元素文字，元素边界处换行：<p>作者：张三</p><p>类别：玄幻</p> 不会粘成「张三类别」。"""
+    return "\n".join(t.strip() for t in el.itertext() if t.strip())
+
+
+def _near_text(el, levels: int = 3) -> list[str]:
+    """元素自身及往上几层祖先的文字（由近到远），用来在书名附近找作者 / 分类。"""
+    out = []
+    while el is not None and levels >= 0 and isinstance(el.tag, str) and el.tag not in ("body", "html"):
+        out.append(_lines(el))
+        el = el.getparent()
+        levels -= 1
+    return out
+
+
+def _detail_author(tree, rule: CrawlRule, name: str, name_el) -> str:
+    """og:novel:author → 书名元素所在块 → 书名元素之后的文字（书籍信息一般紧跟在书名后面）→ 规则 XPath
+    → <body> 里书名之后第一个「作者：」。页头 / 侧栏里更早出现的「作者：」不会被取到。"""
+    meta = _first_text(tree, "//meta[@property='og:novel:author']/@content")
+    if meta:
+        return meta[:50]
+    if name_el is not None:
+        for block in _near_text(name_el, levels=1):
+            m = _AUTHOR_RE.search(block)
+            if m:
+                return m.group(1)
+        after = "\n".join(t.strip() for t in name_el.xpath("following::text()") if t.strip())[:1500]
+        m = _AUTHOR_RE.search(after)
+        if m:
+            return m.group(1)
+    if rule.author:
+        text = _first_text(tree, rule.author)
+        if text:
+            return re.sub(r"^作\s*者\s*[:：]\s*", "", text)[:50]
+    body = tree.find("body")
+    full = _lines(body if body is not None else tree)
+    positions = [m.end() for m in re.finditer(re.escape(name), full)] if name else []
+    m = _AUTHOR_RE.search(full, positions[-1] if len(positions) > 1 else (positions[0] if positions else 0))
+    return m.group(1) if m else ""
+
+
+def _detail_category(tree, name: str, name_el) -> str:
+    """这本书自己的分类：og:novel:category → 面包屑（当前位置：首页 > 玄幻小说 > 书名）→ 书名附近的「类别 / 分类：」。"""
+    meta = _first_text(tree, "//meta[@property='og:novel:category']/@content")
+    if meta:
+        return _short_category(meta)
+    # 面包屑：class / id 像 path / bread / crumb / location，或自身文字里有「当前位置 / 您的位置」（笔趣阁模板的 con_top）
+    crumbs = [el for el in tree.xpath("//*[@class or @id]") if el.tag not in ("html", "body")
+              and _BREADCRUMB_HINT.search(f"{el.get('class', '')} {el.get('id', '')}")]
+    crumbs += [el for el in tree.xpath("//*[contains(text(),'当前位置') or contains(text(),'您的位置')]") if el not in crumbs]
+    for el in crumbs:
+        if not _BREADCRUMB_SEP.search(el.text_content()):   # 面包屑都有「当前位置」或 > 分隔，导航栏没有
+            continue
+        links = [_clean_inline(a.text_content()) for a in el.iter("a")]
+        links = [t for t in links if t and t not in ("首页", "主页", "网站首页") and _norm(t) != _norm(name)
+                 and len(t) <= 12]
+        if links:
+            return _short_category(links[-1])
+    for block in _near_text(name_el):
+        m = _TAG_KV.search(block)
+        if m:
+            return _short_category(m.group(1))
+    return ""
+
+
+def _short_category(text: str) -> str:
+    """「玄幻小说」→「玄幻」，与分类导航 / 标签口径一致。"""
+    text = _clean_inline(text).strip("[]【】")
+    return text[:-2] if text.endswith("小说") and len(text) > 3 else text[:12]
 
 
 # 详情页上的「标签：玄幻 热血」「类别：都市」「状态：连载中」这类文字
@@ -288,17 +436,39 @@ def parse_next(html: str, url: str, xpath: str) -> Optional[str]:
     return _rule_href(tree, xpath) if xpath else _guess_next(tree, url, same_stem=False)
 
 
-def _guess_categories(tree, url: str) -> list[dict]:
-    """分类链接：文字很短、同域、成组出现的链接里取最多的那一组（导航条 / 分类栏）。"""
-    cands = [a for a in tree.iter("a") if _candidate(a, url, 12)]
+# 分类名里常见的字眼（玄幻奇幻 / 武侠仙侠 / 女频言情 / 现代都市 / 历史军事 …）
+CATEGORY_WORDS = re.compile(r"玄幻|奇幻|武侠|仙侠|修真|都市|言情|女频|男频|历史|军事|科幻|灵异|悬疑|推理|游戏|竞技|网游|"
+                            r"体育|穿越|重生|架空|同人|耽美|青春|校园|恐怖|二次元|轻小说|其他|其它|完本|全本|连载|排行")
+
+
+def _guess_categories(tree, url: str, book_re=None) -> list[dict]:
+    """分类链接：同域、文字很短、成组出现的链接（导航条 / 分类栏），排除书籍链接，再给每组打分：
+    文字像分类名（CATEGORY_WORDS）的一个加 3 分、地址有共同的目录前缀（如都在 /class/ 下）的整组翻倍。
+    以前只取「最多的一组」，首页的推荐书单（十几本书名也很短）会被误当成分类。"""
+    cands = [a for a in tree.iter("a") if _candidate(a, url, 12)
+             and not (book_re is not None and book_re.fullmatch(_path_and_query(a.get("href"))))]
     if not cands:
         return []
-    groups = Counter(_container(a) for a in cands)
-    best, n = groups.most_common(1)[0]
-    if n < 3:
+    groups: dict = {}
+    for a in cands:
+        groups.setdefault(_container(a), []).append(a)
+
+    def score(links: list) -> float:
+        words = sum(1 for a in links if CATEGORY_WORDS.search(_clean_inline(a.text_content())))
+        firsts = Counter((urlsplit(a.get("href")).path.strip("/").split("/") or [""])[0] for a in links)
+        prefix, n = firsts.most_common(1)[0]
+        shared = bool(prefix) and n * 10 >= len(links) * 6 and not prefix[0].isdigit()
+        return (len(links) + 3 * words) * (2 if shared else 1)
+
+    ranked = sorted((g for g in groups.values() if len(g) >= 3), key=score, reverse=True)
+    if not ranked:
         return []
-    return [{"name": _clean_inline(a.text_content())[:20], "url": a.get("href")}
-            for a in cands if _container(a) is best]
+    return [{"name": _clean_inline(a.text_content())[:20], "url": a.get("href")} for a in ranked[0]]
+
+
+def _path_and_query(href: str) -> str:
+    parts = urlsplit(href or "")
+    return parts.path + (f"?{parts.query}" if parts.query else "")
 
 
 def _guess_book_links(tree, url: str) -> list[dict]:

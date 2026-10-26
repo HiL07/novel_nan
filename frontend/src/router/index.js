@@ -33,10 +33,26 @@ const routes = [
     meta: { title: '素材库', icon: 'Collection' }
   },
   {
+    // 侧边栏「小说抓取」：带子菜单，点父项进入第一个子页面
     path: '/novel/crawl',
+    redirect: '/novel/crawl/config',
+    meta: {
+      title: '小说抓取',
+      icon: 'Link',
+      children: [
+        { path: '/novel/crawl/config', title: '抓取配置', icon: 'Setting' },
+        { path: '/novel/crawl/book', title: '单本抓取', icon: 'Document' },
+        { path: '/novel/crawl/auto', title: '全自动抓取', icon: 'MagicStick' },
+        { path: '/novel/crawl/progress', title: '抓取进度', icon: 'Odometer' }
+      ]
+    }
+  },
+  {
+    // 四个子页面是同一个组件（crawl.vue 按 tab 显示对应一块，状态共用、切换不丢）
+    // tasks / workspace 是旧地址（整本抓取进度 / 整站工作区，已合并为「抓取进度」），仍可打开
+    path: '/novel/crawl/:tab(config|book|auto|progress|tasks|workspace)',
     name: 'novelCrawl',
-    component: () => import('@/views/novel/crawl.vue'),
-    meta: { title: '小说抓取', icon: 'Link' }
+    component: () => import('@/views/novel/crawl.vue')
   },
   {
     path: '/novel/extract',

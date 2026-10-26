@@ -9,7 +9,7 @@
       <el-form label-width="104px" @submit.prevent>
         <el-form-item label="站点规律">
           <div class="row">
-            <el-select v-model="ruleId" class="rule-select" placeholder="选择 AI 解析出的站点" @change="onRuleChange">
+            <el-select v-model="ruleId" class="rule-select" placeholder="选择 AI 解析出的站点（可清空）" clearable @change="onRuleChange">
               <el-option v-for="r in siteRules" :key="r.id" :value="r.id" :label="ruleLabel(r)">
                 <div class="rule-option">
                   <span>{{ r.siteName || r.host }}</span>
@@ -33,6 +33,8 @@
         </el-form-item>
       </el-form>
 
+      <el-empty v-if="!rule" :image-size="64" description="请先在上方选择一个 AI 解析出的站点规律" />
+      <template v-else>
       <el-steps :active="step" finish-status="success" simple class="steps">
         <el-step title="测试规律" />
         <el-step title="决定是否使用" />
@@ -69,7 +71,7 @@
             :status="catalog.status === 'SUCCEEDED' ? 'success' : ['FAILED', 'CANCELLED'].includes(catalog.status) ? 'exception' : ''"
           />
           <div class="meta">
-            <el-tag size="small" :type="STATUS[catalog.status]?.type">{{ catalog.phase === 'scan' ? '扩充书目' : '测试' }} · {{ STATUS[catalog.status]?.label }}</el-tag>
+            <el-tag size="small" :type="STATUS[catalog.status]?.type">{{ { scan: '扩充书目', toc: '补全目录', test: '测试' }[catalog.phase] || '测试' }} · {{ STATUS[catalog.status]?.label }}</el-tag>
             {{ catalog.message }}
           </div>
         </div>
@@ -156,19 +158,28 @@
           <el-form-item><template #label><HelpLabel text="请求间隔" :tip="TIPS.delay" /></template>
             <el-input-number v-model="delay" :min="300" :max="30000" :step="100" /> 毫秒
           </el-form-item>
+          <el-form-item><template #label><HelpLabel text="目录" :tip="TIPS.tocMode" /></template>
+            <el-radio-group v-model="scan.tocMode">
+              <el-radio-button value="async">后台补全</el-radio-button>
+              <el-radio-button value="sync">当场获取</el-radio-button>
+              <el-radio-button value="skip">不取</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
           <el-form-item>
-            <el-switch v-model="scan.fast" active-text="快速（不打开目录页）" />
-            <HelpLabel :tip="TIPS.fast" class="ml6" />
+            <el-switch v-model="scan.refresh" active-text="重新采集已有的书" />
+            <HelpLabel :tip="TIPS.refresh" class="ml6" />
           </el-form-item>
           <el-form-item>
             <el-button :disabled="running" :loading="running && catalog.phase === 'scan'" @click="doStart('scan')">采集更多书目</el-button>
           </el-form-item>
         </el-form>
         <div class="meta scan-hint">
-          每次请求之间至少间隔「请求间隔」（避免被站点封禁），每本书要打开书籍页{{ scan.fast ? '' : ' + 目录页（目录分页时还要多翻几页）' }}，
-          {{ scan.maxBooks }} 本预计约 {{ scanEstimate }}。
-          <template v-if="scan.fast">快速模式只取书名 / 作者 / 简介 / 标签和目录页地址，章节数显示「抓取时获取」，真正抓取时再解析目录。</template>
-          <template v-else>间隔可调到 300 毫秒，或打开「快速」只取书目信息，速度能快好几倍。</template>
+          同一站点每次请求之间至少间隔「请求间隔」（避免被封），速度上限由它决定。
+          <template v-if="scan.tocMode === 'async'">
+            {{ scan.maxBooks }} 本的书名 / 简介 / 标签约 {{ scanEstimate.books }} 先出来，目录在同一任务里接着补，再约 {{ scanEstimate.toc }}（补好的显示章节数，没轮到的显示「补全中」）。
+          </template>
+          <template v-else-if="scan.tocMode === 'sync'">每本书当场打开书籍页 + 目录页，{{ scan.maxBooks }} 本约 {{ scanEstimate.all }}，全部完成后才有完整书目。</template>
+          <template v-else>只取书名 / 简介 / 标签，{{ scan.maxBooks }} 本约 {{ scanEstimate.books }}；没有目录，可以以后点「补全目录」，或抓取时再解析。</template>
         </div>
 
         <!-- 搜索：书名 / 作者（模糊）、类型（标签模糊）、具体情节（AI 选标签 · 省 token / AI 读简介 · 耗 token） -->
@@ -227,6 +238,12 @@
             <el-button :loading="aiTagging" @click="doAiTag">
               AI 补标签<span v-if="untagged">（{{ untagged }} 本没有 AI 标签）</span>
             </el-button>
+          </el-form-item>
+          <el-form-item v-if="tagInfo.tocMissing">
+            <el-button :disabled="running" :loading="running && catalog.phase === 'toc'" @click="doFillToc()">
+              补全目录（{{ tagInfo.tocMissing }} 本）
+            </el-button>
+            <HelpLabel :tip="TIPS.fillToc" class="ml6" />
           </el-form-item>
         </el-form>
 
@@ -302,8 +319,11 @@
           <el-table-column label="目录" width="96">
             <template #default="{ row }">
               <el-button v-if="row.tocOk" link type="primary" size="small" @click="openToc(row)">{{ row.chapterCount }} 章</el-button>
-              <el-tag v-else-if="row.tocUrl && !row.error" size="small" type="info" title="快速采集没有打开目录页，抓取时再解析">抓取时获取</el-tag>
-              <el-tag v-else size="small" type="danger">未取到</el-tag>
+              <el-tag v-else-if="row.tocPending" size="small" type="warning" title="目录正在后台补全，补好后显示章节数">补全中…</el-tag>
+              <el-button v-else-if="row.tocUrl && !row.error" link size="small" :disabled="running" title="还没取目录：点一下只给这本书补目录" @click="doFillToc([row.id])">未取 · 补全</el-button>
+              <el-tooltip v-else :content="row.error || '没有找到目录页'" placement="top">
+                <el-tag size="small" type="danger">未取到</el-tag>
+              </el-tooltip>
             </template>
           </el-table-column>
           <el-table-column label="抓取" width="90">
@@ -337,6 +357,7 @@
           <span class="meta">逐本抓取，每本一个 txt 进文件管理；建议先用 3~10 章试跑</span>
         </div>
       </div>
+      </template>
     </template>
 
     <!-- 目录 -->
@@ -400,7 +421,6 @@ const DECISION = {
   REJECTED: { label: '不使用', type: 'info' }
 }
 const VERDICT = { usable: { type: 'success' }, partial: { type: 'warning' }, unusable: { type: 'error' } }
-const RULE_KEY = 'nan_novel.crawl.autoRule'
 const POLL_MS = 2000
 // 搜索框的类型：书名 / 作者模糊匹配，类型 = 标签模糊匹配，具体情节 = AI（选标签 / 读简介）
 const SEARCH_FIELDS = {
@@ -423,11 +443,16 @@ const TIPS = {
     '数字越大能找到的书越多，请求也越多、越慢；首页上的书始终会看。找够「测试书数 / 扩充书目」的数量就提前停止。',
   delay: '两次请求之间至少等待的时间。越小越快，但太快容易被站点封 IP 或弹出人机验证；最小 300 毫秒，默认 1000 毫秒。',
   scanBooks: '这次最多新增多少本书。已经在书目里的书会自动跳过，不会重复采集。',
-  fast:
-    '打开：每本书只打开书籍页，取书名 / 作者 / 简介 / 标签和目录页地址，每本 1 次请求。' +
-    '关闭：还会打开目录页（含分页），记录章节数和完整目录，通常慢 2~5 倍。快速采集的书照样能抓取，抓取时再解析目录。',
+  tocMode:
+    '后台补全（默认）：先只开书籍页，把书名 / 作者 / 简介 / 标签尽快列出来，再在同一个任务里逐本打开目录页补章节数和目录。' +
+    '当场获取：每本书开完书籍页马上开目录页，全部完成才有完整书目。不取：只要书目信息，目录以后「补全目录」或抓取时再解析。' +
+    '三种方式受同一个请求间隔限制，总请求数一样（不取除外），区别只在先看到什么。',
+  fillToc: '给书目里还没有目录的书补目录（打开目录页，记录章节数和完整目录），在后台进行，可以随时取消；已有目录的书不动。',
   filterCategory: '按书所在的分类筛选（采集时这本书是在哪个分类页里找到的）。',
-  usable: '只显示已经采集到完整目录的书。快速模式采集的书没有打开目录页，打开这个开关会被隐藏。',
+  usable: '只显示已经取到目录的书（目录还在补全中、或选了「不取」的书会被隐藏）。',
+  refresh:
+    '默认跳过书目里已有的书，只采新书。打开后已有的书也重新打开书籍页，按最新的规则更新书名 / 作者 / 分类 / 简介 / 标签' +
+    '（AI 补的标签保留）。书名、作者、分类和网站上对不上时，用它修正。',
   maxChapters: '每本书最多抓前多少章，0 = 整本。建议先用 3~10 章试抓，确认正文没问题再抓全书。'
 }
 
@@ -461,7 +486,8 @@ const TagList = defineComponent({
 })
 
 const catalogs = ref([])
-const ruleId = ref(readRuleId())
+// 默认不选：由用户在下拉框里选，或从「全自动」按钮带入（preferRuleId）
+const ruleId = ref(null)
 const catalog = ref(null)
 const sampleBooks = ref([])
 const rows = ref([])
@@ -470,16 +496,18 @@ const selected = ref([])
 const tableRef = ref(null)
 const loadingBooks = ref(false)
 const submitting = ref(false)
-const tagInfo = reactive({ tags: [], categories: [], total: 0, aiTagged: 0 })
+const tagInfo = reactive({ tags: [], categories: [], total: 0, aiTagged: 0, tocMissing: 0 })
 const test = reactive({ maxBooks: 8, contentSamples: 3, maxCategories: 10, maxListPages: 3 })
-const scan = reactive({ maxBooks: 50, maxCategories: 10, maxListPages: 5, fast: true })
+const scan = reactive({ maxBooks: 50, maxCategories: 10, maxListPages: 5, tocMode: 'async', refresh: false })
 // 全自动面板自己的请求间隔（默认取页面「高级选项」的值），测试与扩充共用
 const delay = ref(props.delayMs)
-/** 扩充预计耗时：每本书 1 次（快速）或约 2.5 次（书籍页 + 目录，含分页的平均）请求 × 间隔，外加列表页 */
+/** 扩充预计耗时（都受请求间隔限制）：书目 = 列表页 + 每本 1 次书籍页；目录 = 每本约 1.5 次（含分页的平均） */
 const scanEstimate = computed(() => {
-  const perBook = scan.fast ? 1 : 2.5
-  const secs = ((scan.maxBooks * perBook + scan.maxCategories * scan.maxListPages) * Math.max(delay.value, 300)) / 1000
-  return secs < 90 ? `${Math.ceil(secs)} 秒` : `${Math.round(secs / 60)} 分钟`
+  const gap = Math.max(delay.value, 300) / 1000
+  const fmt = (secs) => (secs < 90 ? `${Math.ceil(secs)} 秒` : `${Math.round(secs / 60)} 分钟`)
+  const books = (scan.maxBooks + scan.maxCategories * scan.maxListPages) * gap
+  const toc = scan.maxBooks * 1.5 * gap
+  return { books: fmt(books), toc: fmt(toc), all: fmt(books + toc) }
 })
 const filter = reactive(emptyFilter())
 const page = reactive({ current: 1, size: 50 })
@@ -495,14 +523,6 @@ let timer = null
 
 function emptyFilter() {
   return { keyword: '', author: '', tagKeyword: '', category: '', tags: [], tagMode: 'any', usable: false }
-}
-
-function readRuleId() {
-  try {
-    return Number(localStorage.getItem(RULE_KEY)) || null
-  } catch {
-    return null
-  }
 }
 
 /** 有站点首页（或学习样例）的规则才能用：已确认在前 */
@@ -579,11 +599,6 @@ async function loadCatalogs() {
 
 /** 切换站点：载入该首页的书目（没有就等用户点「开始测试」） */
 async function onRuleChange() {
-  try {
-    localStorage.setItem(RULE_KEY, String(ruleId.value || ''))
-  } catch {
-    // ignore
-  }
   introResult.value = null
   searchInfo.value = null
   search.text = ''
@@ -842,8 +857,9 @@ async function doStart(phase) {
       maxCategories: opts.maxCategories,
       maxListPages: opts.maxListPages,
       contentSamples: phase === 'test' ? test.contentSamples : 0,
-      // 快速扩充：只看书籍页、不打开目录（tocPages = 0）
-      ...(phase === 'scan' && scan.fast ? { tocPages: 0 } : {}),
+      // 扩充时目录的取法：async 后台补全 / sync 当场获取 / skip 不取
+      ...(phase === 'scan' ? { tocMode: scan.tocMode } : {}),
+      ...(phase === 'scan' && scan.refresh ? { refresh: true } : {}),
       delayMs: delay.value,
       respectRobots: props.respectRobots
     })
@@ -857,6 +873,25 @@ async function doStart(phase) {
     schedulePoll()
   } catch (e) {
     ElMessage.error(errorMessage(e, '提交失败（AI 服务是否已启动？）'))
+  }
+}
+
+/** 补全目录：bookIds 为空 = 书目里所有还没目录的书 */
+async function doFillToc(bookIds) {
+  if (!rule.value || running.value) return
+  try {
+    const res = await startCatalog({ ruleId: rule.value.id, phase: 'toc', delayMs: delay.value, respectRobots: props.respectRobots,
+      ...(bookIds?.length ? { bookIds } : {}) })
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '提交失败')
+      return
+    }
+    catalog.value = res.data
+    ElMessage.success(bookIds?.length ? '开始补这本书的目录' : '开始在后台补全目录，补好的会陆续显示章节数')
+    await loadBooks()
+    schedulePoll()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '补全目录失败'))
   }
 }
 
@@ -970,7 +1005,9 @@ async function doSubmit() {
       ElMessage.error(res.message || '提交失败')
       return
     }
-    ElMessage.success(`已开始抓取 ${books.length} 本，进度见下方「抓取任务」`)
+    // 同一网站已有进行中的抓取时，书会加入那个工作区（后端返回的 message 会说明）
+    const joined = (res.data.message || '').startsWith('已加入')
+    ElMessage.success(joined ? `${res.data.message}，进度见「整站工作区」` : `已开始抓取 ${books.length} 本，进度见「整站工作区」`)
     tableRef.value?.clearSelection()
     emit('submitted', res.data)
   } catch (e) {
@@ -986,23 +1023,27 @@ async function reloadAll() {
   await refreshCatalog(true)
 }
 
-/** 默认选中：外部指定 > 上次用的 > 第一条 */
+// 外部指定（解析管理 / 网站卡片 / 常用地址的「全自动」）的规则：只生效一次（规则列表还没加载时等它加载完），
+// 之后用户在下拉框里换别的站点，不会被拉回来
+let pendingPrefer = props.preferRuleId
+
+/** 不自动选第一个或上次用过的；选中的规则被删除 / 解析失败后，清空选择 */
 function ensureRule() {
-  if (props.preferRuleId && siteRules.value.some((r) => r.id === props.preferRuleId)) {
-    if (ruleId.value !== props.preferRuleId) {
-      ruleId.value = props.preferRuleId
-      return true
-    }
-    return false
+  if (pendingPrefer && siteRules.value.some((r) => r.id === pendingPrefer)) {
+    const changed = ruleId.value !== pendingPrefer
+    ruleId.value = pendingPrefer
+    pendingPrefer = null
+    return changed
   }
-  if (!rule.value && siteRules.value.length) {
-    ruleId.value = siteRules.value[0].id
+  if (ruleId.value && !rule.value) {
+    ruleId.value = null
     return true
   }
   return false
 }
 
-watch(() => props.preferRuleId, () => {
+watch(() => props.preferRuleId, (id) => {
+  pendingPrefer = id
   if (ensureRule()) onRuleChange()
 })
 watch(siteRules, () => {

@@ -79,6 +79,13 @@
           </template>
           <SiteMapView :site-map="rule.siteMap" :home-url="rule.homeUrl" />
         </el-tab-pane>
+        <el-tab-pane name="links" :disabled="failed">
+          <template #label>
+            首页链接规律
+            <el-tag v-if="rule.siteMap?.homeLinks?.groups?.length" size="small" class="ml6">{{ rule.siteMap.homeLinks.groups.length }} 类</el-tag>
+          </template>
+          <HomeLinksView :home-links="rule.siteMap?.homeLinks" />
+        </el-tab-pane>
         <el-tab-pane label="规则与地址规律" name="rule" :disabled="failed">
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item label="书籍地址"><span class="mono">{{ rule.bookUrlPattern || '-' }}</span></el-descriptions-item>
@@ -156,6 +163,7 @@ import { computed, ref, watch } from 'vue'
 import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import AttemptTable from './AttemptTable.vue'
 import SiteMapView from './SiteMapView.vue'
+import HomeLinksView from './HomeLinksView.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },

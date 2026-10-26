@@ -16,6 +16,9 @@
 .app-main {
   flex: 1;
   min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
   padding: 16px;
   background: #f0f2f5;
 }

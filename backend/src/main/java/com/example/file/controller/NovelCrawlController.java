@@ -3,11 +3,13 @@ package com.example.file.controller;
 import com.example.file.common.Result;
 import com.example.file.common.ResultResponses;
 import com.example.file.entity.CrawlSavedUrl;
+import com.example.file.entity.CrawlSite;
 import com.example.file.entity.CrawlSiteRule;
 import com.example.file.entity.NovelCrawl;
 import com.example.file.entity.NovelCrawlBook;
 import com.example.file.service.CrawlRuleService;
 import com.example.file.service.CrawlSavedUrlService;
+import com.example.file.service.CrawlSiteService;
 import com.example.file.service.NovelCrawlService;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -43,12 +45,14 @@ public class NovelCrawlController {
     private final NovelCrawlService crawlService;
     private final CrawlRuleService ruleService;
     private final CrawlSavedUrlService savedUrlService;
+    private final CrawlSiteService siteService;
 
     public NovelCrawlController(NovelCrawlService crawlService, CrawlRuleService ruleService,
-                                CrawlSavedUrlService savedUrlService) {
+                                CrawlSavedUrlService savedUrlService, CrawlSiteService siteService) {
         this.crawlService = crawlService;
         this.ruleService = ruleService;
         this.savedUrlService = savedUrlService;
+        this.siteService = siteService;
     }
 
     /** GET /api/novel/crawl/presets */
@@ -75,10 +79,64 @@ public class NovelCrawlController {
         return ResultResponses.handle(() -> crawlService.submitSite(options), log, "提交整站抓取任务失败");
     }
 
-    /** GET /api/novel/crawl/list，按创建时间倒序 */
+    /** GET /api/novel/crawl/list?page=&size=&status=（空 = 全部，ACTIVE = 排队 + 抓取中）&mode=（book 整本 / site 整站）→ {records, total, page, size, active} */
     @GetMapping("/list")
-    public ResponseEntity<Result<List<NovelCrawl>>> list() {
-        return ResultResponses.handle(crawlService::list, log, "查询抓取任务失败");
+    public ResponseEntity<Result<Map<String, Object>>> list(@RequestParam(defaultValue = "1") int page,
+                                                            @RequestParam(defaultValue = "20") int size,
+                                                            @RequestParam(required = false) String status,
+                                                            @RequestParam(required = false) String mode) {
+        return ResultResponses.handle(() -> crawlService.page(page, size, status, mode), log, "查询抓取任务失败");
+    }
+
+    // ---------------------------------------------------------------- 整站工作区（一个首页一个工作区）
+
+    /** GET /api/novel/crawl/workspaces：抓取进度，按首页归组的工作区（单本 + 整站），进行中的在前 */
+    @GetMapping("/workspaces")
+    public ResponseEntity<Result<List<Map<String, Object>>>> workspaces() {
+        return ResultResponses.handle(crawlService::workspaces, log, "查询整站工作区失败");
+    }
+
+    /** GET /api/novel/crawl/workspaces/books?home=&status=&keyword=&source=book|site&page=&size=：工作区里每本小说的进度（抓取中的置顶） */
+    @GetMapping("/workspaces/books")
+    public ResponseEntity<Result<Map<String, Object>>> workspaceBooks(@RequestParam String home,
+                                                                      @RequestParam(required = false) String source,
+                                                                      @RequestParam(required = false) String status,
+                                                                      @RequestParam(required = false) String keyword,
+                                                                      @RequestParam(defaultValue = "1") int page,
+                                                                      @RequestParam(defaultValue = "20") int size) {
+        return ResultResponses.handle(() -> crawlService.workspaceBooks(home, status, keyword, source, page, size), log, "查询工作区书籍失败");
+    }
+
+    /** POST /api/novel/crawl/workspaces/cancel {home}：取消工作区里正在进行的抓取 */
+    @PostMapping("/workspaces/cancel")
+    public ResponseEntity<Result<Map<String, Object>>> workspaceCancel(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> crawlService.workspaceCancel(homeParam(body)), log, "取消工作区抓取失败");
+    }
+
+    /** POST /api/novel/crawl/workspaces/resume {home}：继续没抓完的书（断点续抓） */
+    @PostMapping("/workspaces/resume")
+    public ResponseEntity<Result<Map<String, Object>>> workspaceResume(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> crawlService.workspaceResume(homeParam(body)), log, "继续工作区抓取失败");
+    }
+
+    /** POST /api/novel/crawl/workspaces/delete {home}：删除工作区（任务 / 书籍明细 / 断点；txt 保留） */
+    @PostMapping("/workspaces/delete")
+    public ResponseEntity<Result<Map<String, Object>>> workspaceDelete(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> crawlService.workspaceDelete(homeParam(body)), log, "删除工作区失败");
+    }
+
+    private static String homeParam(Map<String, Object> body) {
+        Object home = body == null ? null : body.get("home");
+        return home == null ? null : String.valueOf(home);
+    }
+
+    /** POST /api/novel/crawl/delete {ids:[...]}：删除已结束的任务（含书籍明细与断点；进行中的跳过，txt 不删）→ {deleted, skipped, checkpointErrors} */
+    @PostMapping("/delete")
+    public ResponseEntity<Result<Map<String, Object>>> delete(@RequestBody Map<String, Object> body) {
+        Object raw = body == null ? null : body.get("ids");
+        List<Long> ids = raw instanceof List<?> l
+                ? l.stream().filter(Number.class::isInstance).map(n -> ((Number) n).longValue()).toList() : List.of();
+        return ResultResponses.handle(() -> crawlService.delete(ids), log, "删除抓取任务失败");
     }
 
     /** GET /api/novel/crawl/{id} */
@@ -197,5 +255,28 @@ public class NovelCrawlController {
             savedUrlService.delete(id);
             return null;
         }, log, "删除常用地址失败，id=" + id);
+    }
+
+    // ---------------------------------------------------------------- 小说网站爬取（用户指定的网站，按首页归一）
+
+    /** GET /api/novel/crawl/sites：全部网站（附 AI 解析规则状态与书目概况），先加的在前 */
+    @GetMapping("/sites")
+    public ResponseEntity<Result<List<CrawlSite>>> sites() {
+        return ResultResponses.handle(siteService::list, log, "查询小说网站失败");
+    }
+
+    /** POST /api/novel/crawl/sites/save {id?, url, name?, note?}：url 为站内任意地址，存为首页；同一首页已存在则更新 */
+    @PostMapping("/sites/save")
+    public ResponseEntity<Result<CrawlSite>> saveSite(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> siteService.save(body), log, "保存小说网站失败");
+    }
+
+    /** POST /api/novel/crawl/sites/{id}/delete（只删这条网站记录，规则 / 书目不动） */
+    @PostMapping("/sites/{id}/delete")
+    public ResponseEntity<Result<Void>> deleteSite(@PathVariable Long id) {
+        return ResultResponses.handle(() -> {
+            siteService.delete(id);
+            return null;
+        }, log, "删除小说网站失败，id=" + id);
     }
 }

@@ -1,335 +1,125 @@
 <template>
   <div class="crawl-page">
-    <el-card class="box-card" shadow="never">
+    <!-- ================= 抓取配置：网站地址 / 常用地址 / AI 解析 / 解析管理 / 抓取设置 ================= -->
+    <el-card v-show="section === 'config'" class="box-card" shadow="never">
       <template #header>
         <div class="card-header">
-          <span class="card-title">小说抓取</span>
-          <div class="header-ops">
-            <el-radio-group v-model="mode" size="small" @change="onModeChange">
-              <el-radio-button value="book">单本（目录页）</el-radio-button>
-              <el-radio-button value="site">全自动（按 AI 解析的站点规律）</el-radio-button>
-            </el-radio-group>
-            <el-button @click="router.push('/file/manage')">文件管理</el-button>
-          </div>
+          <span class="card-title">抓取配置</span>
+          <span class="meta">网站地址、常用地址、AI 解析出的站点规律，以及请求间隔等抓取设置都在这里</span>
         </div>
       </template>
-
-      <el-alert type="info" :closable="false" show-icon class="tip" :title="tipText" />
-
-      <el-form label-width="104px" @submit.prevent>
-        <el-form-item v-if="mode === 'book'" label="目录页地址">
-          <div class="url-row">
-            <el-autocomplete
-              v-model="form.url"
-              class="url-input"
-              :fetch-suggestions="suggestUrls"
-              placeholder="https://example.com/book/123/"
-              clearable
-              @keyup.enter="doPreview"
-            >
-              <template #default="{ item }">
-                <div class="url-option">
-                  <span>{{ item.label }}</span>
-                  <span class="meta">{{ item.value }}</span>
+      <el-tabs v-model="configTab" class="config-tabs">
+        <el-tab-pane name="sites">
+          <template #label>小说网站<span v-if="sites.length" class="count">（{{ sites.length }}）</span></template>
+          <div class="pane-bar">
+            <span class="meta">指定要爬取的小说网站：任何站内地址都按首页保存，不同首页各自独立</span>
+            <el-button type="primary" :icon="Plus" @click="openSiteDialog()">新增地址</el-button>
+          </div>
+          <el-empty v-if="!sites.length" :image-size="72" description="目前没有指定网站地址" />
+          <div v-else class="site-list">
+            <div v-for="s in sites" :key="s.id" class="site-item">
+              <div class="site-main">
+                <div class="site-name">{{ s.name || s.rule?.siteName || s.host }}</div>
+                <a class="site-home" :href="s.homeUrl" target="_blank" rel="noopener noreferrer">{{ s.homeUrl }}</a>
+                <div v-if="s.sampleUrl" class="meta ellipsis" :title="s.sampleUrl">样例书：{{ s.sampleUrl }}</div>
+                <div v-if="s.note" class="meta">{{ s.note }}</div>
+              </div>
+              <div class="site-status">
+                <div>
+                  <span class="meta">站点规律</span>
+                  <el-tag size="small" :type="SITE_RULE[s.rule?.status || 'NONE'].type" class="ml6">
+                    {{ SITE_RULE[s.rule?.status || 'NONE'].label }}
+                  </el-tag>
+                  <span v-if="s.rule?.total" class="meta ml6">掌握 {{ s.rule.mastered }}/{{ s.rule.total }} 项</span>
                 </div>
-              </template>
-            </el-autocomplete>
-            <el-button type="primary" :loading="previewing" :disabled="!form.url" @click="doPreview">
-              解析目录
-            </el-button>
-            <el-badge :value="pendingRules.length" :hidden="!pendingRules.length" class="ai-entry">
-              <el-button type="success" plain :icon="MagicStick" @click="openAiDialog(pendingRules.length && !aiRunning ? 'rules' : 'analyze')">
-                {{ aiRunning ? `AI 解析中 ${aiJob.attempts?.length || 0}/${aiJob.maxAttempts}` : 'AI 解析' }}
+                <div v-if="s.rule?.status === 'FAILED' && s.rule.error" class="err clamp2" :title="s.rule.error">{{ s.rule.error }}</div>
+                <div>
+                  <span class="meta">书目</span>
+                  <template v-if="s.catalog">
+                    <el-tag size="small" :type="SITE_DECISION[s.catalog.decision]?.type" class="ml6">
+                      {{ SITE_DECISION[s.catalog.decision]?.label }} · {{ s.catalog.bookCount || 0 }} 本
+                    </el-tag>
+                    <el-tag v-if="s.catalog.status === 'RUNNING'" size="small" type="warning" class="ml6">采集中</el-tag>
+                  </template>
+                  <span v-else class="meta ml6">未采集</span>
+                </div>
+              </div>
+              <div class="site-ops">
+                <el-button size="small" type="success" plain :icon="MagicStick" @click="analyzeSite(s)">AI 解析</el-button>
+                <el-button size="small" type="primary" :disabled="!s.rule || s.rule.status === 'FAILED'" @click="autoSite(s)">全自动</el-button>
+                <el-button v-if="s.rule" size="small" @click="openRuleDetail(ruleById(s.rule.id))">解析详情</el-button>
+                <el-button size="small" link @click="openSiteDialog(s)">修改</el-button>
+                <el-button size="small" link type="danger" @click="removeSite(s)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </el-tab-pane>
+        <el-tab-pane name="saved">
+          <template #label>常用地址<span v-if="savedUrls.length" class="count">（{{ savedUrls.length }}）</span></template>
+          <div class="dialog-bar">
+            <div class="bar-left">
+              <el-button type="primary" size="small" :icon="Plus" @click="startAddSaved">添加地址</el-button>
+              <el-input v-model="savedDlg.query" size="small" class="saved-search" placeholder="搜索描述 / 地址" clearable />
+            </div>
+            <span class="meta">收藏常用的书籍页 / 目录页 / 站点首页，「使用」会带到单本抓取或全自动抓取</span>
+          </div>
+
+          <el-form v-if="savedDlg.editing" label-width="56px" class="saved-form" @submit.prevent>
+            <el-form-item label="地址">
+              <el-input v-model="savedDlg.editing.url" placeholder="https://… 书籍详情页 / 目录页 / 站点首页" clearable />
+            </el-form-item>
+            <el-form-item label="描述">
+              <el-input v-model="savedDlg.editing.name" placeholder="这个地址是什么，如：某某小说目录 / 某某书站首页" clearable />
+            </el-form-item>
+            <el-form-item>
+              <el-radio-group v-model="savedDlg.editing.mode" size="small">
+                <el-radio-button value="book">单本</el-radio-button>
+                <el-radio-button value="site">整站（全自动）</el-radio-button>
+              </el-radio-group>
+              <el-button type="primary" size="small" class="ml12" :loading="savedDlg.saving" :disabled="!savedDlg.editing.url.trim()" @click="submitSaved">
+                {{ savedDlg.editing.id ? '保存修改' : '添加' }}
               </el-button>
-            </el-badge>
-            <el-button :icon="Collection" @click="openSavedDialog">地址管理<span v-if="savedUrls.length" class="count">（{{ savedUrls.length }}）</span></el-button>
-          </div>
-        </el-form-item>
-        <el-form-item v-if="mode === 'book'" label="抓取规则">
-          <el-select v-model="form.preset" style="width: 260px">
-            <el-option label="按域名自动选择" value="" />
-            <el-option-group v-if="confirmedRules.length" label="AI 解析规则（已确认）">
-              <el-option
-                v-for="r in confirmedRules"
-                :key="r.id"
-                :label="`${r.siteName || r.host}（AI 解析）`"
-                :value="`learned:${r.id}`"
-              />
-            </el-option-group>
-            <el-option-group v-if="pendingRules.length" label="AI 解析规则（待确认，只在手动选择时使用）">
-              <el-option
-                v-for="r in pendingRules"
-                :key="r.id"
-                :label="`${r.siteName || r.host}（待确认）`"
-                :value="`learned:${r.id}`"
-              />
-            </el-option-group>
-            <el-option-group label="内置规则">
-              <el-option v-for="p in presets" :key="p.key" :label="p.name" :value="p.key" />
-            </el-option-group>
-          </el-select>
-          <span class="hint">{{ presetHint }}</span>
-        </el-form-item>
-
-        <el-form-item v-else label="站点">
-          <el-badge :value="pendingRules.length" :hidden="!pendingRules.length" class="ai-entry">
-            <el-button type="success" plain :icon="MagicStick" @click="openAiDialog(pendingRules.length && !aiRunning ? 'rules' : 'analyze')">
-              {{ aiRunning ? `AI 解析中 ${aiJob.attempts?.length || 0}/${aiJob.maxAttempts}` : 'AI 解析新站点' }}
-            </el-button>
-          </el-badge>
-          <el-button :icon="Collection" class="ml12" @click="openSavedDialog">地址管理<span v-if="savedUrls.length" class="count">（{{ savedUrls.length }}）</span></el-button>
-        </el-form-item>
-
-        <el-collapse v-model="advancedOpen" class="advanced">
-          <el-collapse-item :title="mode === 'book' ? '高级选项（自定义 XPath / 限速 / robots）' : '高级选项（限速 / robots）'" name="adv">
-            <el-form-item label="请求间隔">
-              <el-input-number v-model="form.delayMs" :min="300" :max="30000" :step="500" />
-              <span class="hint">毫秒，两次请求之间至少间隔这么久</span>
+              <el-button size="small" @click="savedDlg.editing = null">取消</el-button>
             </el-form-item>
-            <el-form-item label="robots.txt">
-              <el-switch v-model="form.respectRobots" active-text="遵守" />
-            </el-form-item>
-            <template v-if="mode === 'book'">
-            <p class="hint block">
-              以下留空 = 使用所选规则的值（灰色占位符），都为空则自动识别。章节链接 XPath 选中 &lt;a&gt; 元素，正文 XPath 选中正文容器。
-            </p>
-            <el-form-item v-for="f in RULE_FIELDS" :key="f.key" :label="f.label">
-              <el-input v-model="form.rule[f.key]" :placeholder="presetRule[f.key] || f.placeholder" clearable />
-            </el-form-item>
-            <el-form-item label="删除行">
-              <el-input
-                v-model="form.removeText"
-                type="textarea"
-                :rows="2"
-                placeholder="每行一个正则，正文中匹配的行会被删除（内置已去除常见网址 / 引流广告）"
-              />
-            </el-form-item>
-            </template>
-          </el-collapse-item>
-        </el-collapse>
-      </el-form>
+          </el-form>
 
-      <!-- AI 解析状态（详情在「AI 解析」弹窗里） -->
-      <div v-if="aiJob" class="ai-strip">
-        <el-tag :type="AI_STATUS[aiJob.status]?.type" size="small">AI 解析 · {{ AI_STATUS[aiJob.status]?.label || aiJob.status }}</el-tag>
-        <span class="ai-strip-msg">{{ aiJob.error || aiJob.message }}</span>
-        <TokenUsageBar :usage="aiJob.usage" :live="aiRunning" class="ai-strip-usage" />
-        <el-button link type="primary" @click="openAiDialog('analyze')">查看过程</el-button>
-        <el-button v-if="!aiRunning" link @click="clearAiJob">收起</el-button>
-      </div>
-
-      <!-- 单本：目录预览 -->
-      <div v-if="mode === 'book' && preview" class="preview">
-        <el-descriptions :column="3" border size="small">
-          <el-descriptions-item label="书名">{{ preview.bookName || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="作者">{{ preview.author || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="章节数">{{ preview.chapterCount }}（目录 {{ preview.tocPages }} 页）</el-descriptions-item>
-          <el-descriptions-item label="使用规则">{{ ruleLabel(preview) }}</el-descriptions-item>
-          <el-descriptions-item label="首章" :span="2">{{ preview.chapters[0]?.title }}</el-descriptions-item>
-          <el-descriptions-item label="简介" :span="3">
-            <div class="intro">{{ preview.intro || '-' }}</div>
-          </el-descriptions-item>
-        </el-descriptions>
-
-        <div class="sample">
-          <div class="sample-title">
-            试抓首章：{{ preview.sample?.title }}
-            <el-tag v-if="preview.sample?.error" type="danger" size="small">失败</el-tag>
-            <el-tag v-else :type="preview.sample?.chars < 200 ? 'warning' : 'success'" size="small">
-              {{ preview.sample?.chars }} 字
-            </el-tag>
-          </div>
-          <el-alert v-if="preview.sample?.error" type="error" :closable="false" :title="preview.sample.error" />
-          <el-alert
-            v-else-if="preview.sample?.chars < 200"
-            type="warning"
-            :closable="false"
-            title="正文很短，可能没识别到正文区块，建议在高级选项中填写正文 XPath 后重新解析"
-          />
-          <pre v-if="preview.sample?.text" class="sample-text">{{ preview.sample.text }}</pre>
-        </div>
-
-        <el-form label-width="96px" class="range">
-          <el-form-item label="抓取范围">
-            <el-input-number v-model="range.start" :min="1" :max="preview.chapterCount" />
-            <span class="range-sep">至</span>
-            <el-input-number v-model="range.end" :min="range.start" :max="preview.chapterCount" />
-            <span class="hint">
-              {{ preview.chapters[range.start - 1]?.title }} → {{ preview.chapters[range.end - 1]?.title }}
-              （共 {{ Math.max(range.end - range.start + 1, 0) }} 章，预计 ≥ {{ estimate }}）
-            </span>
-          </el-form-item>
-          <el-form-item>
-            <el-button type="primary" :loading="submitting" @click="doSubmit">开始抓取</el-button>
-          </el-form-item>
-        </el-form>
-      </div>
-
-      <!-- 全自动：按 AI 解析的规律测试 → 决定 → 筛选书目并抓取 -->
-      <AutoCrawlPanel
-        v-if="mode === 'site'"
-        :rules="usableRules"
-        :prefer-rule-id="autoRuleId"
-        :delay-ms="form.delayMs"
-        :respect-robots="form.respectRobots"
-        @submitted="onAutoSubmitted"
-        @open-ai="openAiDialog('analyze')"
-      />
-    </el-card>
-
-    <el-card class="box-card tasks" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">抓取任务</span>
-          <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
-        </div>
-      </template>
-      <el-empty v-if="!tasks.length" description="暂无抓取任务" />
-      <el-table v-else :data="tasks" stripe>
-        <el-table-column label="小说" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">
-            <div>{{ row.bookName || (row.mode === 'site' ? '（全自动）' : '（解析中）') }}<span v-if="row.author" class="meta"> · {{ row.author }}</span></div>
-            <div class="meta">{{ row.url }}</div>
+          <el-empty v-if="!filteredSavedUrls.length" :description="savedUrls.length ? '没有匹配的地址' : '还没有地址：点「添加地址」'" />
+          <el-table v-else :data="filteredSavedUrls" size="small" max-height="440">
+            <el-table-column label="描述" min-width="170" show-overflow-tooltip>
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.mode === 'site' ? 'warning' : 'info'" class="mr6">{{ row.mode === 'site' ? '整站' : '单本' }}</el-tag>
+                {{ row.name || '（未填写）' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="url" label="地址" min-width="260" show-overflow-tooltip />
+            <el-table-column label="使用" width="64">
+              <template #default="{ row }">{{ row.useCount || 0 }} 次</template>
+            </el-table-column>
+            <el-table-column label="操作" width="210">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="pickSavedUrl(row.id)">使用</el-button>
+                <el-button link type="success" @click="aiFromSaved(row)">AI 解析</el-button>
+                <el-button link @click="startEditSaved(row)">修改</el-button>
+                <el-button link type="danger" @click="removeSavedUrl(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane name="analyze">
+          <template #label>
+            AI 解析地址
+            <el-tag v-if="aiRunning" size="small" type="warning" class="ml6">解析中</el-tag>
           </template>
-        </el-table-column>
-        <el-table-column label="模式" width="76">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.mode === 'site' ? 'warning' : 'info'">
-              {{ row.mode === 'site' ? '全自动' : '单本' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="STATUS[row.status]?.type" size="small">{{ STATUS[row.status]?.label || row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="210">
-          <template #default="{ row }">
-            <el-progress
-              :percentage="row.progress || 0"
-              :status="row.status === 'SUCCEEDED' ? 'success' : ['FAILED', 'CANCELLED'].includes(row.status) ? 'exception' : ''"
-            />
-            <div v-if="row.mode === 'site'" class="meta">
-              书 {{ row.bookDone || 0 }}/{{ row.bookTotal || 0 }} 本
-              <span v-if="row.bookFailed">，失败 {{ row.bookFailed }}</span>
-              <span v-if="row.wordCount">，{{ row.wordCount }} 字</span>
-            </div>
-            <div v-else-if="row.chapterTotal" class="meta">
-              {{ row.chapterDone || 0 }}/{{ row.chapterTotal }} 章
-              <span v-if="row.chapterFailed">，失败 {{ row.chapterFailed }}</span>
-              <span v-if="row.wordCount">，{{ row.wordCount }} 字</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="message" label="说明" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="createTime" label="创建时间" width="170" />
-        <el-table-column label="操作" width="280" fixed="right">
-          <template #default="{ row }">
-            <el-button v-if="isActive(row)" link type="danger" @click="doCancel(row)">取消</el-button>
-            <template v-else>
-              <el-button v-if="row.mode === 'site'" link type="primary" @click="openBooks(row)">书籍明细</el-button>
-              <el-button v-else-if="row.fileId" link type="primary" @click="openExtract(row)">小说提取</el-button>
-              <el-button v-if="canResume(row)" link type="warning" @click="openResume(row)">继续抓取</el-button>
-              <el-button link @click="doRetry(row)">从头重抓</el-button>
-              <el-button link @click="reuseOptions(row)">改参数</el-button>
-            </template>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <!-- 整站任务：逐本明细 -->
-    <el-dialog v-model="booksDlg.visible" title="全自动任务 · 书籍明细" width="820px">
-      <div class="dialog-bar">
-        <span class="hint">{{ booksDlg.title }}</span>
-        <el-button size="small" :icon="Refresh" :loading="booksDlg.loading" @click="loadBooks">刷新</el-button>
-      </div>
-      <el-table :data="booksDlg.books" stripe max-height="440" size="small">
-        <el-table-column label="书名" min-width="170" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.bookName || row.tocUrl }}</template>
-        </el-table-column>
-        <el-table-column prop="category" label="分类" width="90" />
-        <el-table-column label="状态" width="86">
-          <template #default="{ row }">
-            <el-tag :type="STATUS[row.status]?.type" size="small">{{ STATUS[row.status]?.label || row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="150">
-          <template #default="{ row }">
-            <el-progress :percentage="row.progress || 0" :stroke-width="10" />
-            <div v-if="row.chapterTotal" class="meta">{{ row.chapterDone || 0 }}/{{ row.chapterTotal }} 章</div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="message" label="说明" min-width="180" show-overflow-tooltip />
-        <el-table-column label="操作" width="96">
-          <template #default="{ row }">
-            <el-button v-if="row.fileId" link type="primary" @click="openExtract(row)">小说提取</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-dialog>
-
-    <!-- 断点续抓 -->
-    <el-dialog v-model="resumeDlg.visible" title="从断点继续抓取" width="560px">
-      <el-descriptions :column="1" border size="small">
-        <el-descriptions-item label="任务">{{ resumeDlg.task?.bookName || resumeDlg.task?.url }}</el-descriptions-item>
-        <el-descriptions-item label="当前地址">{{ resumeDlg.task?.url }}</el-descriptions-item>
-        <el-descriptions-item label="已保存进度">
-          <span v-if="resumeDlg.loading">查询中…</span>
-          <span v-else-if="!resumeDlg.info">（AI 服务未启动，暂时查不到断点；继续抓取时会自动使用）</span>
-          <template v-else-if="resumeDlg.task?.mode === 'site'">
-            已完成 {{ resumeDlg.task.bookDone || 0 }}/{{ resumeDlg.task.bookTotal || 0 }} 本；
-            未完成的 {{ resumeDlg.info.booksPending }} 本中 {{ resumeDlg.info.booksWithCheckpoint }} 本有断点，
-            共已保存 {{ resumeDlg.info.chapterSaved }} 章
-          </template>
-          <template v-else-if="resumeDlg.info.chapterTotal">
-            已保存 {{ resumeDlg.info.chapterSaved }}/{{ resumeDlg.info.chapterTotal }} 章（这些章节不会重抓）
-          </template>
-          <span v-else>还没有断点（目录尚未解析成功），将从目录页开始</span>
-        </el-descriptions-item>
-      </el-descriptions>
-      <el-form label-width="112px" class="resume-form" @submit.prevent>
-        <el-form-item label="站点换地址了？">
-          <el-input
-            v-model="resumeDlg.newOrigin"
-            placeholder="可空。如 https://www.new-domain.com（协议 + 域名 / IP[:端口]）"
-            clearable
-          />
-          <div class="meta">
-            站点换了域名或 IP、但页面路径不变时填写：任务地址和断点里的章节地址会整体换到新站点。
-            断点里存有完整章节清单，即使目录页已经打不开，也能把剩下的章节抓完。
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="resumeDlg.visible = false">取消</el-button>
-        <el-button type="primary" :loading="resumeDlg.submitting" @click="doResume">继续抓取</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- AI 解析：配置 + 过程 / 已学规则 -->
-    <el-dialog v-model="aiDlg.visible" title="AI 解析" width="min(1240px, 94vw)" top="4vh">
-      <el-tabs v-model="aiDlg.tab">
-        <el-tab-pane label="AI 解析地址" name="analyze">
           <el-form label-width="96px" @submit.prevent>
             <el-form-item label="入口地址">
               <div class="url-row">
-                <el-autocomplete
+                <el-input
                   v-model="ai.url"
                   class="url-input"
-                  :fetch-suggestions="suggestUrls"
                   placeholder="一本书的详情页或目录页，如 https://example.com/book/123/"
                   clearable
                   @keyup.enter="doAiAnalyze"
-                >
-                  <template #default="{ item }">
-                    <div class="url-option">
-                      <span>{{ item.label }}</span>
-                      <span class="meta">{{ item.value }}</span>
-                    </div>
-                  </template>
-                </el-autocomplete>
+                />
                 <el-button v-if="aiRunning" type="danger" plain @click="doAiCancel">取消</el-button>
                 <el-button v-else type="success" :icon="MagicStick" :disabled="!ai.url.trim()" @click="doAiAnalyze">开始解析</el-button>
               </div>
@@ -346,16 +136,17 @@
             <div class="meta block ai-desc">
               先试已学到的 / 内置规则，失败再由大模型看页面结构写 XPath，每次都真实试抓目录 + 两章正文；
               成功后总结地址规律并按域名存入「已学规则」，以后同站点「按域名自动选择」会自动套用。
-              请求间隔与 robots 沿用主页面「高级选项」。需要「模型配置」里有已验证的大模型。
+              请求间隔与 robots 沿用「抓取设置」。需要「模型配置」里有已验证的大模型。
             </div>
           </el-form>
           <div v-if="aiJob" class="preview">
             <div class="sample-title">
               {{ aiJob.url }}
               <el-tag :type="AI_STATUS[aiJob.status]?.type" size="small">{{ AI_STATUS[aiJob.status]?.label || aiJob.status }}</el-tag>
-              <el-button v-if="aiJob.status === 'succeeded' && preview" size="small" type="primary" @click="aiDlg.visible = false">
+              <el-button v-if="aiJob.status === 'succeeded' && preview" size="small" type="primary" @click="goSection('book')">
                 去确认目录并抓取
               </el-button>
+              <el-button v-if="!aiRunning" size="small" @click="clearAiJob">清空</el-button>
             </div>
             <el-progress
               :percentage="aiJob.progress || 0"
@@ -391,6 +182,10 @@
             <div v-if="aiJob.result" class="ai-result">
               <div class="sample-title">站点结构与跳转规律</div>
               <SiteMapView :site-map="aiJob.result.siteMap" :home-url="aiJob.result.homeUrl" />
+            </div>
+            <div v-if="aiJob.result" class="ai-result">
+              <div class="sample-title">首页链接规律</div>
+              <HomeLinksView :home-links="aiJob.result.siteMap?.homeLinks" />
             </div>
           </div>
         </el-tab-pane>
@@ -492,64 +287,266 @@
             </el-table-column>
           </el-table>
         </el-tab-pane>
+        <el-tab-pane label="抓取设置" name="network">
+          <el-form label-width="104px" class="network-form" @submit.prevent>
+            <el-form-item label="请求间隔">
+              <el-input-number v-model="form.delayMs" :min="300" :max="30000" :step="100" />
+              <span class="hint">毫秒，同一站点两次请求之间至少间隔这么久。太快容易被封 IP 或弹出人机验证</span>
+            </el-form-item>
+            <el-form-item label="robots.txt">
+              <el-switch v-model="form.respectRobots" active-text="遵守" />
+              <span class="hint">站点的 robots.txt 不允许的页面不抓（建议保持开启）</span>
+            </el-form-item>
+            <p class="meta block">单本抓取、AI 解析和全自动的默认值都取这里（全自动面板里还可以单独调）。</p>
+          </el-form>
+        </el-tab-pane>
       </el-tabs>
+    </el-card>
+
+    <!-- ================= 单本抓取 ================= -->
+    <el-card v-show="section === 'book'" class="box-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">单本抓取</span>
+          <el-button @click="router.push('/file/manage')">文件管理</el-button>
+        </div>
+      </template>
+      <el-alert type="info" :closable="false" show-icon class="tip"
+        title="填写一本小说的「章节目录页」地址，抓取后合并为一个 txt 存入文件管理，可直接发起小说提取。请只抓取你有权使用的内容，并保持合理的请求间隔。" />
+      <el-form label-width="104px" @submit.prevent>
+        <el-form-item label="目录页地址">
+          <div class="url-row">
+            <el-input
+              v-model="form.url"
+              class="url-input"
+              placeholder="https://example.com/book/123/"
+              clearable
+              @keyup.enter="doPreview"
+            />
+            <el-button type="primary" :loading="previewing" :disabled="!form.url" @click="doPreview">
+              解析目录
+            </el-button>
+            <el-button type="success" plain :icon="MagicStick" @click="openAiDialog('analyze')">
+              {{ aiRunning ? `AI 解析中 ${aiJob.attempts?.length || 0}/${aiJob.maxAttempts}` : 'AI 解析' }}
+            </el-button>
+            <el-button :icon="Collection" @click="openSavedDialog">常用地址<span v-if="savedUrls.length" class="count">（{{ savedUrls.length }}）</span></el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="抓取规则">
+          <el-select v-model="form.preset" style="width: 260px">
+            <el-option label="按域名自动选择" value="" />
+            <el-option-group v-if="confirmedRules.length" label="AI 解析规则（已确认）">
+              <el-option
+                v-for="r in confirmedRules"
+                :key="r.id"
+                :label="`${r.siteName || r.host}（AI 解析）`"
+                :value="`learned:${r.id}`"
+              />
+            </el-option-group>
+            <el-option-group v-if="pendingRules.length" label="AI 解析规则（待确认，只在手动选择时使用）">
+              <el-option
+                v-for="r in pendingRules"
+                :key="r.id"
+                :label="`${r.siteName || r.host}（待确认）`"
+                :value="`learned:${r.id}`"
+              />
+            </el-option-group>
+            <el-option-group label="内置规则">
+              <el-option v-for="p in presets" :key="p.key" :label="p.name" :value="p.key" />
+            </el-option-group>
+          </el-select>
+          <span class="hint">{{ presetHint }}</span>
+        </el-form-item>
+
+        <el-collapse v-model="advancedOpen" class="advanced">
+          <el-collapse-item title="高级选项（自定义 XPath）" name="adv">
+            <template v-if="true">
+            <p class="hint block">
+              以下留空 = 使用所选规则的值（灰色占位符），都为空则自动识别。章节链接 XPath 选中 &lt;a&gt; 元素，正文 XPath 选中正文容器。
+            </p>
+            <el-form-item v-for="f in RULE_FIELDS" :key="f.key" :label="f.label">
+              <el-input v-model="form.rule[f.key]" :placeholder="presetRule[f.key] || f.placeholder" clearable />
+            </el-form-item>
+            <el-form-item label="删除行">
+              <el-input
+                v-model="form.removeText"
+                type="textarea"
+                :rows="2"
+                placeholder="每行一个正则，正文中匹配的行会被删除（内置已去除常见网址 / 引流广告）"
+              />
+            </el-form-item>
+            </template>
+          </el-collapse-item>
+        </el-collapse>
+        <el-form-item label="请求设置">
+          <span class="hint no-ml">间隔 {{ form.delayMs }} 毫秒 · {{ form.respectRobots ? '遵守' : '不检查' }} robots.txt</span>
+          <el-button link type="primary" class="ml6" @click="openConfig('network')">修改</el-button>
+        </el-form-item>
+      </el-form>
+
+      <!-- AI 解析状态（详情在「抓取配置 · AI 解析地址」） -->
+      <div v-if="aiJob" class="ai-strip">
+        <el-tag :type="AI_STATUS[aiJob.status]?.type" size="small">AI 解析 · {{ AI_STATUS[aiJob.status]?.label || aiJob.status }}</el-tag>
+        <span class="ai-strip-msg">{{ aiJob.error || aiJob.message }}</span>
+        <TokenUsageBar :usage="aiJob.usage" :live="aiRunning" class="ai-strip-usage" />
+        <el-button link type="primary" @click="openAiDialog('analyze')">查看过程</el-button>
+        <el-button v-if="!aiRunning" link @click="clearAiJob">收起</el-button>
+      </div>
+
+      <!-- 单本：目录预览 -->
+      <div v-if="preview" class="preview">
+        <el-descriptions :column="3" border size="small">
+          <el-descriptions-item label="书名">{{ preview.bookName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="作者">{{ preview.author || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="章节数">{{ preview.chapterCount }}（目录 {{ preview.tocPages }} 页）</el-descriptions-item>
+          <el-descriptions-item label="使用规则">{{ ruleLabel(preview) }}</el-descriptions-item>
+          <el-descriptions-item label="首章" :span="2">{{ preview.chapters[0]?.title }}</el-descriptions-item>
+          <el-descriptions-item label="简介" :span="3">
+            <div class="intro">{{ preview.intro || '-' }}</div>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <div class="sample">
+          <div class="sample-title">
+            试抓首章：{{ preview.sample?.title }}
+            <el-tag v-if="preview.sample?.error" type="danger" size="small">失败</el-tag>
+            <el-tag v-else :type="preview.sample?.chars < 200 ? 'warning' : 'success'" size="small">
+              {{ preview.sample?.chars }} 字
+            </el-tag>
+          </div>
+          <el-alert v-if="preview.sample?.error" type="error" :closable="false" :title="preview.sample.error" />
+          <el-alert
+            v-else-if="preview.sample?.chars < 200"
+            type="warning"
+            :closable="false"
+            title="正文很短，可能没识别到正文区块，建议在高级选项中填写正文 XPath 后重新解析"
+          />
+          <pre v-if="preview.sample?.text" class="sample-text">{{ preview.sample.text }}</pre>
+        </div>
+
+        <el-form label-width="96px" class="range">
+          <el-form-item label="抓取范围">
+            <el-input-number v-model="range.start" :min="1" :max="preview.chapterCount" />
+            <span class="range-sep">至</span>
+            <el-input-number v-model="range.end" :min="range.start" :max="preview.chapterCount" />
+            <span class="hint">
+              {{ preview.chapters[range.start - 1]?.title }} → {{ preview.chapters[range.end - 1]?.title }}
+              （共 {{ Math.max(range.end - range.start + 1, 0) }} 章，预计 ≥ {{ estimate }}）
+            </span>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="submitting" @click="doSubmit">开始抓取</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+
+    </el-card>
+
+    <!-- ================= 全自动抓取 ================= -->
+    <el-card v-show="section === 'auto'" class="box-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">全自动抓取</span>
+          <div class="header-ops">
+            <el-button :icon="MagicStick" @click="openAiDialog('analyze')">AI 解析新站点</el-button>
+            <el-button @click="router.push('/file/manage')">文件管理</el-button>
+          </div>
+        </div>
+      </template>
+      <el-alert type="info" :closable="false" show-icon class="tip"
+        title="选一个 AI 解析过的站点 → 按学到的规律测试能否找到多本书、取到目录 / 简介 / 标签 / 正文（书目存本地，不存正文）→ 决定是否使用 → 按书名 / 作者 / 类型 / 情节筛选后逐本抓取，每本一个 txt。请只抓取你有权使用的内容。" />
+      <!-- 全自动：按 AI 解析的规律测试 → 决定 → 筛选书目并抓取 -->
+      <AutoCrawlPanel
+        :rules="usableRules"
+        :prefer-rule-id="autoRuleId"
+        :delay-ms="form.delayMs"
+        :respect-robots="form.respectRobots"
+        @submitted="onAutoSubmitted"
+        @open-ai="openAiDialog('analyze')"
+      />
+    </el-card>
+
+    <!-- ================= 抓取进度：一个首页一个工作区（单本抓取 + 整站抓取），每本小说抓到第几章 ================= -->
+    <el-card v-show="section === 'progress'" class="box-card" shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span class="card-title">抓取进度</span>
+          <span class="meta">一个网站（首页）一个工作区：单本抓取和整站抓取都在里面，「来源」区分；同一网站的抓取依次排队，不同网站同时进行</span>
+        </div>
+      </template>
+      <WorkspacePanel
+        ref="workspaceRef"
+        :visible="section === 'progress'"
+        :prefer-home="workspaceHome"
+        @extract="openExtract"
+        @resume="openResume"
+        @reuse="reuseOptions"
+      />
+    </el-card>
+
+    <!-- 断点续抓 -->
+    <el-dialog v-model="resumeDlg.visible" title="从断点继续抓取" width="560px">
+      <el-descriptions :column="1" border size="small">
+        <el-descriptions-item label="任务">{{ resumeDlg.task?.bookName || resumeDlg.task?.url }}</el-descriptions-item>
+        <el-descriptions-item label="当前地址">{{ resumeDlg.task?.url }}</el-descriptions-item>
+        <el-descriptions-item label="已保存进度">
+          <span v-if="resumeDlg.loading">查询中…</span>
+          <span v-else-if="!resumeDlg.info">（AI 服务未启动，暂时查不到断点；继续抓取时会自动使用）</span>
+          <template v-else-if="resumeDlg.task?.mode === 'site'">
+            已完成 {{ resumeDlg.task.bookDone || 0 }}/{{ resumeDlg.task.bookTotal || 0 }} 本；
+            未完成的 {{ resumeDlg.info.booksPending }} 本中 {{ resumeDlg.info.booksWithCheckpoint }} 本有断点，
+            共已保存 {{ resumeDlg.info.chapterSaved }} 章
+          </template>
+          <template v-else-if="resumeDlg.info.chapterTotal">
+            已保存 {{ resumeDlg.info.chapterSaved }}/{{ resumeDlg.info.chapterTotal }} 章（这些章节不会重抓）
+          </template>
+          <span v-else>还没有断点（目录尚未解析成功），将从目录页开始</span>
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-form label-width="112px" class="resume-form" @submit.prevent>
+        <el-form-item label="站点换地址了？">
+          <el-input
+            v-model="resumeDlg.newOrigin"
+            placeholder="可空。如 https://www.new-domain.com（协议 + 域名 / IP[:端口]）"
+            clearable
+          />
+          <div class="meta">
+            站点换了域名或 IP、但页面路径不变时填写：任务地址和断点里的章节地址会整体换到新站点。
+            断点里存有完整章节清单，即使目录页已经打不开，也能把剩下的章节抓完。
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="resumeDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="resumeDlg.submitting" @click="doResume">继续抓取</el-button>
+      </template>
     </el-dialog>
 
     <!-- 解析管理：一次解析的详情（每次尝试成败 / 站点结构 / 规则 / 样本） -->
     <RuleDetailDialog v-model="ruleDlg.visible" :rule="ruleDlg.rule" @action="onRuleAction" />
 
-    <!-- 地址管理：收藏的可抓取网址（增 / 改 / 删 / 使用 / AI 解析） -->
-    <el-dialog v-model="savedDlg.visible" title="地址管理" width="900px">
-      <div class="dialog-bar">
-        <div class="bar-left">
-          <el-button type="primary" size="small" :icon="Plus" @click="startAddSaved">添加地址</el-button>
-          <el-input v-model="savedDlg.query" size="small" class="saved-search" placeholder="搜索描述 / 地址" clearable />
-        </div>
-        <el-badge :value="pendingRules.length" :hidden="!pendingRules.length">
-          <el-button size="small" :icon="MagicStick" @click="openAiDialog('rules')">AI 解析管理</el-button>
-        </el-badge>
-      </div>
-
-      <el-form v-if="savedDlg.editing" label-width="56px" class="saved-form" @submit.prevent>
+    <!-- 小说网站：新增 / 修改 -->
+    <el-dialog v-model="siteDlg.visible" :title="siteDlg.form.id ? '修改网站地址' : '新增网站地址'" width="560px">
+      <el-form label-width="64px" @submit.prevent>
         <el-form-item label="地址">
-          <el-input v-model="savedDlg.editing.url" placeholder="https://… 书籍详情页 / 目录页 / 站点首页" clearable />
+          <el-input v-model="siteDlg.form.url" placeholder="站内任意地址：首页、某本书的书籍页 / 目录页都可以" clearable @keyup.enter="submitSite" />
+          <div class="meta block">
+            <template v-if="siteHomePreview">将保存为首页：<b>{{ siteHomePreview }}</b>（同一首页只保存一个）。</template>
+            <template v-else>请输入 http:// 或 https:// 开头的网址。</template>
+            填书籍页 / 目录页时，会顺便记作「样例书」，AI 解析直接用它。
+          </div>
         </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="savedDlg.editing.name" placeholder="这个地址是什么，如：某某小说目录 / 某某书站首页" clearable />
+        <el-form-item label="名称">
+          <el-input v-model="siteDlg.form.name" placeholder="可空，如：某某书城（空时显示域名）" clearable />
         </el-form-item>
-        <el-form-item>
-          <el-radio-group v-model="savedDlg.editing.mode" size="small">
-            <el-radio-button value="book">单本</el-radio-button>
-            <el-radio-button value="site">整站（全自动）</el-radio-button>
-          </el-radio-group>
-          <el-button type="primary" size="small" class="ml12" :loading="savedDlg.saving" :disabled="!savedDlg.editing.url.trim()" @click="submitSaved">
-            {{ savedDlg.editing.id ? '保存修改' : '添加' }}
-          </el-button>
-          <el-button size="small" @click="savedDlg.editing = null">取消</el-button>
+        <el-form-item label="备注">
+          <el-input v-model="siteDlg.form.note" placeholder="可空" clearable />
         </el-form-item>
       </el-form>
-
-      <el-empty v-if="!filteredSavedUrls.length" :description="savedUrls.length ? '没有匹配的地址' : '还没有地址：点「添加地址」'" />
-      <el-table v-else :data="filteredSavedUrls" size="small" max-height="440">
-        <el-table-column label="描述" min-width="170" show-overflow-tooltip>
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.mode === 'site' ? 'warning' : 'info'" class="mr6">{{ row.mode === 'site' ? '整站' : '单本' }}</el-tag>
-            {{ row.name || '（未填写）' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="url" label="地址" min-width="260" show-overflow-tooltip />
-        <el-table-column label="使用" width="64">
-          <template #default="{ row }">{{ row.useCount || 0 }} 次</template>
-        </el-table-column>
-        <el-table-column label="操作" width="210">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="pickSavedUrl(row.id)">使用</el-button>
-            <el-button link type="success" @click="aiFromSaved(row)">AI 解析</el-button>
-            <el-button link @click="startEditSaved(row)">修改</el-button>
-            <el-button link type="danger" @click="removeSavedUrl(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+      <template #footer>
+        <el-button @click="siteDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="siteDlg.saving" :disabled="!siteHomePreview" @click="submitSite">保存</el-button>
+      </template>
     </el-dialog>
 
     <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.fileName" @confirm="doExtract" />
@@ -557,29 +554,28 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onActivated, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Collection, MagicStick, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import {
   analyzeCrawlUrl,
-  cancelCrawl,
   cancelCrawlAiJob,
   confirmCrawlRule,
   deleteCrawlRule,
   deleteSavedUrl,
+  deleteSite,
   getCrawlAiJob,
   getCrawlCheckpoint,
-  listCrawlBooks,
   listCrawlPresets,
   listCrawlRules,
-  listCrawls,
   listSavedUrls,
+  listSites,
   previewCrawl,
   rejectCrawlRule,
   resumeCrawl,
-  retryCrawl,
   saveSavedUrl,
+  saveSite,
   submitCrawl,
   useSavedUrl
 } from '@/api/crawl'
@@ -588,6 +584,8 @@ import { errorMessage } from '@/api/request'
 import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
 import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import SiteMapView from '@/components/crawl/SiteMapView.vue'
+import HomeLinksView from '@/components/crawl/HomeLinksView.vue'
+import WorkspacePanel from '@/components/crawl/WorkspacePanel.vue'
 import AutoCrawlPanel from '@/components/crawl/AutoCrawlPanel.vue'
 import AttemptTable from '@/components/crawl/AttemptTable.vue'
 import RuleDetailDialog from '@/components/crawl/RuleDetailDialog.vue'
@@ -623,10 +621,30 @@ const RULE_FIELDS = [
   { key: 'contentNext', label: '正文下一页', placeholder: '一章分多页时：「下一页」的 @href' },
   { key: 'encoding', label: '编码', placeholder: '留空自动识别，如 gbk' }
 ]
-const POLL_MS = 3000
-
 const router = useRouter()
-const mode = ref('book')
+const route = useRoute()
+// 四个子页面（侧边栏「小说抓取」的子菜单）：config 抓取配置 / book 单本 / auto 全自动 / progress 抓取进度
+const SECTIONS = ['config', 'book', 'auto', 'progress']
+// 旧地址：整本抓取进度 / 整站工作区已合并为「抓取进度」
+const SECTION_ALIAS = { tasks: 'progress', workspace: 'progress' }
+// 提交抓取后要打开的工作区（首页地址）
+const workspaceHome = ref('')
+const workspaceRef = ref(null)
+const section = computed(() => {
+  const tab = SECTION_ALIAS[route.params.tab] || route.params.tab
+  return SECTIONS.includes(tab) ? tab : 'config'
+})
+watch(
+  () => route.params.tab,
+  (tab) => {
+    if (SECTION_ALIAS[tab]) router.replace(`/novel/crawl/${SECTION_ALIAS[tab]}`)
+  },
+  { immediate: true }
+)
+// 旧代码里的「模式」：单本 = book，全自动 = site
+const mode = computed(() => (section.value === 'auto' ? 'site' : 'book'))
+// 抓取配置页里的标签：sites 小说网站 / saved 常用地址 / analyze AI 解析地址 / rules 解析管理 / network 抓取设置
+const configTab = ref('sites')
 const presets = ref([])
 const form = reactive(emptyForm())
 const advancedOpen = ref([])
@@ -634,33 +652,50 @@ const previewing = ref(false)
 const preview = ref(null)
 // 全自动模式要选中的站点规则（解析管理「全自动抓取」/ 地址管理选整站地址 / 任务「改参数」时指定）
 const autoRuleId = ref(null)
+/** 让全自动面板选中某条规则：先清空再设，同一条规则再点一次也会生效 */
+function preferAutoRule(id) {
+  autoRuleId.value = null
+  nextTick(() => (autoRuleId.value = id))
+}
 const range = reactive({ start: 1, end: 1 })
 const submitting = ref(false)
-const loading = ref(false)
-const tasks = ref([])
-const booksDlg = reactive({ visible: false, crawl: null, title: '', books: [], loading: false })
 const extractDlg = reactive({ visible: false, fileId: null, fileName: '' })
 const resumeDlg = reactive({ visible: false, task: null, info: null, loading: false, newOrigin: '', submitting: false })
 const ai = reactive({ url: '', maxAttempts: 5, hint: '', autoStart: false, useKnown: true })
 const aiJob = ref(null)
 const learnedRules = ref([])
-const aiDlg = reactive({ visible: false, tab: 'analyze' })
 const rulesFilter = ref('PENDING')
 const rulesQuery = ref('')
 const ruleDlg = reactive({ visible: false, rule: null })
 const savedUrls = ref([])
 // editing：null = 不在编辑；{id?, url, name, mode} = 添加 / 修改中
 const savedDlg = reactive({ visible: false, query: '', editing: null, saving: false })
-let timer = null
+// 小说网站爬取：用户指定的网站（按首页归一），附解析规则状态与书目概况
+const sites = ref([])
+const siteDlg = reactive({ visible: false, saving: false, form: { id: null, url: '', name: '', note: '' } })
+const SITE_RULE = {
+  NONE: { label: '未解析', type: 'info' },
+  PENDING: { label: '待确认', type: 'warning' },
+  CONFIRMED: { label: '已确认', type: 'success' },
+  FAILED: { label: '解析失败', type: 'danger' }
+}
+const SITE_DECISION = {
+  PENDING: { label: '待决定', type: 'warning' },
+  USED: { label: '使用中', type: 'success' },
+  REJECTED: { label: '不使用', type: 'info' }
+}
 let aiTimer = null
 
-// 本机浏览器里记住表单草稿与最近用过的地址（刷新 / 关页面后还在）；已提交任务的地址另存在数据库的任务表里
+// 本机浏览器里只记住「设置类」选项（请求间隔、robots 等），不记地址历史；要保存地址请用「常用地址」
 const DRAFT_KEY = 'nan_novel.crawl.draft'
-// 解析目录 / AI 解析的结果：切到别的页面、刷新浏览器后回来还在，直到重新解析或开始抓取
+// 进行中的 AI 解析任务（刷新后接着显示进度）；结束了的不保留
 const RESULT_KEY = 'nan_novel.crawl.result'
-const RECENT_KEY = 'nan_novel.crawl.recentUrls'
-const MAX_RECENT = 30
-const recentUrls = ref(readJson(RECENT_KEY, []))
+// 旧版自动记录的「最近使用地址」，已不再使用：打开页面时删掉
+try {
+  localStorage.removeItem('nan_novel.crawl.recentUrls')
+} catch {
+  // 存储被禁用：无所谓
+}
 
 function readJson(key, fallback) {
   try {
@@ -679,53 +714,29 @@ function writeJson(key, value) {
   }
 }
 
-/** 记住用过的地址（解析时），最近的在前 */
-function rememberUrl(url, label) {
-  if (!url) return
-  const rest = recentUrls.value.filter((r) => r.url !== url)
-  const old = recentUrls.value.find((r) => r.url === url)
-  recentUrls.value = [{ url, label: label || old?.label || '', mode: mode.value }, ...rest].slice(0, MAX_RECENT)
-  writeJson(RECENT_KEY, recentUrls.value)
-}
-
-/** 地址框候选：本机最近用过的 + 数据库里所有抓取任务的地址（含失败 / 中断的） */
-function suggestUrls(query, cb) {
-  const seen = new Set()
-  const items = []
-  const push = (url, label) => {
-    if (!url || seen.has(url)) return
-    seen.add(url)
-    items.push({ value: url, label })
-  }
-  savedUrls.value.forEach((u) => push(u.url, `★ ${u.name || '收藏'}`))
-  recentUrls.value.forEach((r) => push(r.url, r.label || '最近使用'))
-  tasks.value
-    .filter((t) => t.mode !== 'site')
-    .forEach((t) => push(t.url, `${t.bookName || '任务'} · ${STATUS[t.status]?.label || t.status}`))
-  const q = (query || '').trim().toLowerCase()
-  cb(q ? items.filter((i) => i.value.toLowerCase().includes(q) || i.label.toLowerCase().includes(q)) : items)
-}
-
+/** 只恢复「设置类」选项（请求间隔、robots、AI 最多尝试次数等）；地址、规则、补充说明一律留空，由用户自己填 */
 function restoreDraft() {
   const d = readJson(DRAFT_KEY, null)
   if (!d) return
-  if (d.mode === 'site' || d.mode === 'book') mode.value = d.mode
   if (d.form) {
-    const { saveDir, ...rest } = d.form // saveDir：旧版「保存目录」，已改成常用地址
-    Object.assign(form, emptyForm(), rest, { rule: { ...emptyForm().rule, ...(d.form.rule || {}) } })
-    if (Object.values(form.rule).some(Boolean) || form.removeText) advancedOpen.value = ['adv']
+    if (d.form.delayMs) form.delayMs = d.form.delayMs
+    if (typeof d.form.respectRobots === 'boolean') form.respectRobots = d.form.respectRobots
   }
-  if (d.ai) Object.assign(ai, d.ai)
+  if (d.ai) {
+    if (d.ai.maxAttempts) ai.maxAttempts = d.ai.maxAttempts
+    if (typeof d.ai.useKnown === 'boolean') ai.useKnown = d.ai.useKnown
+    if (typeof d.ai.autoStart === 'boolean') ai.autoStart = d.ai.autoStart
+  }
 }
 
-/** 恢复上次的解析结果（目录预览 / AI 解析过程），进行中的 AI 解析继续轮询 */
+/** 恢复上次的 AI 解析任务状态（进行中的继续轮询）；目录预览不恢复（地址框是空的，旧预览会对不上）。
+ *  在页面里切换子页面不会丢东西（同一个组件实例被缓存）。 */
 function restoreResult() {
   const r = readJson(RESULT_KEY, null)
-  if (!r) return
-  preview.value = r.preview || null
-  if (r.range) Object.assign(range, r.range)
-  aiJob.value = r.aiJob || null
-  if (aiJob.value && ['queued', 'running'].includes(aiJob.value.status)) scheduleAiPoll()
+  if (r?.aiJob && ['queued', 'running'].includes(r.aiJob.status)) {
+    aiJob.value = r.aiJob
+    scheduleAiPoll()
+  }
 }
 
 function saveResult() {
@@ -749,14 +760,12 @@ function emptyForm() {
 
 restoreDraft()
 restoreResult()
-watch([mode, form, ai], () => writeJson(DRAFT_KEY, { mode: mode.value, form, ai }), { deep: true })
+watch([form, ai], () =>
+  writeJson(DRAFT_KEY, {
+    form: { delayMs: form.delayMs, respectRobots: form.respectRobots },
+    ai: { maxAttempts: ai.maxAttempts, useKnown: ai.useKnown, autoStart: ai.autoStart }
+  }), { deep: true })
 watch([preview, aiJob, () => range.start, () => range.end], saveResult)
-
-const tipText = computed(() =>
-  mode.value === 'book'
-    ? '填写一本小说的「章节目录页」地址，抓取后合并为一个 txt 存入文件管理，可直接发起小说提取。请只抓取你有权使用的内容，并保持合理的请求间隔。'
-    : '全自动爬虫：选一个 AI 解析过的站点 → 按学到的规律测试能否找到多本书、取到目录 / 简介 / 标签 / 正文（书目存本地，不存正文）→ 决定是否使用 → 按书名 / 作者 / 标签 / AI 检索筛选后逐本抓取，每本一个 txt。请只抓取你有权使用的内容，并保持合理的请求间隔。'
-)
 
 const currentPreset = computed(() => presets.value.find((p) => p.key === form.preset))
 const presetRule = computed(() => currentPreset.value?.rule || {})
@@ -841,13 +850,42 @@ function buildOptions() {
   return options
 }
 
-// 切换模式不清空结果：单本的目录预览留在本地，全自动的书目在后端
-function onModeChange() {}
+/** 回到顶部：页面在右侧内容区（.app-main）里滚动，不是整个窗口 */
+function scrollMainTop() {
+  document.querySelector('.app-main')?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+/** 切到某个子页面（侧边栏子菜单对应的路由） */
+function goSection(tab) {
+  if (section.value !== tab) router.push(`/novel/crawl/${tab}`)
+}
+
+/** 抓取配置页的某个标签 */
+function openConfig(tab) {
+  configTab.value = tab
+  goSection('config')
+}
+
+/** 单本 / 全自动（旧的模式切换） */
+function setMode(m) {
+  goSection(m === 'site' ? 'auto' : 'book')
+}
+
+/** 提交抓取后跳到「抓取进度」，打开该网站的工作区 */
+function openProgress(url) {
+  try {
+    const u = new URL(url || '')
+    workspaceHome.value = ''
+    nextTick(() => (workspaceHome.value = `${u.protocol}//${u.host.toLowerCase()}/`))
+  } catch {
+    // 地址异常时只跳页面
+  }
+  goSection('progress')
+}
 
 /** 全自动：选中的书已提交为抓取任务 */
-async function onAutoSubmitted() {
-  await loadTasks()
-  schedulePoll()
+function onAutoSubmitted(task) {
+  openProgress(task?.url)
 }
 
 async function loadPresets() {
@@ -861,7 +899,6 @@ async function loadPresets() {
 
 async function doPreview() {
   if (!form.url) return
-  rememberUrl(form.url.trim())
   previewing.value = true
   preview.value = null
   try {
@@ -871,7 +908,6 @@ async function doPreview() {
       return
     }
     preview.value = res.data
-    rememberUrl(form.url.trim(), res.data.bookName)
     range.start = 1
     range.end = res.data.chapterCount
   } catch (e) {
@@ -889,10 +925,9 @@ async function doSubmit() {
       ElMessage.error(res.message || '提交失败')
       return
     }
-    ElMessage.success('已开始抓取')
+    ElMessage.success(res.data?.message?.includes('同一网站') ? res.data.message : '已开始抓取，进度见「抓取进度」')
     preview.value = null
-    await loadTasks()
-    schedulePoll()
+    openProgress(res.data?.url || form.url)
   } catch (e) {
     ElMessage.error(errorMessage(e, '提交抓取任务失败'))
   } finally {
@@ -904,20 +939,16 @@ async function doSubmit() {
 
 const aiRunning = computed(() => !!aiJob.value && ['queued', 'running'].includes(aiJob.value.status))
 
-/** 打开「AI 解析」弹窗；入口地址为空时带上主页面的地址 */
+/** 打开「抓取配置 · AI 解析地址 / 解析管理」（入口地址不预填，由用户填写或从某条地址的「AI 解析」带入） */
 function openAiDialog(tab) {
-  if (!ai.url.trim() && !aiRunning.value) ai.url = form.url.trim()
-  savedDlg.visible = false
   if (tab === 'rules' && pendingRules.value.length === 0 && rulesFilter.value === 'PENDING') rulesFilter.value = ''
-  aiDlg.tab = tab
-  aiDlg.visible = true
+  openConfig(tab)
   loadRules()
 }
 
 async function doAiAnalyze() {
   const url = ai.url.trim()
   if (!url || aiRunning.value) return
-  rememberUrl(url)
   try {
     const res = await analyzeCrawlUrl({
       url,
@@ -979,7 +1010,6 @@ async function onAiSucceeded() {
   form.url = r.tocUrl || form.url
   form.preset = aiJob.value.savedRuleId ? `learned:${aiJob.value.savedRuleId}` : ''
   RULE_FIELDS.forEach((f) => (form.rule[f.key] = ''))
-  rememberUrl(form.url, r.preview?.bookName)
   if (r.preview) {
     preview.value = { ...r.preview, learnedRule: { host: r.host, siteName: r.siteName } }
     range.start = 1
@@ -987,7 +1017,6 @@ async function onAiSucceeded() {
   }
   if (ai.autoStart && preview.value) {
     ElMessage.success('AI 解析成功，开始抓取全书')
-    aiDlg.visible = false
     await doSubmit()
   } else {
     ElMessage.success('AI 解析成功：规则已存为「待确认」，可先确认目录并抓取，再到「解析管理」确认 / 不确认')
@@ -1057,6 +1086,96 @@ async function onRuleAction(name, row) {
   else ruleDlg.visible = false
 }
 
+// ---------------------------------------------------------------- 小说网站爬取
+
+async function loadSites() {
+  try {
+    const res = await listSites()
+    if (res.code === 0) sites.value = res.data || []
+  } catch {
+    // 后端没起时不影响其它功能
+  }
+}
+
+/** 与后端 CrawlSiteService.homeOf 同口径：scheme://host[:port]/ */
+const siteHomePreview = computed(() => {
+  try {
+    const u = new URL(siteDlg.form.url.trim())
+    if (!['http:', 'https:'].includes(u.protocol)) return ''
+    return `${u.protocol}//${u.host.toLowerCase()}/`
+  } catch {
+    return ''
+  }
+})
+
+function openSiteDialog(site) {
+  siteDlg.form = site
+    ? { id: site.id, url: site.sampleUrl || site.homeUrl, name: site.name || '', note: site.note || '' }
+    : { id: null, url: '', name: '', note: '' }
+  siteDlg.visible = true
+}
+
+async function submitSite() {
+  if (!siteHomePreview.value) return
+  siteDlg.saving = true
+  try {
+    const exists = !siteDlg.form.id && sites.value.some((x) => x.homeUrl === siteHomePreview.value)
+    const res = await saveSite({ ...siteDlg.form, url: siteDlg.form.url.trim(), name: siteDlg.form.name.trim(), note: siteDlg.form.note.trim() })
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '保存失败')
+      return
+    }
+    ElMessage.success(exists ? `这个网站已经添加过（${res.data.homeUrl}），已更新` : `已保存：${res.data.homeUrl}`)
+    siteDlg.visible = false
+    await loadSites()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '保存失败'))
+  } finally {
+    siteDlg.saving = false
+  }
+}
+
+async function removeSite(site) {
+  try {
+    await ElMessageBox.confirm(`删除网站「${site.name || site.host}」？只删这条地址，已解析的规则和书目不受影响。`, '删除网站', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteSite(site.id)
+    if (res.code !== 0) {
+      ElMessage.error(res.message || '删除失败')
+      return
+    }
+    await loadSites()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '删除失败'))
+  }
+}
+
+/** AI 解析该站：有样例书就直接填进入口地址；只有首页时提示填一本书的地址（AI 解析要从一本书学规律） */
+function analyzeSite(site) {
+  if (aiRunning.value) {
+    ElMessage.warning('已有 AI 解析在进行中，请等它结束或取消后再试')
+    openAiDialog('analyze')
+    return
+  }
+  ai.url = site.sampleUrl || site.homeUrl
+  openAiDialog('analyze')
+  if (!site.sampleUrl) ElMessage.info('AI 解析要从一本书学规律：请把入口地址换成该站某本书的书籍页或目录页')
+}
+
+/** 用该站的规律进入全自动（测试 → 决定 → 书目） */
+function autoSite(site) {
+  const r = site.rule && ruleById(site.rule.id)
+  if (!r) {
+    ElMessage.warning('该站点还没有可用的解析规则')
+    return
+  }
+  useRuleForSite(r)
+  scrollMainTop()
+}
+
 /** 重新解析：入口地址填这条记录解析过的书，回到「AI 解析地址」页 */
 function reanalyze(row) {
   if (aiRunning.value) {
@@ -1064,10 +1183,10 @@ function reanalyze(row) {
   } else {
     ai.url = row.sampleUrl || ''
   }
-  aiDlg.tab = 'analyze'
-  aiDlg.visible = true
+  openConfig('analyze')
 }
 const ruleById = (id) => learnedRules.value.find((r) => r.id === id)
+watch(learnedRules, loadSites)
 
 async function confirmRule(row) {
   if (!row) return
@@ -1121,16 +1240,15 @@ async function rejectRule(row) {
 
 /** 用这条规则的站点规律走全自动爬虫：测试 → 决定 → 筛选书目并抓取 */
 function useRuleForSite(row) {
-  mode.value = 'site'
-  autoRuleId.value = row.id
-  aiDlg.visible = false
+  setMode('site')
+  preferAutoRule(row.id)
   ElMessage.success('已切到全自动模式：先「开始测试」看看这套规律能否找到多本书')
 }
 
 function useRule(row) {
   form.preset = `learned:${row.id}`
   if (!form.url && row.sampleUrl) form.url = row.sampleUrl
-  aiDlg.visible = false
+  setMode('book')
 }
 
 async function removeRule(row) {
@@ -1180,13 +1298,12 @@ async function pickSavedUrl(id) {
       ElMessage.warning('这个站点还没有 AI 解析出的规律：先用「AI 解析」解析该站一本书的地址')
       return
     }
-    mode.value = 'site'
-    autoRuleId.value = r.id
+    setMode('site')
+    preferAutoRule(r.id)
   } else {
-    mode.value = 'book'
+    setMode('book')
     form.url = u.url
   }
-  savedDlg.visible = false
   try {
     await useSavedUrl(u.id)
     await loadSavedUrls()
@@ -1196,8 +1313,8 @@ async function pickSavedUrl(id) {
 }
 
 async function openSavedDialog() {
-  savedDlg.visible = true
   savedDlg.editing = null
+  openConfig('saved')
   await loadSavedUrls()
 }
 
@@ -1205,7 +1322,7 @@ async function openSavedDialog() {
 function startAddSaved() {
   const url = form.url.trim()
   const known = savedUrls.value.some((u) => u.url === url)
-  const name = mode.value === 'book' ? preview.value?.bookName : 
+  const name = mode.value === 'book' ? preview.value?.bookName : ''
   savedDlg.editing = { url: known ? '' : url, name: known ? '' : name || '', mode: mode.value }
 }
 
@@ -1262,57 +1379,7 @@ async function removeSavedUrl(row) {
   }
 }
 
-const isActive = (t) => t.status === 'QUEUED' || t.status === 'RUNNING'
-
-async function loadTasks() {
-  loading.value = true
-  try {
-    const res = await listCrawls()
-    if (res.code === 0) tasks.value = res.data || []
-    else ElMessage.error(res.message || '加载失败')
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '加载抓取任务失败'))
-  } finally {
-    loading.value = false
-  }
-  // 明细弹窗打开且任务仍在跑时，顺手刷新书籍列表
-  if (booksDlg.visible && booksDlg.crawl && isActive(booksDlg.crawl)) {
-    const latest = tasks.value.find((t) => t.id === booksDlg.crawl.id)
-    if (latest) booksDlg.crawl = latest
-    loadBooks()
-  }
-}
-
-/** 有进行中的任务时定时刷新，全部结束后停止 */
-function schedulePoll() {
-  stopPoll()
-  timer = setTimeout(async () => {
-    await loadTasks()
-    if (tasks.value.some(isActive)) schedulePoll()
-  }, POLL_MS)
-}
-
-function stopPoll() {
-  if (timer) clearTimeout(timer)
-  timer = null
-}
-
-async function doCancel(row) {
-  try {
-    const res = await cancelCrawl(row.id)
-    if (res.code !== 0) ElMessage.error(res.message || '取消失败')
-    await loadTasks()
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '取消失败'))
-  }
-}
-
-/** 失败 / 取消 / 中断的任务，以及还有书没抓完的整站任务，可以从断点继续 */
-function canResume(row) {
-  if (row.status === 'FAILED' || row.status === 'CANCELLED') return true
-  return row.mode === 'site' && row.status === 'SUCCEEDED' && (row.bookDone || 0) < (row.bookTotal || 0)
-}
-
+/** 抓取进度里的单本任务：从断点继续（可换站点地址） */
 async function openResume(row) {
   Object.assign(resumeDlg, { visible: true, task: row, info: null, loading: true, newOrigin: '', submitting: false })
   try {
@@ -1335,48 +1402,11 @@ async function doResume() {
     }
     ElMessage.success('已从断点继续抓取')
     resumeDlg.visible = false
-    await loadTasks()
-    schedulePoll()
+    workspaceRef.value?.reloadAll()
   } catch (e) {
     ElMessage.error(errorMessage(e, '继续抓取失败'))
   } finally {
     resumeDlg.submitting = false
-  }
-}
-
-async function doRetry(row) {
-  try {
-    const res = await retryCrawl(row.id)
-    if (res.code !== 0) {
-      ElMessage.error(res.message || '提交失败')
-      return
-    }
-    ElMessage.success('已重新开始抓取')
-    await loadTasks()
-    schedulePoll()
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '重新抓取失败'))
-  }
-}
-
-async function openBooks(row) {
-  booksDlg.visible = true
-  booksDlg.crawl = row
-  booksDlg.title = `${row.url} · ${row.bookDone || 0}/${row.bookTotal || 0} 本已完成`
-  await loadBooks()
-}
-
-async function loadBooks() {
-  if (!booksDlg.crawl) return
-  booksDlg.loading = true
-  try {
-    const res = await listCrawlBooks(booksDlg.crawl.id)
-    if (res.code === 0) booksDlg.books = res.data || []
-    else ElMessage.error(res.message || '加载书籍明细失败')
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '加载书籍明细失败'))
-  } finally {
-    booksDlg.loading = false
   }
 }
 
@@ -1389,12 +1419,12 @@ function reuseOptions(row) {
       ElMessage.warning('该站点没有 AI 解析出的规律（可能已删除），请先重新 AI 解析该站的一本书')
       return
     }
-    mode.value = 'site'
-    autoRuleId.value = r.id
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    setMode('site')
+    preferAutoRule(r.id)
+    scrollMainTop()
     return
   }
-  mode.value = 'book'
+  setMode('book')
   const learned = o.learnedRuleId && learnedRules.value.some((r) => r.id === o.learnedRuleId)
   Object.assign(form, emptyForm(), {
     url: o.url || row.url,
@@ -1408,7 +1438,7 @@ function reuseOptions(row) {
   form.removeText = (rule.removePatterns || []).join('\n')
   if (Object.keys(rule).length) advancedOpen.value = ['adv']
   preview.value = null
-  window.scrollTo({ top: 0, behavior: 'smooth' })
+  scrollMainTop()
 }
 
 function openExtract(row) {
@@ -1435,10 +1465,8 @@ onActivated(async () => {
   if (!presets.value.length) loadPresets()
   loadRules()
   loadSavedUrls()
-  await loadTasks()
-  if (tasks.value.some(isActive)) schedulePoll()
+  loadSites()
 })
-onDeactivated(stopPoll)
 </script>
 
 <style scoped>
@@ -1447,8 +1475,69 @@ onDeactivated(stopPoll)
   border-radius: 8px;
   box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
 }
-.tasks {
-  margin-top: 16px;
+.task-pager {
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+.pane-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.network-form {
+  max-width: 760px;
+  padding-top: 8px;
+}
+.hint.no-ml {
+  margin-left: 0;
+}
+.site-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.site-item {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.2fr) minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+.site-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 4px;
+}
+.site-home {
+  font-family: Consolas, monospace;
+  color: var(--el-color-primary);
+  word-break: break-all;
+}
+.site-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.site-ops {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+@media (max-width: 900px) {
+  .site-item {
+    grid-template-columns: 1fr;
+  }
+  .site-ops {
+    justify-content: flex-start;
+  }
 }
 .card-header {
   display: flex;
@@ -1475,12 +1564,6 @@ onDeactivated(stopPoll)
 }
 .url-input {
   flex: 1;
-}
-.url-option {
-  display: flex;
-  flex-direction: column;
-  padding: 4px 0;
-  line-height: 1.4;
 }
 .resume-form {
   margin-top: 16px;

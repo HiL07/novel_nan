@@ -212,6 +212,20 @@ CREATE TABLE IF NOT EXISTS crawl_saved_url (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_saved_url_url ON crawl_saved_url (url);
 
+-- 小说抓取页「小说网站爬取」（SQLite）：用户指定的小说网站，一个首页一行。新增时任何站内地址都归一为首页
+-- （scheme://host[:port]/），原地址留作 AI 解析的样例书地址；解析状态 / 书目按首页关联 crawl_site_rule / crawl_site_catalog。
+CREATE TABLE IF NOT EXISTS crawl_site (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    home_url    TEXT    NOT NULL,                -- 首页，如 https://www.example.com/
+    host        TEXT    NOT NULL,                -- 域名（小写）
+    name        TEXT,                            -- 显示名，可空（空时界面显示域名）
+    sample_url  TEXT,                            -- 新增时填的原地址（书籍页 / 目录页时可直接拿去 AI 解析）
+    note        TEXT,
+    create_time TEXT    NOT NULL,
+    update_time TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_site_home ON crawl_site (home_url);
+
 -- 全自动爬虫的站点书目（SQLite）：一个站点首页一行。按 AI 解析学到的规律（crawl_site_rule）测试能否找到多本书、
 -- 取到目录 / 简介 / 标签 / 正文，测试报告存 report；用户决定是否使用（decision），使用后可扩充书目、筛选并抓取。
 -- 同一首页的数据放在一起：data/site-catalog/<host>/（toc/<key>.json 每本书的目录，catalog.json 书目导出）。

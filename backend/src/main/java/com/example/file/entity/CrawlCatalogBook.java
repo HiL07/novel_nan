@@ -53,6 +53,10 @@ public class CrawlCatalogBook {
     @TableField(exist = false)
     private Map<String, Object> crawl;
 
+    /** 目录还在后台补全中（不入库）：书目正在采集 / 补目录，且这本书还没取到目录、没出错 */
+    @TableField(exist = false)
+    private Boolean tocPending;
+
     /** AI 检索的相关度与理由（不入库） */
     @TableField(exist = false)
     private Integer score;
