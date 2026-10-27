@@ -1,8 +1,0 @@
-node_modules/
-config.local.json
-remotion/node_modules/
-remotion/out/
-remotion/src/projects/*/
-remotion/src/registry.ts
-remotion/.claude/
-!remotion/src/projects/.gitkeep
