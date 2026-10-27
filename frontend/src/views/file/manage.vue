@@ -75,7 +75,12 @@
       </div>
     </el-card>
 
-    <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.item?.fileName" @confirm="doExtract" />
+    <ExtractOptionsDialog
+      v-model="extractDlg.visible"
+      :file-name="extractDlg.item?.fileName"
+      :file-size="extractDlg.item?.fileSize || 0"
+      @confirm="doExtract"
+    />
 
     <!-- 预览弹窗 -->
     <el-dialog

@@ -9,11 +9,20 @@ export function isExtractable(ext) {
 
 /**
  * 对文件发起小说提取（异步任务，立即返回任务记录）
- * POST /api/novel/extract/{fileId} {materials?}
+ * POST /api/novel/extract/{fileId} {materials?, model?}
  */
 export function submitExtract(fileId, options = {}) {
   // options.materials = {enabled, categories, maxPerChunk, focus}：同时提取创作素材候选（需用户确认后入库）
+  // options.model = {source: 'api', configId?}（空 = 当前启用的配置）| {source: 'local', baseId, chunkChars}
   return request.post(`/api/novel/extract/${fileId}`, options).then((res) => res.data)
+}
+
+/**
+ * 取消排队中 / 进行中的提取任务（记为失败「已取消」）
+ * POST /api/novel/extract/{id}/cancel
+ */
+export function cancelExtract(id) {
+  return request.post(`/api/novel/extract/${id}/cancel`).then((res) => res.data)
 }
 
 /**

@@ -19,11 +19,13 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -40,6 +42,8 @@ public class NovelExtractService {
     private static final long POLL_INTERVAL_MS = 3000;
     /** Python 服务连续不可达的最大次数（约 1 分钟）后判定失败 */
     private static final int MAX_UNREACHABLE = 20;
+    /** 本地模型默认分块字数（小模型上下文 / 输出有限，比大模型的 6000 字小） */
+    private static final long DEFAULT_LOCAL_CHUNK = 2500;
 
     private final NovelExtractMapper extractMapper;
     private final FileService fileService;
@@ -53,6 +57,8 @@ public class NovelExtractService {
         t.setDaemon(true);
         return t;
     });
+    /** 用户请求取消的任务 id（排队中的在轮到时跳过） */
+    private final Set<Long> cancelRequested = ConcurrentHashMap.newKeySet();
 
     public NovelExtractService(NovelExtractMapper extractMapper,
                                FileService fileService,
@@ -95,13 +101,35 @@ public class NovelExtractService {
      * materials：素材候选提取范围 {enabled, categories, maxPerChunk, focus, maxCandidates}，null 或 enabled=false 表示不提取素材。
      */
     public NovelExtract submit(Long fileId, Map<String, Object> materials) {
+        return submit(fileId, materials, null);
+    }
+
+    /**
+     * modelOpts：{source: api, configId?}（configId 为空 = 当前启用的配置；指定时只用于本任务，不改变启用状态）
+     * 或 {source: local, baseId, chunkChars?}（应用内本地模型，默认按 2500 字分块）
+     * 或 {source: gguf}（Python「llama.cpp」页正在运行的 GGUF 模型）；null 同 api + 启用的配置。
+     */
+    public NovelExtract submit(Long fileId, Map<String, Object> materials, Map<String, Object> modelOpts) {
         FileInfo file = fileService.getById(fileId);
         String ext = file.getFileExt() == null ? "" : file.getFileExt().toLowerCase();
         if (!SUPPORTED_EXTS.contains(ext)) {
             throw new BizException(400, "仅支持 txt / md / docx / pdf 文件提取");
         }
         // 提交时锁定模型配置快照，执行期间修改配置不影响本任务
-        AiModelConfig model = modelService.requireActive();
+        AiModelConfig model = null;
+        Map<String, Object> local = null;
+        String modelLabel;
+        if (modelOpts != null && "local".equals(modelOpts.get("source"))) {
+            local = localOptions(modelOpts);
+            modelLabel = "本地模型：" + local.get("baseId");
+        } else if (modelOpts != null && "gguf".equals(modelOpts.get("source"))) {
+            local = Map.of("source", "gguf");
+            modelLabel = "GGUF（llama.cpp）";
+        } else {
+            Long configId = modelOpts == null ? null : toLong(modelOpts.get("configId"));
+            model = configId == null ? modelService.requireActive() : modelService.requireVerified(configId);
+            modelLabel = "模型：" + model.getName();
+        }
 
         NovelExtract task = new NovelExtract();
         task.setFileId(fileId);
@@ -109,14 +137,69 @@ public class NovelExtractService {
         task.setStatus(NovelExtract.QUEUED);
         task.setProgress(0);
         boolean withMaterials = materials != null && Boolean.TRUE.equals(materials.get("enabled"));
-        task.setMessage("排队中（模型：" + model.getName() + (withMaterials ? "，含素材提取" : "") + "）");
+        task.setMessage("排队中（" + modelLabel + (withMaterials ? "，含素材提取" : "") + "）");
         task.setCreateTime(LocalDateTime.now());
         task.setUpdateTime(task.getCreateTime());
         extractMapper.insert(task);
 
         Map<String, Object> materialOpts = withMaterials ? materials : null;
-        executor.submit(() -> run(task.getId(), file, ext, model, materialOpts));
+        AiModelConfig cfg = model;
+        Map<String, Object> localOpts = local;
+        executor.submit(() -> run(task.getId(), file, ext, cfg, localOpts, materialOpts));
         return task;
+    }
+
+    /** 白名单：{baseId, chunkChars}，chunkChars 限制在 1000–6000（默认 2500） */
+    private static Map<String, Object> localOptions(Map<String, Object> opts) {
+        Object baseId = opts.get("baseId");
+        String id = baseId == null ? "" : baseId.toString().trim();
+        if (id.isEmpty() || id.length() > 120) {
+            throw new BizException(400, "请选择本地模型");
+        }
+        Long chunk = toLong(opts.get("chunkChars"));
+        long chunkChars = chunk == null ? DEFAULT_LOCAL_CHUNK : Math.max(1000, Math.min(6000, chunk));
+        return Map.of("baseId", id, "chunkChars", chunkChars);
+    }
+
+    private static Long toLong(Object v) {
+        if (v instanceof Number n) {
+            return n.longValue();
+        }
+        if (v instanceof String s && !s.isBlank()) {
+            try {
+                return Long.parseLong(s.trim());
+            } catch (NumberFormatException e) {
+                throw new BizException(400, "参数格式不正确：" + s);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 取消排队中 / 进行中的任务：排队中的在轮到时直接结束；已提交给 Python 的通知其取消（本地模型在下一个 token 处停止）。
+     * 任务记为 FAILED，消息「已取消」。
+     */
+    public NovelExtract cancel(Long id) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        if (!NovelExtract.QUEUED.equals(task.getStatus()) && !NovelExtract.RUNNING.equals(task.getStatus())) {
+            throw new BizException(400, "任务已结束，无需取消");
+        }
+        cancelRequested.add(id);
+        if (task.getJobId() != null && !task.getJobId().isBlank()) {
+            try {
+                aiClient.cancelExtractJob(task.getJobId());
+            } catch (HttpClientErrorException.NotFound e) {
+                update(id, NovelExtract.FAILED, null, "已取消", null); // Python 已重启，任务不在了
+                return extractMapper.selectById(id);
+            } catch (ResourceAccessException e) {
+                throw new BizException(503, "AI 服务不可达，取消失败");
+            }
+        }
+        update(id, task.getStatus(), null, "正在取消…", null);
+        return extractMapper.selectById(id);
     }
 
     /**
@@ -197,23 +280,48 @@ public class NovelExtractService {
         return getById(id);
     }
 
-    private void run(Long taskId, FileInfo file, String ext, AiModelConfig model, Map<String, Object> materials) {
+    private void run(Long taskId, FileInfo file, String ext, AiModelConfig model, Map<String, Object> local,
+                     Map<String, Object> materials) {
         try {
-            JsonNode job = aiClient.submitExtract(file.getId(), ext, model, materials);
+            if (cancelRequested.remove(taskId)) {
+                update(taskId, NovelExtract.FAILED, null, "已取消", null);
+                return;
+            }
+            JsonNode job = aiClient.submitExtract(file.getId(), ext, model, local, materials);
             String jobId = job.path("jobId").asText();
             update(taskId, NovelExtract.RUNNING, 0, "已提交 AI 服务", jobId);
+            if (cancelRequested.contains(taskId)) {
+                aiClient.cancelExtractJob(jobId); // 提交的同时用户点了取消
+            }
             poll(taskId, jobId, file);
         } catch (ResourceAccessException e) {
             log.error("AI 服务不可达，taskId={}", taskId, e);
             update(taskId, NovelExtract.FAILED, null, "AI 服务不可达，请确认 python-service 已启动", null);
         } catch (RestClientResponseException e) {
-            // 不记录响应体：校验错误的回显里可能带有 API Key
+            // 不记录响应体：校验错误（422）的回显里可能带有 API Key；400 是本服务自己的说明（如 GPU 被训练占用），可以展示
             log.error("AI 服务拒绝提取任务，taskId={}，HTTP {}", taskId, e.getStatusCode().value());
-            update(taskId, NovelExtract.FAILED, null, "AI 服务拒绝任务（HTTP " + e.getStatusCode().value() + "）", null);
+            update(taskId, NovelExtract.FAILED, null, "AI 服务拒绝任务：" + rejectReason(e), null);
         } catch (Exception e) {
             log.error("小说提取失败，taskId={}", taskId, e);
             update(taskId, NovelExtract.FAILED, null, "提取失败：" + e.getMessage(), null);
+        } finally {
+            cancelRequested.remove(taskId);
         }
+    }
+
+    /** 400 取 FastAPI 的 {detail: "..."}（本服务自己的提示）；其他状态码只给状态码 */
+    private String rejectReason(RestClientResponseException e) {
+        if (e.getStatusCode().value() == 400) {
+            try {
+                JsonNode detail = objectMapper.readTree(e.getResponseBodyAsString(StandardCharsets.UTF_8)).path("detail");
+                if (detail.isTextual()) {
+                    return detail.asText();
+                }
+            } catch (Exception ignored) {
+                // 不是 JSON：只给状态码
+            }
+        }
+        return "HTTP " + e.getStatusCode().value();
     }
 
     private void poll(Long taskId, String jobId, FileInfo file) throws Exception {
@@ -243,6 +351,10 @@ public class NovelExtractService {
                 }
                 case "failed" -> {
                     update(taskId, NovelExtract.FAILED, progress, "提取失败：" + job.path("error").asText(), null);
+                    return;
+                }
+                case "cancelled" -> {
+                    update(taskId, NovelExtract.FAILED, progress, "已取消", null);
                     return;
                 }
                 default -> update(taskId, NovelExtract.RUNNING, progress, job.path("message").asText(), null);

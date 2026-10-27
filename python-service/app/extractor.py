@@ -6,14 +6,35 @@ from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Callable
 
-from . import config, llm_client, materials, text_loader
+from . import config, llm_client, local_extract, materials, text_loader
 from .llm_client import LLMError, ModelConfig
 
 log = logging.getLogger(__name__)
 
 
-def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable[[int, str], None],
-            material_opts: "materials.MaterialOptions | None" = None) -> dict:
+class Cancelled(RuntimeError):
+    """任务被用户取消。"""
+
+
+def extract(file_id: int, file_ext: str, cfg: ModelConfig | None, on_progress: Callable[[int, str], None],
+            material_opts: "materials.MaterialOptions | None" = None, *, local: dict | None = None,
+            stop_event: threading.Event | None = None) -> dict:
+    """cfg = 大模型（OpenAI 兼容，含本机 llama.cpp 等）；local = {baseId, chunkChars} 应用内本地模型（二选一）。
+    stop_event 置位后不再开始新的分块，抛 Cancelled。"""
+    if local:
+        with local_extract.LocalSession(local["baseId"], stop_event) as session:
+            return _extract(file_id, file_ext, on_progress, material_opts, stop_event,
+                            analyze=session.analyze_chunk, chunk_chars=local["chunkChars"], concurrency=1,
+                            model_name=session.name, source="local")
+    return _extract(file_id, file_ext, on_progress, material_opts, stop_event,
+                    analyze=lambda title, part, extra: llm_client.analyze_chunk(cfg, title, part, extra),
+                    chunk_chars=config.CHUNK_CHARS, concurrency=cfg.concurrency, model_name=cfg.model,
+                    source=llm_client.source_of(cfg))
+
+
+def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None], material_opts,
+             stop_event: threading.Event | None, *, analyze: Callable[[str, str, str], dict], chunk_chars: int,
+             concurrency: int, model_name: str, source: str) -> dict:
     data = text_loader.fetch_file(file_id)
     text = text_loader.to_plain_text(data, file_ext)
     if not text:
@@ -22,21 +43,26 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
     chapters = text_loader.split_chapters(text)
     tasks = []  # (章节下标, 块文本)，顺序即章节内块顺序
     for ci, ch in enumerate(chapters):
-        for part in text_loader.split_chunks(ch["content"], config.CHUNK_CHARS):
+        for part in text_loader.split_chunks(ch["content"], chunk_chars):
             tasks.append((ci, part))
 
-    on_progress(0, f"共 {len(chapters)} 章，{len(tasks)} 个分块，模型 {cfg.model}，并发 {cfg.concurrency}")
+    on_progress(0, f"共 {len(chapters)} 章，{len(tasks)} 个分块，{'本地模型' if source == 'local' else '模型'} "
+                   f"{model_name}，并发 {concurrency}")
     results: list[dict | None] = [None] * len(tasks)
     extra = materials.prompt_fragment(material_opts) if material_opts and material_opts.enabled else ""
     lock = threading.Lock()
     state = {"done": 0, "failed": 0}
 
     def run(i: int) -> None:
+        if stop_event and stop_event.is_set():
+            raise Cancelled("已取消")
         ci, part = tasks[i]
         title = chapters[ci]["title"]
         try:
-            results[i] = llm_client.analyze_chunk(cfg, title, part, extra)
+            results[i] = analyze(title, part, extra)
         except LLMError as e:
+            if stop_event and stop_event.is_set():
+                raise Cancelled("已取消") from e
             if e.fatal:
                 raise  # 配置级错误：终止整个任务
             log.warning("分块解析失败 file=%s chapter=%s: %s", file_id, title, e)
@@ -44,10 +70,11 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
                 state["failed"] += 1
         with lock:
             state["done"] += 1
-            done = state["done"]
-        on_progress(int(done * 100 / len(tasks)), f"已解析 {done}/{len(tasks)}：{title}")
+            done, failed = state["done"], state["failed"]
+        on_progress(int(done * 100 / len(tasks)),
+                    f"已解析 {done}/{len(tasks)}：{title}" + (f"（{failed} 块失败已跳过）" if failed else ""))
 
-    pool = ThreadPoolExecutor(max_workers=cfg.concurrency, thread_name_prefix="chunk")
+    pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="chunk")
     try:
         futures = [pool.submit(run, i) for i in range(len(tasks))]
         finished, _ = wait(futures, return_when=FIRST_EXCEPTION)
@@ -58,14 +85,16 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig, on_progress: Callable
         pool.shutdown(wait=False, cancel_futures=True)
 
     if state["failed"] == len(tasks):
-        raise LLMError("所有分块都解析失败，请检查模型配置或稍后重试")
+        raise LLMError("所有分块都解析失败，请检查模型配置或稍后重试"
+                       + ("；本地小模型不擅长按格式输出，可换更大的模型或改用大模型" if source == "local" else ""))
 
     chunk_results: list[list[dict]] = [[] for _ in chapters]
     for (ci, _), r in zip(tasks, results):
         if r is not None:
             chunk_results[ci].append(r)
     result = merge(text, chapters, chunk_results, state["failed"])
-    result["model"] = cfg.model
+    result["model"] = model_name
+    result["source"] = source
     if material_opts and material_opts.enabled:
         merged = materials.merge_candidates(
             [(chapters[ci]["title"], r) for (ci, _), r in zip(tasks, results) if r], material_opts)

@@ -24,6 +24,7 @@ _model = None
 _tokenizer = None
 _gpu_busy_check = lambda: False  # 由 jobs 注入：训练进行中返回 True
 _generation_busy_check = lambda: False  # 由 generation 注入：小说章节生成进行中返回 True
+_extract_busy_check = lambda: False  # 由小说提取注入：用本地模型提取进行中返回 True
 
 
 def set_gpu_busy_check(fn) -> None:
@@ -34,6 +35,16 @@ def set_gpu_busy_check(fn) -> None:
 def set_generation_busy_check(fn) -> None:
     global _generation_busy_check
     _generation_busy_check = fn
+
+
+def set_extract_busy_check(fn) -> None:
+    global _extract_busy_check
+    _extract_busy_check = fn
+
+
+def extract_busy() -> bool:
+    """是否有小说提取任务正在用本地模型（章节生成 / AI 构思 / 训练须等它结束）。"""
+    return bool(_extract_busy_check())
 
 
 def status() -> dict:
@@ -187,11 +198,15 @@ def load(base_id: str, adapter_id: str | None = None, quantization: str = "auto"
         raise RuntimeError("有训练任务正在使用 GPU，请等待完成或取消后再加载模型")
     if not from_generation and _generation_busy_check():
         raise RuntimeError("小说章节正在生成，请等待完成或取消后再切换模型")
+    if not from_generation and _extract_busy_check():
+        raise RuntimeError("小说提取正在使用本地模型，请等待完成或取消后再切换模型")
     if not hardware.deps_info()["ready"]:
         raise RuntimeError("未安装本地模型依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")
     base = registry.get_base(base_id)
     if not base["exists"]:
         raise RuntimeError(f"模型目录不存在：{base['path']}")
+    if base["task"] != "causal-lm":
+        raise RuntimeError(registry.not_generation_reason(base, "在本服务加载生成文本"))
     adapter = check_adapter(adapter_id, base_id) if adapter_id else None
     quant = resolve_quantization(quantization)
     with _lock:
@@ -231,6 +246,8 @@ def _free() -> None:
 def unload(*, from_generation: bool = False) -> None:
     if not from_generation and _generation_busy_check():
         raise RuntimeError("小说章节正在生成，请等待完成或取消后再卸载模型 / 开始训练")
+    if not from_generation and _extract_busy_check():
+        raise RuntimeError("小说提取正在使用本地模型，请等待完成或取消后再卸载模型 / 开始训练")
     with _lock:
         if _state["status"] == "loading":
             raise RuntimeError("模型正在加载，暂时不能卸载")

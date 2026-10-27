@@ -46,8 +46,17 @@ public class AiServiceClient {
     }
 
     /** POST /api/extract/jobs → Job（含 jobId）。materials 为素材候选提取范围（null 表示不提取） */
-    public JsonNode submitExtract(Long fileId, String fileExt, AiModelConfig cfg, Map<String, Object> materials) {
-        Map<String, Object> body = new HashMap<>(Map.of("fileId", fileId, "fileExt", fileExt, "model", modelBody(cfg)));
+    public JsonNode submitExtract(Long fileId, String fileExt, AiModelConfig cfg, Map<String, Object> local,
+                                  Map<String, Object> materials) {
+        // cfg = 大模型配置；local = {baseId, chunkChars} 应用内本地模型，或 {source: gguf} = llama.cpp 页运行中的 GGUF（三选一）
+        Map<String, Object> body = new HashMap<>(Map.of("fileId", fileId, "fileExt", fileExt));
+        if (local != null && "gguf".equals(local.get("source"))) {
+            body.put("gguf", true);
+        } else if (local != null) {
+            body.put("local", local);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
         if (materials != null) {
             body.put("materials", materials);
         }
@@ -68,9 +77,47 @@ public class AiServiceClient {
                 .retrieve().body(JsonNode.class);
     }
 
+    /**
+     * POST /api/materials/vector-index：本地向量模型为素材编码（encode=false 只统计已向量化的条数），items = [{id, text}]
+     * → {ok, total, cached, encoded, pending, device, model, modelId, ms}
+     */
+    public JsonNode vectorIndexMaterials(String modelId, List<Map<String, Object>> items, boolean encode) {
+        Map<String, Object> body = new HashMap<>(Map.of("items", items, "encode", encode));
+        if (modelId != null && !modelId.isBlank()) {
+            body.put("modelId", modelId.trim());
+        }
+        return slowClient.post().uri("/api/materials/vector-index").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /**
+     * POST /api/materials/vector-search：本地模型检索（不用大模型）。mode = vector | hybrid（向量 + BM25 融合）；
+     * rerank = 用重排模型重排融合后的前 30 条；vocab = 领域词表（素材标签，给 jieba 分词）
+     * → {ok, results: [{id, score(0–1), similarity, vecRank, lexRank}], reranked, rerankSkipped, considered, encoded, cached,
+     * device, model, modelId, ms, …}。首次加载模型 / 建关键词索引稍慢
+     */
+    public JsonNode vectorSearchMaterials(String modelId, String query, List<Map<String, Object>> items, int limit,
+                                          String mode, boolean rerank, List<String> vocab) {
+        Map<String, Object> body = new HashMap<>(Map.of("query", query, "items", items, "limit", limit,
+                "mode", mode, "rerank", rerank, "vocab", vocab));
+        if (modelId != null && !modelId.isBlank()) {
+            body.put("modelId", modelId.trim());
+        }
+        return slowClient.post().uri("/api/materials/vector-search").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/materials/vector-feedback：向量检索后勾选 / 没勾选的素材（留作 embedding 微调数据） */
+    public JsonNode vectorFeedback(Map<String, Object> body) {
+        return client.post().uri("/api/materials/vector-feedback").body(body).retrieve().body(JsonNode.class);
+    }
+
     /** GET /api/extract/jobs/{jobId} → Job（状态、进度、结果） */
     public JsonNode getExtractJob(String jobId) {
         return client.get().uri("/api/extract/jobs/{id}", jobId).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/jobs/{id}/cancel：排队中的直接结束，运行中的不再开始新的分块 */
+    public JsonNode cancelExtractJob(String jobId) {
+        return client.post().uri("/api/extract/jobs/{id}/cancel", jobId).retrieve().body(JsonNode.class);
     }
 
     /** GET /api/crawl/presets → {code, data: [{key, name, description, domains, rule}]} */
@@ -177,6 +224,14 @@ public class AiServiceClient {
         Map<String, Object> req = new HashMap<>(body);
         req.put("api", modelBody(cfg));
         return client.post().uri("/api/gen/novels/{id}/chapters", novelId).body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/gen/novels/{id}/chapters/{n}/recheck：已完成章节重新提取事实 / 检查一致性（后台任务） */
+    public JsonNode recheckGenChapter(String novelId, int index, Map<String, Object> body, AiModelConfig cfg) {
+        Map<String, Object> req = new HashMap<>(body);
+        req.put("api", modelBody(cfg));
+        return client.post().uri("/api/gen/novels/{id}/chapters/{n}/recheck", novelId, index).body(req)
+                .retrieve().body(JsonNode.class);
     }
 
     /** POST /api/gen/novels/{id}/ideas：AI 构思（书名 / 大纲 / 下一章），一次长输出，用慢客户端。

@@ -34,13 +34,24 @@ public class NovelExtractController {
     }
 
     /**
-     * POST /api/novel/extract/{fileId} [{materials?}]，用当前启用的模型对指定文件发起提取，立即返回任务（异步执行）。
+     * POST /api/novel/extract/{fileId} [{materials?, model?}]，对指定文件发起提取，立即返回任务（异步执行）。
+     * model：{source: api, configId?}（空 = 当前启用的配置）或 {source: local, baseId, chunkChars?} 或 {source: gguf}（llama.cpp 页运行中的 GGUF）。
      */
     @PostMapping("/{fileId}")
     public ResponseEntity<Result<NovelExtract>> submit(@PathVariable Long fileId,
                                                        @RequestBody(required = false) ExtractOptions options) {
         Map<String, Object> materials = options == null ? null : options.getMaterials();
-        return ResultResponses.handle(() -> extractService.submit(fileId, materials), log, "提交提取任务失败，fileId=" + fileId);
+        Map<String, Object> model = options == null ? null : options.getModel();
+        return ResultResponses.handle(() -> extractService.submit(fileId, materials, model), log,
+                "提交提取任务失败，fileId=" + fileId);
+    }
+
+    /**
+     * POST /api/novel/extract/{id}/cancel，取消排队中 / 进行中的任务（记为 FAILED「已取消」）。
+     */
+    @PostMapping("/{id}/cancel")
+    public ResponseEntity<Result<NovelExtract>> cancel(@PathVariable Long id) {
+        return ResultResponses.handle(() -> extractService.cancel(id), log, "取消提取任务失败，id=" + id);
     }
 
     /**
@@ -67,9 +78,13 @@ public class NovelExtractController {
         return ResultResponses.handle(() -> extractService.updateResult(id, result), log, "保存提取结果失败，id=" + id);
     }
 
-    /** 提取选项：materials ={enabled, categories: [world, monster, …], maxPerChunk, focus}（素材候选的提取范围） */
+    /**
+     * 提取选项：materials = {enabled, categories: [world, monster, …], maxPerChunk, focus}（素材候选的提取范围）；
+     * model = 提取用的模型（见 submit），字段由 service 白名单处理。
+     */
     @Data
     public static class ExtractOptions {
         private Map<String, Object> materials;
+        private Map<String, Object> model;
     }
 }

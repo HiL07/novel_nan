@@ -246,6 +246,17 @@ public class AiModelConfigService {
         return cfg;
     }
 
+    /**
+     * 按 id 取一个已验证的配置（小说提取按任务选模型，不改变全局启用状态）；不存在 404，未验证 400。
+     */
+    public AiModelConfig requireVerified(Long id) {
+        AiModelConfig cfg = getById(id);
+        if (!AiModelConfig.VERIFIED.equals(cfg.getStatus())) {
+            throw new BizException(400, "模型配置「" + cfg.getName() + "」尚未验证通过，请先在「模型配置」中验证");
+        }
+        return cfg;
+    }
+
     private AiModelConfig findActive() {
         return mapper.selectOne(new LambdaQueryWrapper<AiModelConfig>()
                 .eq(AiModelConfig::getActive, true)

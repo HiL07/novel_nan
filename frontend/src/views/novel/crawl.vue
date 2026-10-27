@@ -549,7 +549,12 @@
       </template>
     </el-dialog>
 
-    <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.fileName" @confirm="doExtract" />
+    <ExtractOptionsDialog
+      v-model="extractDlg.visible"
+      :file-name="extractDlg.fileName"
+      :char-count="extractDlg.charCount"
+      @confirm="doExtract"
+    />
   </div>
 </template>
 
@@ -659,7 +664,7 @@ function preferAutoRule(id) {
 }
 const range = reactive({ start: 1, end: 1 })
 const submitting = ref(false)
-const extractDlg = reactive({ visible: false, fileId: null, fileName: '' })
+const extractDlg = reactive({ visible: false, fileId: null, fileName: '', charCount: 0 })
 const resumeDlg = reactive({ visible: false, task: null, info: null, loading: false, newOrigin: '', submitting: false })
 const ai = reactive({ url: '', maxAttempts: 5, hint: '', autoStart: false, useKnown: true })
 const aiJob = ref(null)
@@ -1443,7 +1448,7 @@ function reuseOptions(row) {
 
 function openExtract(row) {
   const name = row.bookName || '抓取小说'
-  Object.assign(extractDlg, { visible: true, fileId: row.fileId, fileName: `${name}.txt` })
+  Object.assign(extractDlg, { visible: true, fileId: row.fileId, fileName: `${name}.txt`, charCount: row.wordCount || 0 })
 }
 
 async function doExtract(options) {

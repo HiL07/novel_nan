@@ -31,9 +31,19 @@
         </el-table-column>
         <el-table-column prop="message" label="说明" min-width="220" show-overflow-tooltip />
         <el-table-column prop="createTime" label="创建时间" width="170" />
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="row.status !== 'SUCCEEDED'" @click="openDetail(row.id)">
+            <el-button
+              v-if="row.status === 'QUEUED' || row.status === 'RUNNING'"
+              link
+              type="danger"
+              :loading="cancelling[row.id]"
+              :disabled="row.message === '正在取消…'"
+              @click="doCancel(row)"
+            >
+              取消
+            </el-button>
+            <el-button v-else link type="primary" :disabled="row.status !== 'SUCCEEDED'" @click="openDetail(row.id)">
               查看
             </el-button>
           </template>
@@ -63,6 +73,10 @@
           <el-descriptions-item label="总字数">{{ result.wordCount }}</el-descriptions-item>
           <el-descriptions-item label="章节数">{{ result.chapterCount }}</el-descriptions-item>
           <el-descriptions-item label="对话占比">{{ percent(result.style?.dialogRatio) }}</el-descriptions-item>
+          <el-descriptions-item v-if="result.model" label="提取模型" :span="3">
+            {{ result.model }}
+            <el-tag v-if="result.source === 'local'" size="small" type="success">本地 · 免费</el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="节奏">
             <el-input v-if="draft" v-model="draft.style.pace" size="small" />
             <template v-else>{{ result.style?.pace || '-' }}</template>
@@ -172,7 +186,7 @@ import { computed, onActivated, onDeactivated, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, Delete, Download, EditPen, Plus, Refresh } from '@element-plus/icons-vue'
-import { getExtract, listExtracts, updateExtractResult } from '@/api/novel'
+import { cancelExtract, getExtract, listExtracts, updateExtractResult } from '@/api/novel'
 import CandidateReview from '@/components/material/CandidateReview.vue'
 import { errorMessage } from '@/api/request'
 
@@ -245,6 +259,21 @@ async function saveEdit() {
 }
 
 const hasActive = () => tasks.value.some((t) => t.status === 'QUEUED' || t.status === 'RUNNING')
+
+const cancelling = ref({})
+async function doCancel(row) {
+  cancelling.value[row.id] = true
+  try {
+    const res = await cancelExtract(row.id)
+    if (res.code !== 0) throw new Error(res.message || '取消失败')
+    ElMessage.success('已请求取消，当前分块结束后停止')
+    await loadTasks()
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '取消提取任务失败'))
+  } finally {
+    cancelling.value[row.id] = false
+  }
+}
 
 async function loadTasks() {
   loading.value = true
