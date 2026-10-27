@@ -89,6 +89,7 @@ const listRef = ref()
 const modelText = computed(() => {
   const c = ai.cfg
   if (c.source === 'local') return `本地模型${c.adapterId ? ' + 适配器' : ''}`
+  if (c.source === 'gguf') return 'GGUF（llama.cpp）'
   return ai.apiModel.value ? `大模型 ${ai.apiModel.value.name}` : '大模型'
 })
 const canRegenerate = computed(() => {

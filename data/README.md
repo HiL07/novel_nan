@@ -12,10 +12,11 @@ Java（Spring Boot）与 Python（FastAPI）共用的数据根目录。**本目�
 | `nan_novel.db`（及 `-wal` / `-shm`） | SQLite：**只存元数据**、业务状态、文件相对路径 | Java（唯一打开者） | Java | —— | —— |
 | `upload/yyyy/MM/dd/<uuid>.<ext>` | 上传的原始文件 | Java（`FileService`） | Java；Python 只通过 Java 的 `/api/file/preview/{id}` 读取 | 暂无删除功能 | `file.storage_path` = 相对 `upload/` 的路径 |
 | `extract-results/<taskId>.json` | 小说提取的完整结果 JSON | Java（`ExtractResultStore`，提取任务成功时写入） | Java（`GET /api/novel/extract/{id}` 读出后原样返回） | 暂无 | `novel_extract.result_path`（相对 `data/`）、`result_size`、`result_sha256` |
-| `novels/<novelId>/novel.json`、`chapters/NNNN.json` | AI 生成的小说工作区与正文 | Python（`app/generation/store.py`） | Python；Java 按本约定只读（本轮无 Java 读取接口） | Python（删除工作区 / 最后一章） | 不入数据库 |
+| `novels/<novelId>/novel.json`、`facts.json`、`chapters/NNNN.json` | AI 生成的小说工作区、故事账本与正文 | Python（`app/generation/store.py`） | Python；Java 按本约定只读（本轮无 Java 读取接口） | Python（删除工作区 / 最后一章） | 不入数据库 |
 | `crawl-cache/<resumeKey>/meta.json`、`chapters.jsonl` | 小说抓取断点：章节清单 + 已抓章节正文（逐章追加），用于「继续抓取」 | Python（`app/crawler/checkpoint.py`） | Python | Python（Java 保存 txt 后 release 时删除；失败 / 取消的保留） | `resumeKey` 由任务 id 推出：单本 `c<novel_crawl.id>`，整站 `c<novel_crawl.id>b<novel_crawl_book.id>` |
 | `site-catalog/<host>[_端口]/toc/<key>.json`、`catalog.json` | 全自动爬虫的站点书目（同一首页的数据放在一起）：每本书的完整目录（`key` = 书籍地址 SHA-1 前 16 位）+ 书目导出（简介 / 标签 / 测试报告）。**不含正文** | `toc/` Python（`app/crawler/catalog.py`，采集时写入）；`catalog.json` Java（`CrawlCatalogService`，每次采集结束 / 决定 / AI 补标签后导出） | Java（`GET /api/novel/crawl/catalogs/books/{id}/toc`） | Java（删除书目时整个目录） | `crawl_site_catalog.catalog_dir`、`crawl_catalog_book.toc_path`（相对 `data/`）；数据库为准 |
 | `crawl-rules/<host>_<id>.json` | AI 解析地址得到的站点抓取规则（整条记录：状态 待确认 / 已确认、XPath 规则、地址规律、总结、学习样例），方便查找 / 备份 | Java（`CrawlRuleService`：解析成功、确认时写入；启动时补写缺失的） | 人工查看；程序以数据库为准 | Java（不确认 / 删除规则、确认替换旧规则时） | `crawl_site_rule` 一行一个文件 |
+| `material-index/<baseId>/vectors.npy`、`keys.json`、`meta.json`；`material-index/feedback.jsonl` | 素材向量（本地 embedding 模型，如 bge-small-zh；键 = 素材文本 SHA-1，按模型分目录）；向量检索反馈（查询 → 勾选 / 没勾选的素材，以后微调向量模型用） | Python（`app/local/embedding.py`，向量检索 / 全部向量化时写入） | Python | 可整个删除（下次检索自动重建，反馈会丢） | 不入数据库；素材文本由 Java 每次随请求传入 |
 
 ## 格式约定
 
@@ -23,7 +24,7 @@ Java（Spring Boot）与 Python（FastAPI）共用的数据根目录。**本目�
 - 数据库中的路径一律为**相对路径、`/` 分隔**，由各自服务拼接到 `DATA_DIR` 并校验必须落在对应子目录内（防路径穿越）。
 - 写文件一律「同目录临时文件 → 刷盘 → 原子改名」，不会留下半截文件；数据库记录只在文件写成功后写入（上传失败或写库失败会删除已写文件）。
 - `extract-results/*.json`：Python 提取服务返回的 `result` 对象原样序列化；`result_sha256` 为文件字节的 SHA-256，读取时校验。文件缺失或校验不符时接口返回 `result: null` 并在 `message` 中提示，任务状态不变。
-- `novels/`：结构见 `python-service/app/generation/store.py` 文件头注释（`novel.json` 工作区设定与统计、`chapters/0001.json` 章节正文、摘要与 token 明细）。
+- `novels/`：结构见 `python-service/app/generation/store.py` 文件头注释（`novel.json` 工作区设定与统计、`facts.json` 故事账本（伏笔 / 角色状态 / 时间线）、`chapters/0001.json` 章节规划、正文、摘要、本章事实、一致性检查与 token 明细）。
 
 ## 备份
 

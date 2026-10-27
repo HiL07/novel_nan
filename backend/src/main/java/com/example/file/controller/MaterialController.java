@@ -94,6 +94,35 @@ public class MaterialController {
                 req.getExcludeBooks(), req.getLimit() == null ? 20 : req.getLimit()), log, "语义检索失败");
     }
 
+    /**
+     * POST /api/material/vector-search {query, modelId?, category?, tags?, excludeBooks?, limit?, mode?: hybrid|vector, rerank?}：
+     * 本地检索（向量 + 关键词融合，可选重排；默认 hybrid + 重排）
+     * → {results[{material, score(0–100), similarity, vecRank, lexRank}], reranked, rerankSkipped, mode, total, considered, model, …}
+     */
+    @PostMapping("/vector-search")
+    public ResponseEntity<Result<Map<String, Object>>> vector(@RequestBody SemanticReq req) {
+        return ResultResponses.handle(() -> materialService.vectorSearch(req.getQuery(), req.getCategory(), req.getTags(),
+                req.getExcludeBooks(), req.getModelId(), req.getLimit() == null ? 20 : req.getLimit(),
+                req.getMode(), !Boolean.FALSE.equals(req.getRerank())), log, "向量检索失败");
+    }
+
+    /** POST /api/material/vector-index {modelId?, encode}：全部素材的向量化情况 / 一键全部向量化 → {total, cached, encoded, pending, …} */
+    @PostMapping("/vector-index")
+    public ResponseEntity<Result<Map<String, Object>>> vectorIndex(@RequestBody Map<String, Object> body) {
+        Object modelId = body.get("modelId");
+        return ResultResponses.handle(() -> materialService.vectorIndex(modelId instanceof String s ? s : null,
+                Boolean.TRUE.equals(body.get("encode"))), log, "素材向量化失败");
+    }
+
+    /** POST /api/material/vector-feedback {query, modelId?, shownIds[], pickedIds[], context?}：检索反馈（以后微调用） */
+    @PostMapping("/vector-feedback")
+    public ResponseEntity<Result<Void>> vectorFeedback(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> {
+            materialService.vectorFeedback(body);
+            return null;
+        }, log, "记录检索反馈失败");
+    }
+
     @GetMapping("/{id}")
     public ResponseEntity<Result<Material>> get(@PathVariable Long id) {
         return ResultResponses.handle(() -> materialService.get(id), log, "查询素材失败，id=" + id);
@@ -154,6 +183,12 @@ public class MaterialController {
         private List<String> tags;
         private List<String> excludeBooks;
         private Integer limit;
+        /** 向量检索：python-service 登记的向量模型 id（空 = 默认） */
+        private String modelId;
+        /** 向量检索：hybrid（默认，向量 + 关键词）/ vector */
+        private String mode;
+        /** 向量检索：是否用重排模型（默认 true） */
+        private Boolean rerank;
     }
 
     @Data

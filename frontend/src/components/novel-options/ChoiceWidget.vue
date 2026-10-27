@@ -39,22 +39,20 @@
           <el-input v-model="newDesc" class="custom-desc" size="small" maxlength="120" placeholder="选项说明（可选，鼠标悬停在选项上时显示）" />
         </div>
         <template v-if="aiOn">
-          <div class="panel-row">
-            <el-button size="small" :icon="Collection" @click="pickerOpen = true">选素材</el-button>
+          <div v-if="materials.length" class="panel-row">
+            <span class="muted">上次选的素材：</span>
             <el-tag v-for="m in materials" :key="m.id" size="small" closable @close="removeMaterial(m.id)">{{ m.title }}</el-tag>
-            <span class="muted">素材只用于这个自定义选项，不影响别处</span>
           </div>
           <div class="panel-row">
             <span :title="aiTip('polish')">
-              <el-button size="small" :icon="EditPen" :loading="ai.loading(aiKey)" :disabled="!canAi || locked" @click="runAi('polish')">AI 润色</el-button>
+              <el-button size="small" :icon="EditPen" :loading="ai.loading(aiKey)" :disabled="locked" @click="runAi('polish')">AI 润色</el-button>
             </span>
             <span :title="aiTip('generate')">
-              <el-button size="small" :icon="MagicStick" :loading="ai.loading(aiKey)" :disabled="!canAi || locked" @click="runAi('generate')">AI 生成</el-button>
+              <el-button size="small" :icon="MagicStick" :loading="ai.loading(aiKey)" :disabled="locked" @click="runAi('generate')">AI 生成</el-button>
             </span>
-            <span class="muted">{{ canAi ? '润色：把你写的整理成一个选项（保留原意）；生成：按你写的方向 / 选的素材设计一个新选项' : '在上面写点内容或选择素材后才能用 AI' }}</span>
+            <span class="muted">点击后先选参考素材（可以不选）。润色：把你写的整理成一个选项（保留原意）；生成：按你写的方向 / 选的素材设计一个新选项</span>
           </div>
         </template>
-        <MaterialPicker v-if="pickerOpen" v-model="pickerOpen" pick-only :exclude-books="ai?.excludeBooks?.value || []" @apply="onPick" />
       </div>
     </template>
 
@@ -65,8 +63,7 @@
 <script setup>
 import { computed, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowRight, Close, Collection, EditPen, MagicStick, Plus } from '@element-plus/icons-vue'
-import MaterialPicker from '@/components/material/MaterialPicker.vue'
+import { ArrowRight, Close, EditPen, MagicStick, Plus } from '@element-plus/icons-vue'
 import { useOptionEditor } from '@/novel-options/editor'
 
 /**
@@ -92,8 +89,6 @@ const inputRef = ref()
 /* ---- 自定义里的 AI：输入框有内容或选了素材才能用；素材只属于这一次自定义 ---- */
 const aiOn = computed(() => !!ai?.enabled.value)
 const materials = ref([])
-const pickerOpen = ref(false)
-const canAi = computed(() => !!newLabel.value.trim() || materials.value.length > 0)
 const aiKey = computed(() => `${ai?.busyKeyOf(props.path, props.field)}|option`)
 const locked = computed(() => aiOn.value && ai.locked([...props.path, props.field.label]))
 
@@ -101,25 +96,24 @@ function aiTip(action) {
   const what = action === 'polish'
     ? 'AI 润色：把框里写的（和选的素材）整理成一个简洁的选项 + 说明，保留原意'
     : 'AI 生成：按框里写的方向和 / 或选的素材，设计一个与已有选项不重复的新选项'
-  const local = ai?.cfg?.source === 'local' && locked.value ? '（本地模型一次只能处理一个 AI 请求）' : ''
-  return (canAi.value ? what : `${what}；需要先写点内容或选择素材`) + local
+  const local = ['local', 'gguf'].includes(ai?.cfg?.source) && locked.value ? '（本地模型 / GGUF 一次只能处理一个 AI 请求）' : ''
+  return `${what}；点击后先选参考素材（可以不选）` + local
 }
 
 async function runAi(action) {
-  const option = await ai.customOption(props.field, {
+  const res = await ai.customOption(props.field, {
     action, seed: newLabel.value.trim(), materials: materials.value,
     path: props.path, container: props.container, siblings: props.siblings
   })
+  if (!res) return
+  materials.value = res.materials
+  const option = res.option
   if (!option) return
   newLabel.value = option.label
   newDesc.value = option.desc || ''
   ElMessage.success('AI 给出了一个选项，可以修改后点「添加并选中」')
 }
 
-function onPick(list) {
-  const ids = new Set(materials.value.map((m) => m.id))
-  materials.value.push(...list.filter((m) => !ids.has(m.id)))
-}
 function removeMaterial(id) {
   materials.value = materials.value.filter((m) => m.id !== id)
 }

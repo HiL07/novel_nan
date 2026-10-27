@@ -34,7 +34,7 @@
             <li>「设定」「章节」只提供勾选的项；设定分类没有内容时，勾了也不会发送。</li>
             <li>「已选走向」= 后续走向里点了「支持 / 追加」的项；没选的不会用到（等于拒绝）。</li>
             <li>「已采用的大纲」有就会带上；书名、大纲、章节题目、后续走向都参考它。</li>
-            <li>「素材」= 下方选择的素材 + 「AI 自动匹配素材」（用 基调 + 构思方向 检索）；后续走向只有打开「参考素材库」才用。</li>
+            <li>「素材」= 点「AI 构思后续走向」时在右侧抽屉里选的素材（打开时用 基调 + 构思方向 本地检索预勾选；屏蔽来源书也在那里改）。选好的素材也用于书名 / 大纲 / 章节题目，可在走向按钮下方删掉。</li>
             <li>设定页里的「AI 填写」不受本页选择影响：它使用全部当前设定、已写章节和大纲。</li>
           </ul>
         </div>
@@ -48,10 +48,14 @@
           <el-radio-group v-model="source" size="small">
             <el-radio-button value="api">大模型（API）</el-radio-button>
             <el-radio-button value="local" :disabled="!localModels.length">本地模型</el-radio-button>
+            <el-radio-button value="gguf" :disabled="!llama" :title="llama ? '' : '先到「llama.cpp」页启动 GGUF 模型'">GGUF</el-radio-button>
             <el-radio-button value="remote" disabled>远程模型（即将支持）</el-radio-button>
           </el-radio-group>
           <template v-if="source === 'api'">
             <span class="muted">{{ apiModel ? `${apiModel.name} · ${apiModel.model}` : '' }}</span>
+          </template>
+          <template v-else-if="source === 'gguf'">
+            <span class="muted">{{ llama ? `llama.cpp · ${llama.name}` : 'llama.cpp 没有运行：请先到「llama.cpp」页启动' }}</span>
           </template>
           <template v-else>
             <el-select v-model="baseId" size="small" style="width: 200px" @change="adapterId = ''">
@@ -145,11 +149,26 @@
         </div>
 
         <div class="direction-bar">
-          <el-button size="small" :icon="MagicStick" :loading="loading === 'direction'" :disabled="!!loading || !ready" @click="suggestDirections">
+          <el-button size="small" :icon="MagicStick" :loading="loading === 'direction'" :disabled="!!loading || !ready" @click="openDirectionPicker">
             {{ directionLabel }}
           </el-button>
-          <el-switch v-model="dirMaterials" size="small" active-text="参考素材库" />
-          <span class="muted">结合构思方向、基调、勾选的设定 / 章节{{ dirMaterials ? '和素材' : '（不用素材）' }}；可重复生成，每次给出不同的走向</span>
+          <span class="muted">先在右侧选素材（可不选），再结合构思方向、基调、勾选的设定 / 章节生成；可重复生成，每次给出不同的走向</span>
+        </div>
+        <div v-if="picked.length" class="chips">
+          <span class="muted">已选素材（也用于书名 / 大纲 / 章节题目）：</span>
+          <el-tag
+            v-for="m in picked"
+            :key="m.id"
+            closable
+            size="small"
+            :type="isBlocked(m) ? 'info' : ''"
+            :title="isBlocked(m) ? `来源书《${m.sourceBook}》已屏蔽，本次不会使用` : ''"
+            @close="removePicked(m.id)"
+          >
+            <s v-if="isBlocked(m)">{{ categoryOf(m.category)?.label }} · {{ m.title }}</s>
+            <template v-else>{{ categoryOf(m.category)?.label }} · {{ m.title }}</template>
+          </el-tag>
+          <el-button link size="small" @click="picked = []">清空</el-button>
         </div>
         <div v-if="directions.length" class="directions">
           <div class="dir-head">
@@ -182,31 +201,6 @@
           <el-button link size="small" @click="rejected = []">清空记录</el-button>
         </div>
       </el-form-item>
-      <el-form-item label="素材">
-        <div class="mat-row">
-          <el-button size="small" :icon="Collection" @click="pickerVisible = true">从素材库选择</el-button>
-          <el-switch v-model="autoMaterials" active-text="AI 自动匹配素材" :disabled="!apiModel" />
-          <span class="muted">{{ !apiModel ? '自动匹配用大模型做语义检索，需先配置大模型' : autoMaterials ? '用基调 + 构思方向在素材库中语义检索，取最相关的几条（至少填一项）' : '' }}</span>
-        </div>
-        <div class="mat-row blocked-row">
-          <BlockedBooksSelect v-model="blockedBooks" class="blocked-select" />
-          <span class="muted">屏蔽的书不参与选择与自动匹配（标为「保留」的素材除外）；本工作区记住此设置</span>
-        </div>
-        <div v-if="picked.length" class="chips">
-          <el-tag
-            v-for="m in picked"
-            :key="m.id"
-            closable
-            size="small"
-            :type="isBlocked(m) ? 'info' : ''"
-            :title="isBlocked(m) ? `来源书《${m.sourceBook}》已屏蔽，本次不会使用` : ''"
-            @close="removePicked(m.id)"
-          >
-            <s v-if="isBlocked(m)">{{ categoryOf(m.category)?.label }} · {{ m.title }}</s>
-            <template v-else>{{ categoryOf(m.category)?.label }} · {{ m.title }}</template>
-          </el-tag>
-        </div>
-      </el-form-item>
       <el-form-item>
         <el-button type="primary" :icon="MagicStick" :loading="loading === 'title'" :disabled="!!loading || !ready" @click="run('title')">生成书名</el-button>
         <span class="count-input">
@@ -225,7 +219,7 @@
         <el-tag size="small" :type="m.auto ? 'success' : ''" effect="plain">{{ categoryOf(m.category)?.label }} · {{ m.title }}</el-tag>
       </el-tooltip>
     </div>
-    <div v-else-if="last" class="used muted">本次没有使用素材（{{ autoMaterials ? '没有匹配到相关度足够高的素材' : '未选择素材' }}）</div>
+    <div v-else-if="last" class="used muted">本次没有使用素材</div>
 
     <div v-if="last && last.kind !== 'outline'" class="muted edit-tip">AI 给出的内容都可以直接修改后再采用</div>
 
@@ -276,7 +270,20 @@
       <OutlineEditor :outline="novel.outline" readonly :next-index="nextIndex" />
     </div>
 
-    <MaterialPicker v-model="pickerVisible" pick-only :exclude-books="blockedBooks" @apply="onPick" />
+    <!-- 「AI 构思后续走向」前的素材选择（右侧抽屉，可不选；屏蔽来源书也在这里改） -->
+    <MaterialPicker
+      v-model="pickerVisible"
+      v-model:exclude-books="blockedBooks"
+      pick-only
+      edit-blocked
+      title="选择素材后 AI 构思后续走向"
+      action-label="构思走向"
+      :initial-selected="picked"
+      :vector-query="pickerQuery"
+      :auto-vector="!!pickerQuery && !picked.length"
+      feedback-context="AI 构思 › 后续走向"
+      @apply="onPick"
+    />
   </div>
 </template>
 
@@ -284,9 +291,8 @@
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElInput, ElMessage, ElMessageBox, ElTag } from 'element-plus'
-import { Collection, EditPen, MagicStick, QuestionFilled } from '@element-plus/icons-vue'
+import { EditPen, MagicStick, QuestionFilled } from '@element-plus/icons-vue'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
-import BlockedBooksSelect from '@/components/material/BlockedBooksSelect.vue'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
 import { categoryOf } from '@/api/material'
 import { generateIdeas, updateNovel } from '@/api/novelGen'
@@ -296,6 +302,7 @@ import { errorMessage } from '@/api/request'
 const props = defineProps({
   novel: { type: Object, required: true },
   apiModel: { type: Object, default: null },
+  llama: { type: Object, default: null }, // 运行中的 llama.cpp（GGUF）；null = 没运行
   localModels: { type: Array, default: () => [] },
   adapters: { type: Array, default: () => [] },
   nextIndex: { type: Number, required: true },
@@ -306,25 +313,24 @@ const emit = defineEmits(['updated', 'use-chapter', 'detect-api'])
 const router = useRouter()
 
 // 构思模型：默认跟随工作区（大模型工作区用大模型；本地工作区用它的基础模型 + 适配器）
-const source = ref(props.novel.model.source === 'local' ? 'local' : 'api')
+const source = ref(['local', 'gguf'].includes(props.novel.model.source) ? props.novel.model.source : 'api')
 const baseId = ref(props.novel.model.baseId || props.localModels[0]?.id || '')
 const adapterId = ref(props.novel.model.source === 'local' ? props.novel.model.adapterId || '' : '')
 const baseAdapters = computed(() => props.adapters.filter((a) => a.compat === 'ok' && a.matchedBaseId === baseId.value))
-const ready = computed(() => (source.value === 'api' ? !!props.apiModel : !!baseId.value))
+const ready = computed(() => (source.value === 'api' ? !!props.apiModel : source.value === 'gguf' ? !!props.llama : !!baseId.value))
 watch(() => props.localModels, (list) => { if (!baseId.value && list.length) baseId.value = list[0].id })
 
 const hint = ref('')
 const tone = ref('')
-const dirMaterials = ref(false)  // 生成后续走向时是否参考素材库
 const rejected = ref([])         // 拒绝过的走向，再生成时让 AI 避开
-const picked = ref([])
-const autoMaterials = ref(false)
+const picked = ref([])           // 构思走向时在抽屉里选的素材，书名 / 大纲 / 章节题目也用
 const outlineCount = ref(10)
 const loading = ref('')
 const saving = ref(false)
 const last = ref(null)
 const draft = ref(null)
 const pickerVisible = ref(false)
+const pickerQuery = ref('')      // 打开抽屉时的检索词（基调 + 构思方向）
 const directions = ref([])
 const blockedBooks = useBlockedBooks(props.novel.id)
 const isBlocked = (m) => !m.pinned && !!m.sourceBook && blockedBooks.value.includes(m.sourceBook)
@@ -418,7 +424,7 @@ function modelOnly() {
   }
 }
 
-/** 自动匹配素材用的检索词：基调 + 构思方向（检索词最多 500 字） */
+/** 素材抽屉向量检索的检索词：基调 + 构思方向（检索词最多 500 字） */
 const materialQuery = () => [tone.value.trim(), hint.value.trim()].filter(Boolean).join('；').slice(0, 500)
 
 /** AI 润色：只把构思方向框里的文字发给模型扩写（不带设定 / 基调 / 章节 / 素材），结果由作者决定是否替换 */
@@ -446,9 +452,13 @@ const chosenTexts = computed(() => chosenIds.value
 const directionLabel = computed(() => (hint.value.trim() ? 'AI 构思后续走向'
   : tone.value.trim() ? 'AI 围绕基调给几个走向' : 'AI 给我几个走向'))
 
+/** 点「AI 构思后续走向」：先在右侧抽屉选素材，确认后再生成 */
+function openDirectionPicker() {
+  pickerQuery.value = materialQuery()
+  pickerVisible.value = true
+}
+
 async function suggestDirections() {
-  const query = materialQuery()
-  const useAuto = dirMaterials.value && autoMaterials.value && !!query
   const base = modelAndMaterials()
   // 已经给过的（含已选的）和拒绝过的都让 AI 避开，保证每次生成不同的走向
   const avoid = [...rejected.value, ...directions.value.map(directionText)].slice(-30)
@@ -456,8 +466,7 @@ async function suggestDirections() {
   try {
     const data = await call(generateIdeas(props.novel.id, {
       ...base, kind: 'direction', hint: hint.value.trim(), tone: tone.value.trim(), rejected: avoid,
-      count: 5, purpose: '作为后续走向，用于生成书名、大纲与章节',
-      materialIds: dirMaterials.value ? base.materialIds : [], autoMaterials: useAuto, query: useAuto ? query : undefined
+      count: 5, purpose: '作为后续走向，用于生成书名、大纲与章节', autoMaterials: false
     }), 'AI 生成走向失败')
     const list = (data.result.directions || []).map((d) => ({ ...d, id: ++directionSeq }))
     if (!list.length) ElMessage.warning('模型没有给出走向，请重试')
@@ -493,11 +502,11 @@ function clearUnchosen() {
 const MANUAL_COLS = ['设定（勾选）', '章节（勾选）', '基调', '构思方向', '已选走向', '已采用大纲', '素材']
 const MANUAL_ROWS = [
   { name: 'AI 润色', uses: ['—', '—', '—', '只用框内文字', '—', '—', '—'] },
-  { name: 'AI 构思后续走向', uses: ['✓', '✓', '✓', '✓', '避开已给出 / 已拒绝的', '✓', '开「参考素材库」时'] },
-  { name: '生成书名', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '✓'] },
-  { name: '生成大纲', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '✓'] },
-  { name: '生成章节题目', uses: ['✓', '总是带全部已写章节', '✓', '✓', '✓', '✓', '✓'] },
-  { name: 'AI 自动匹配素材', uses: ['—', '—', '检索词', '检索词', '—', '—', '在素材库中检索'] }
+  { name: 'AI 构思后续走向', uses: ['✓', '✓', '✓', '✓', '避开已给出 / 已拒绝的', '✓', '右侧抽屉里选的'] },
+  { name: '生成书名', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
+  { name: '生成大纲', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
+  { name: '生成章节题目', uses: ['✓', '总是带全部已写章节', '✓', '✓', '✓', '✓', '已选素材'] },
+  { name: '素材抽屉预勾选', uses: ['—', '—', '检索词', '检索词', '—', '—', '本地向量检索素材库'] }
 ]
 
 /** 大纲：一句话 + 梗概 + 分章表（readonly 时高亮下一章） */
@@ -523,9 +532,10 @@ const OutlineEditor = defineComponent({
   }
 })
 
+/** 抽屉确认（含「不用素材」= 空数组）：记下选择，然后生成走向 */
 function onPick(list) {
-  const ids = new Set(picked.value.map((m) => m.id))
-  picked.value.push(...list.filter((m) => !ids.has(m.id)))
+  picked.value = list
+  suggestDirections()
 }
 function removePicked(id) {
   picked.value = picked.value.filter((m) => m.id !== id)
@@ -542,17 +552,12 @@ async function call(promise, fallback) {
 }
 
 async function run(kind) {
-  const query = materialQuery()
-  if (autoMaterials.value && !query) {
-    ElMessage.warning('自动匹配素材需要先填写基调或构思方向')
-    return
-  }
   loading.value = kind
   try {
     const data = await call(generateIdeas(props.novel.id, {
       ...modelAndMaterials(), kind, hint: hint.value.trim(), tone: tone.value.trim(), chosenDirections: chosenTexts.value,
       count: kind === 'outline' ? outlineCount.value : undefined,
-      autoMaterials: autoMaterials.value, query: autoMaterials.value ? query : undefined
+      autoMaterials: false
     }), 'AI 构思失败')
     last.value = data
     if (kind === 'outline') draft.value = data.result
@@ -618,14 +623,8 @@ async function clearOutline() {
   gap: 8px;
 }
 .chips {
-  margin-top: 6px;
-}
-.blocked-row {
   width: 100%;
   margin-top: 6px;
-}
-.blocked-select {
-  width: 300px;
 }
 .setting-row {
   display: flex;

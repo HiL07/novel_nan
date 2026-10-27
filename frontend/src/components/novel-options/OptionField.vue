@@ -162,7 +162,7 @@ const typeLabel = computed(() => FIELD_TYPES[props.field.type]?.label || props.f
 /* ---- AI 按钮：大模型时可同时生成别处，只锁会写到同一处的；本地模型一次一个 ---- */
 const locked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label]))
 const hasText = computed(() => String(props.container[props.field.key] ?? '').trim() !== '')
-const serialTip = computed(() => (ai?.cfg?.source === 'local' && locked.value ? '（本地模型一次只能处理一个 AI 请求）' : ''))
+const serialTip = computed(() => (['local', 'gguf'].includes(ai?.cfg?.source) && locked.value ? '（本地模型 / GGUF 一次只能处理一个 AI 请求）' : ''))
 const polishTip = computed(() => (hasText.value
   ? 'AI 润色：保留框内已写的内容，在此基础上扩写、补充细节（参考其他设定保持一致），结果替换框内内容，可撤销'
   : 'AI 润色：先在框内写几句，AI 在此基础上扩写；框内为空时不可用') + serialTip.value)

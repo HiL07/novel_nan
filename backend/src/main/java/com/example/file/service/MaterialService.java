@@ -57,6 +57,8 @@ public class MaterialService {
     }
 
     private static final int SEMANTIC_POOL = 150;
+    /** 向量检索一次最多比较的素材数（超出按使用次数取前 N 条） */
+    private static final int VECTOR_POOL = 20000;
     /** 按来源书筛选时代表「手动添加（无来源书）」 */
     public static final String MANUAL_BOOK = "__manual__";
 
@@ -277,11 +279,151 @@ public class MaterialService {
         return out;
     }
 
+    // ------------------------------------------------------------------ 向量检索（本地 embedding 模型）
+
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags,
+                                            List<String> excludeBooks, String modelId, int limit) {
+        return vectorSearch(query, category, tags, excludeBooks, modelId, limit, "hybrid", true);
+    }
+
+    /**
+     * 本地检索（RAG 的召回 + 精排）：按分类 / 标签 / 屏蔽来源书筛出素材（不做关键词初筛，最多 {@link #VECTOR_POOL} 条），
+     * 交给 Python：向量（bge-small-zh）+ 关键词（BM25，jieba 分词，素材标签作词表）各召回、倒数排名融合，
+     * 再用重排模型（bge-reranker-v2-m3）重排前 30 条。不用大模型、不花 token；还没向量化的素材顺便编码。
+     * score：重排过 = 相关度 × 100（可当阈值，见 {@link #RERANK_MIN_SCORE}），没重排 = 余弦相似度 × 100（只看相对高低）。
+     *
+     * @param modelId python-service 登记的向量模型 id；空 = Python 的默认向量模型
+     * @param mode    vector = 只用向量；hybrid = 向量 + 关键词
+     * @param rerank  有重排模型时重排（没有 / 显存不够时自动跳过，结果 reranked = false）
+     */
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
+                                            String modelId, int limit, String mode, boolean rerank) {
+        if (query == null || query.isBlank()) {
+            throw new BizException(400, "请输入要查找的内容");
+        }
+        List<Long> tagIds = idsWithTags(tags, false);
+        List<Material> pool = List.of();
+        long total = 0;
+        if (tagIds == null || !tagIds.isEmpty()) {
+            LambdaQueryWrapper<Material> q = baseQuery(category, tagIds);
+            applyBooks(q, null, excludeBooks);
+            total = materialMapper.selectCount(q);
+            if (total > 0) {
+                LambdaQueryWrapper<Material> lq = baseQuery(category, tagIds);
+                applyBooks(lq, null, excludeBooks);
+                lq.orderByDesc(Material::getUseCount).orderByDesc(Material::getUpdateTime).last("LIMIT " + VECTOR_POOL);
+                pool = materialMapper.selectList(lq);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", total);
+        out.put("considered", pool.size());
+        List<Map<String, Object>> results = new ArrayList<>();
+        out.put("results", results);
+        if (pool.isEmpty()) {
+            return out;
+        }
+        String q = query.trim();
+        List<Map<String, Object>> items = vectorItems(pool);
+        String m0 = "vector".equals(mode) ? "vector" : "hybrid";
+        List<String> vocab = "hybrid".equals(m0) ? tagVocabulary() : List.of();
+        JsonNode res = callAi(() -> aiClient.vectorSearchMaterials(modelId, q.substring(0, Math.min(q.length(), 2000)),
+                items, Math.min(Math.max(limit, 1), 200), m0, rerank, vocab), "向量检索失败");
+        Map<Long, Material> byId = pool.stream().collect(Collectors.toMap(Material::getId, m -> m));
+        for (JsonNode r : res.path("results")) {
+            Material m = byId.get(r.path("id").asLong());
+            if (m != null) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("material", m);
+                row.put("score", (int) Math.round(r.path("score").asDouble() * 100));
+                row.put("similarity", r.path("similarity").asDouble());
+                row.put("vecRank", r.path("vecRank").isNumber() ? r.path("vecRank").asInt() : null);
+                row.put("lexRank", r.path("lexRank").isNumber() ? r.path("lexRank").asInt() : null);
+                results.add(row);
+            }
+        }
+        for (String k : List.of("model", "modelId", "device", "encoded", "cached", "ms", "mode", "reranked", "rerankSkipped",
+                "rerankModel", "rerankDevice", "rerankMs", "queryTokens")) {
+            out.put(k, objectMapper.convertValue(res.path(k), Object.class));
+        }
+        return out;
+    }
+
+    /** 重排后的相关度达到这个分（0–100）才算「相关」：用于 AI 构思的自动匹配、选择弹窗的预勾选 */
+    public static final int RERANK_MIN_SCORE = 30;
+
+    /** 全部素材标签（去重）：作为 jieba 的领域词表，让「退婚」「扮猪吃虎」这类网文用语不被切碎 */
+    private List<String> tagVocabulary() {
+        return tagMapper.selectObjs(new QueryWrapper<MaterialTag>().select("DISTINCT tag")).stream()
+                .map(String::valueOf).filter(t -> t.length() >= 2 && t.length() <= 8).toList();
+    }
+
+    /** 全部素材的向量化情况（encode=false）或把还没向量化的全部编码（encode=true） */
+    public Map<String, Object> vectorIndex(String modelId, boolean encode) {
+        List<Material> all = materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getTitle, Material::getSubtype, Material::getSummary,
+                        Material::getAttributes, Material::getTags));
+        if (all.isEmpty()) {
+            return Map.of("total", 0, "cached", 0, "encoded", 0, "pending", 0);
+        }
+        JsonNode res = callAi(() -> aiClient.vectorIndexMaterials(modelId, vectorItems(all), encode), "素材向量化失败");
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (String k : List.of("total", "cached", "encoded", "pending", "model", "modelId", "device", "ms")) {
+            out.put(k, objectMapper.convertValue(res.path(k), Object.class));
+        }
+        return out;
+    }
+
+    private static List<Map<String, Object>> vectorItems(List<Material> list) {
+        return list.stream().map(m -> Map.<String, Object>of("id", m.getId(), "text", vectorText(m))).toList();
+    }
+
+    /**
+     * 素材 → 向量化文本：只拼有内容的部分（名称 / 子类 / 标签 / 概括 / 属性值）。分类名、属性键名每条都差不多，
+     * 写进去会把向量互相拉近，所以不写（分类用作过滤条件）。素材都在 512 token 以内，不需要切块
+     */
+    private static String vectorText(Material m) {
+        List<String> parts = new ArrayList<>();
+        parts.add(m.getTitle());
+        parts.add(m.getSubtype());
+        if (m.getTags() != null && !m.getTags().isEmpty()) {
+            parts.add(String.join("、", m.getTags()));
+        }
+        parts.add(m.getSummary());
+        if (m.getAttributes() != null) {
+            m.getAttributes().values().forEach(v -> parts.add(v instanceof List<?> l
+                    ? l.stream().map(String::valueOf).collect(Collectors.joining("、")) : v == null ? null : String.valueOf(v)));
+        }
+        return parts.stream().filter(s -> s != null && !s.isBlank()).map(String::trim).collect(Collectors.joining("\n"));
+    }
+
+    /** 向量检索后勾选 / 没勾选的素材：转给 Python 记入 feedback.jsonl（失败只记日志，不影响页面） */
+    public void vectorFeedback(Map<String, Object> body) {
+        Map<String, Object> clean = new LinkedHashMap<>();
+        for (String k : List.of("query", "modelId", "shownIds", "pickedIds", "context")) {
+            if (body.get(k) != null) {
+                clean.put(k, body.get(k));
+            }
+        }
+        if (!(clean.get("query") instanceof String q) || q.isBlank()) {
+            throw new BizException(400, "缺少 query");
+        }
+        try {
+            aiClient.vectorFeedback(clean);
+        } catch (RuntimeException e) {
+            log.warn("记录向量检索反馈失败：{}", e.getMessage());
+        }
+    }
+
     private interface AiCall {
         JsonNode run();
     }
 
     private JsonNode callAi(AiCall call) {
+        return callAi(call, "AI 语义检索失败");
+    }
+
+    private JsonNode callAi(AiCall call, String failure) {
         JsonNode res;
         try {
             res = call.run();
@@ -292,7 +434,7 @@ public class MaterialService {
             throw new BizException(502, "AI 服务拒绝请求（HTTP " + e.getStatusCode().value() + "）");
         }
         if (res == null || !res.path("ok").asBoolean(false)) {
-            throw new BizException(502, "AI 语义检索失败：" + (res == null ? "无响应" : res.path("message").asText()));
+            throw new BizException(502, failure + "：" + (res == null ? "无响应" : res.path("message").asText()));
         }
         return res;
     }

@@ -37,7 +37,8 @@ public class NovelGenService {
     private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat");
     private static final int MAX_MATERIALS = 20;
     private static final int AUTO_MATERIALS = 8;
-    private static final int AUTO_MIN_SCORE = 50;
+    /** 没有重排模型时，自动匹配只取最相关的几条（余弦相似度没有可比的阈值） */
+    private static final int AUTO_UNRANKED = 3;
     private static final int DETAIL_CHARS = 300;
     private static final int TONE_CHARS = 200;
     private static final int MAX_REJECTED = 30;
@@ -80,13 +81,27 @@ public class NovelGenService {
         return callPython(() -> aiClient.startGenChapter(novelId, body, cfg), "章节生成");
     }
 
+    /** 大模型工作区：已完成章节重新提取故事事实（digest）/ 重新检查一致性（review）。返回 Python 的任务对象。 */
+    public JsonNode recheckChapter(String novelId, int index, Map<String, Object> req) {
+        checkNovelId(novelId);
+        if (index < 1) {
+            throw new BizException(400, "章节序号无效");
+        }
+        AiModelConfig cfg = modelService.requireActive();
+        Map<String, Object> body = new HashMap<>();
+        body.put("digest", Boolean.TRUE.equals(req.get("digest")));
+        body.put("review", Boolean.TRUE.equals(req.get("review")));
+        return callPython(() -> aiClient.recheckGenChapter(novelId, index, body, cfg), "重新提取");
+    }
+
     /**
      * AI 构思 / AI 填写设定 / 构思方向建议 / 角色试聊。
      * req: {kind: title|outline|chapter|fill|direction|hint_polish|chat, source?: api|local, baseId?, adapterId?, hint?, tone?,
      *       rejected?[], chosenDirections?[], chapterContext?{current, past}, count?, purpose?,
      *       materialIds?[], autoMaterials?, query?, excludeBooks?[], fill?{mode, path, fields, current, itemLabel, count, existing},
      *       chat?{character:{name, card}, messages[], scene?, userRole?}, spec?}
-     * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）。
+     * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）；
+     * gguf 用 Python「llama.cpp」页正在运行的 GGUF 模型（本机、无 Key，Python 自己取地址）。
      * autoMaterials：用 query（为空时用 hint）在素材库做 AI 语义检索（总是用大模型），取相关度 ≥ 50 的前 8 条，与选中的合并。
      * tone：作者定下的基调（≤200 字，所有构思都围绕它）；rejected：已给过 / 被拒绝的走向（≤30 条，生成走向时避开）；
      * chosenDirections：作者选定的后续走向（≤10 条，书名 / 大纲 / 章节沿着它们展开）；hint_polish：只按 hint 扩写构思。
@@ -104,11 +119,12 @@ public class NovelGenService {
             throw new BizException(400, "远程模型（远程 GPU 上的模型 + 适配器）暂未接入");
         }
         boolean local = "local".equals(source);
+        boolean gguf = "gguf".equals(source);
         String baseId = Objects.toString(req.get("baseId"), "");
         if (local && baseId.isBlank()) {
             throw new BizException(400, "请选择本地基础模型");
         }
-        AiModelConfig cfg = local ? null : modelService.requireActive();
+        AiModelConfig cfg = local || gguf ? null : modelService.requireActive();
         String hint = Objects.toString(req.get("hint"), "").trim();
 
         List<String> excludeBooks = new ArrayList<>();
@@ -144,12 +160,19 @@ public class NovelGenService {
             if (query.isEmpty()) {
                 throw new BizException(400, "自动匹配素材需要填写构思方向（用它在素材库中检索）");
             }
-            Object results = materialService.semanticSearch(query, null, null, excludeBooks, AUTO_MATERIALS).get("results");
-            if (results instanceof List<?> list) {
+            // 本地检索（向量 + 关键词融合 + 重排），不用大模型。重排过：相关度 ≥ RERANK_MIN_SCORE 的才用；
+            // 没有重排模型时分数没有可比的阈值，只取最相关的 AUTO_UNRANKED 条
+            Map<String, Object> found = materialService.vectorSearch(query, null, null, excludeBooks, null, AUTO_MATERIALS);
+            boolean reranked = Boolean.TRUE.equals(found.get("reranked"));
+            String how = reranked ? "本地检索 · 重排相关度 " : "本地检索 · 未重排，按排名取前 " + AUTO_UNRANKED + " 条，相似度 ";
+            int taken = 0;
+            if (found.get("results") instanceof List<?> list) {
                 for (Object o : list) {
                     if (o instanceof Map<?, ?> r && r.get("material") instanceof Material m && used.size() < MAX_MATERIALS
-                            && r.get("score") instanceof Integer score && score >= AUTO_MIN_SCORE) {
-                        used.putIfAbsent(m.getId(), usedEntry(m, score, Objects.toString(r.get("reason"), ""), true));
+                            && r.get("score") instanceof Integer score
+                            && (reranked ? score >= MaterialService.RERANK_MIN_SCORE : taken < AUTO_UNRANKED)) {
+                        taken++;
+                        used.putIfAbsent(m.getId(), usedEntry(m, score, how + score, true));
                     }
                 }
             }
@@ -213,6 +236,9 @@ public class NovelGenService {
                 throw new BizException(400, "缺少试聊内容");
             }
             body.put("chat", chat);
+        }
+        if (gguf) {
+            body.put("gguf", true);
         }
         if (local) {
             Map<String, Object> localModel = new HashMap<>();

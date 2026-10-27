@@ -45,6 +45,7 @@
                 <el-radio-group v-model="mode" size="small">
                   <el-radio-button value="keyword">关键词检索</el-radio-button>
                   <el-radio-button value="semantic">AI 语义检索</el-radio-button>
+                  <el-radio-button value="vector">本地检索</el-radio-button>
                 </el-radio-group>
                 <template v-if="mode === 'keyword'">
                   <el-input v-model="keyword" placeholder="名称 / 概括 / 详细 / 标签中的关键词" clearable class="search-input" @keyup.enter="search(1)" @clear="search(1)" />
@@ -56,6 +57,35 @@
                     <el-option label="包含任一" value="any" />
                   </el-select>
                   <el-button type="primary" :icon="Search" @click="search(1)">检索</el-button>
+                </template>
+                <template v-else-if="mode === 'vector'">
+                  <el-select
+                    v-model="vectorModelId"
+                    placeholder="默认向量模型"
+                    clearable
+                    style="width: 190px"
+                    :no-data-text="embeddingModelsError || '没有向量模型：去「本地模型」下载 bge-small-zh-v1.5'"
+                    @visible-change="(v) => v && loadEmbeddingModels()"
+                    @change="onVectorModel"
+                  >
+                    <el-option v-for="m in embeddingModels" :key="m.id" :label="m.name" :value="m.id" :disabled="!m.exists" />
+                  </el-select>
+                  <el-input
+                    v-model="vectorQuery"
+                    placeholder="描述想要的素材，本地向量模型按语义相似度排序（不用大模型、不花 token）"
+                    clearable
+                    class="search-input wide"
+                    @keyup.enter="runVector"
+                  />
+                  <el-select v-model="selectedTags" multiple filterable collapse-tags placeholder="限定标签（可选）" style="width: 200px">
+                    <el-option v-for="t in tagCloud" :key="t.tag" :label="t.tag" :value="t.tag" />
+                  </el-select>
+                  <el-select v-model="vectorMode" style="width: 150px" title="对比不同检索方式的效果">
+                    <el-option label="混合 + 重排（推荐）" value="hybrid+rerank" />
+                    <el-option label="混合（向量 + 关键词）" value="hybrid" />
+                    <el-option label="只用向量" value="vector" />
+                  </el-select>
+                  <el-button type="primary" :icon="Search" :loading="vectorLoading" :disabled="!vectorQuery.trim()" @click="runVector">检索</el-button>
                 </template>
                 <template v-else>
                   <el-input
@@ -91,15 +121,39 @@
                 ；从 {{ semantic.considered }} 条候选中找到 {{ semantic.results.length }} 条相关素材
               </div>
 
+              <!-- 向量检索：向量化进度 + 本次检索说明 -->
+              <div v-if="mode === 'vector'" class="semantic-info">
+                <div class="vector-index">
+                  <template v-if="vectorIdx">
+                    已向量化 <b>{{ vectorIdx.cached }}</b> / {{ vectorIdx.total }} 条素材（{{ vectorIdx.model }}，{{ vectorIdx.device === 'cuda' ? 'GPU' : 'CPU' }}）
+                    <template v-if="vectorIdx.encoded">，本次新向量化 {{ vectorIdx.encoded }} 条，用时 {{ vectorIdx.ms }} ms</template>
+                  </template>
+                  <span v-else-if="vectorIdxError" class="danger">{{ vectorIdxError }}</span>
+                  <span v-else>正在统计向量化情况（首次会加载向量模型）…</span>
+                  <el-button size="small" :loading="vectorIdxLoading" :disabled="!!vectorIdx && !vectorIdx.pending" @click="runVectorIndex(true)">
+                    {{ vectorIdx && !vectorIdx.pending ? '已全部向量化' : '全部向量化' }}
+                  </el-button>
+                  <span class="muted-tip">没向量化的素材在检索时也会顺便向量化；修改过的素材会重新向量化</span>
+                </div>
+                <div v-if="vector">
+                  {{ vector.model }}（{{ vector.device === 'cuda' ? 'GPU' : 'CPU' }}）{{ vector.mode === 'hybrid' ? '+ 关键词' : '' }}比较了 {{ vector.considered }} 条素材
+                  <template v-if="vector.total > vector.considered">（共 {{ vector.total }} 条，只取使用最多的 {{ vector.considered }} 条）</template>
+                  <template v-if="vector.encoded">，新向量化 {{ vector.encoded }} 条</template>，用时 {{ vector.ms }} ms
+                  <template v-if="vector.queryTokens?.length">；关键词：{{ vector.queryTokens.join(' / ') }}</template>。
+                  <template v-if="vector.reranked">已用 {{ vector.rerankModel }} 重排（{{ vector.rerankMs }} ms），分数 = 相关度，30 以上一般算相关。</template>
+                  <template v-else>没有重排{{ vector.rerankSkipped ? `（${vector.rerankSkipped}）` : '' }}，分数 = 相似度，只看相对高低。</template>
+                </div>
+              </div>
+
               <!-- 结果 -->
-              <div v-loading="loading || semanticLoading" class="results">
+              <div v-loading="loading || semanticLoading || vectorLoading" class="results">
                 <el-empty v-if="!displayList.length" :description="emptyText" :image-size="80" />
                 <div v-else class="card-grid">
-                  <div v-for="r in displayList" :key="r.material.id" class="mat-card" @click="openEditor(r.material)">
+                  <div v-for="r in displayList" :key="r.material.id" class="mat-card" @click="openResult(r)">
                     <div class="mat-head">
                       <el-tag size="small" effect="plain">{{ categoryOf(r.material.category)?.label }}</el-tag>
                       <span class="mat-title">{{ r.material.title }}</span>
-                      <span v-if="r.score != null" class="score" :title="r.reason">{{ r.score }}</span>
+                      <span v-if="r.score != null" class="score" :title="r.reason || rankTip(r)">{{ r.score }}</span>
                       <el-icon
                         class="pin"
                         :class="{ 'is-pinned': r.material.pinned }"
@@ -181,8 +235,10 @@ import CandidateReview from '@/components/material/CandidateReview.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
 import {
   MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterialCategories, getMaterialSources, getMaterialTags,
-  pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch
+  getVectorModelId, pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, vectorFeedback,
+  vectorIndex, vectorSearch
 } from '@/api/material'
+import { isEmbeddingModel, listModels } from '@/api/localModel'
 import { errorMessage } from '@/api/request'
 
 const tab = ref('library')
@@ -205,6 +261,19 @@ const semanticQuery = ref('')
 const semantic = ref(null)
 const semanticLoading = ref(false)
 
+// 向量检索：本地 embedding 模型（python-service 里 task = embedding 的模型；空 = 服务端默认）
+const vectorQuery = ref('')
+const vector = ref(null)
+const vectorLoading = ref(false)
+const vectorModelId = ref(getVectorModelId())
+const embeddingModels = ref([])
+const embeddingModelsError = ref('')
+const vectorIdx = ref(null)
+const vectorIdxError = ref('')
+const vectorIdxLoading = ref(false)
+const vectorMode = ref('hybrid+rerank')
+const rankTip = (r) => (r.similarity != null ? `相似度 ${r.similarity}` : '') + (r.vecRank ? ` · 向量第 ${r.vecRank}` : '') + (r.lexRank ? ` · 关键词第 ${r.lexRank}` : '')
+
 const reviewRef = ref()
 const editor = reactive({ visible: false, material: null })
 const sources = ref([])
@@ -214,12 +283,16 @@ const sourceDel = reactive({ visible: false, source: null, withCandidates: true,
 const pinnedCount = computed(() => sources.value.reduce((s, x) => s + (x.pinned || 0), 0))
 
 const totalCount = computed(() => categories.value.reduce((s, c) => s + c.count, 0))
-const displayList = computed(() =>
-  mode.value === 'semantic' ? semantic.value?.results || [] : records.value.map((m) => ({ material: m, score: null, reason: '' }))
-)
-const emptyText = computed(() =>
-  mode.value === 'semantic' ? (semantic.value ? '没有找到相关素材' : '输入需求后点击「AI 检索」') : totalCount.value ? '没有符合条件的素材' : '素材库还是空的：在「小说提取」中开启素材提取，或手动新建'
-)
+const displayList = computed(() => {
+  if (mode.value === 'semantic') return semantic.value?.results || []
+  if (mode.value === 'vector') return vector.value?.results || []
+  return records.value.map((m) => ({ material: m, score: null, reason: '' }))
+})
+const emptyText = computed(() => {
+  if (mode.value === 'semantic') return semantic.value ? '没有找到相关素材' : '输入需求后点击「AI 检索」'
+  if (mode.value === 'vector') return vector.value ? '没有找到相关素材' : '输入需求后点击「向量检索」'
+  return totalCount.value ? '没有符合条件的素材' : '素材库还是空的：在「小说提取」中开启素材提取，或手动新建'
+})
 
 const pickAttrs = (attrs) => Object.fromEntries(Object.entries(attrs || {}).slice(0, 3))
 
@@ -276,12 +349,75 @@ async function runSemantic() {
   }
 }
 
+async function loadEmbeddingModels() {
+  try {
+    const list = await call(listModels(), '加载向量模型失败')
+    embeddingModels.value = list.filter(isEmbeddingModel)
+    embeddingModelsError.value = ''
+  } catch (e) {
+    embeddingModels.value = []
+    embeddingModelsError.value = 'AI 服务不可达：' + errorMessage(e, '加载向量模型失败')
+  }
+}
+
+function onVectorModel(id) {
+  setVectorModelId(id)
+  vector.value = null
+  runVectorIndex(false)
+}
+
+/** encode=false：统计全部素材已向量化多少；true：把没向量化的全部向量化 */
+async function runVectorIndex(encode) {
+  vectorIdxLoading.value = encode
+  vectorIdxError.value = ''
+  if (!encode) vectorIdx.value = null
+  try {
+    const data = await call(vectorIndex(encode), '素材向量化失败')
+    vectorIdx.value = { ...data, cached: data.cached + (data.encoded || 0) }
+    if (encode) ElMessage.success(`已向量化 ${data.encoded} 条素材，用时 ${(data.ms / 1000).toFixed(1)} 秒`)
+  } catch (e) {
+    vectorIdxError.value = errorMessage(e, '素材向量化失败')
+  } finally {
+    vectorIdxLoading.value = false
+  }
+}
+
+async function runVector() {
+  const query = vectorQuery.value.trim()
+  if (!query) return
+  vectorLoading.value = true
+  try {
+    vector.value = {
+      ...(await call(vectorSearch({
+        query, category: category.value || undefined, tags: selectedTags.value, limit: 30,
+        mode: vectorMode.value === 'vector' ? 'vector' : 'hybrid', rerank: vectorMode.value === 'hybrid+rerank'
+      }), '向量检索失败')),
+      query
+    }
+    if (vector.value.encoded && vectorIdx.value) runVectorIndex(false)
+  } catch (e) {
+    ElMessage.error({ message: errorMessage(e, '向量检索失败'), duration: 6000 })
+  } finally {
+    vectorLoading.value = false
+  }
+}
+
+function openResult(r) {
+  if (mode.value === 'vector' && vector.value) {
+    // 「这条需求 → 点开看的素材」，以后微调向量模型用
+    vectorFeedback({ query: vector.value.query, modelId: vector.value.modelId || '', context: '素材库页·查看',
+      shownIds: vector.value.results.map((x) => x.material.id), pickedIds: [r.material.id] })
+  }
+  openEditor(r.material)
+}
+
 function setCategory(code) {
   category.value = code
   selectedTags.value = []
   getMaterialTags(code || undefined).then((r) => r.code === 0 && (tagCloud.value = r.data))
   if (mode.value === 'keyword') search(1)
-  else if (semantic.value) runSemantic()
+  else if (mode.value === 'semantic' && semantic.value) runSemantic()
+  else if (mode.value === 'vector' && vector.value) runVector()
 }
 
 function setSource(book) {
@@ -345,7 +481,10 @@ function openEditor(m) {
 async function refreshAll() {
   await loadMeta()
   if (mode.value === 'keyword') await search(page.value)
-  else semantic.value = null
+  else if (mode.value === 'vector') {
+    runVectorIndex(false)
+    if (vector.value) await runVector()
+  } else semantic.value = null
 }
 
 async function onCandidatesChanged() {
@@ -354,6 +493,10 @@ async function onCandidatesChanged() {
 
 watch(mode, (m) => {
   if (m === 'keyword') search(1)
+  if (m === 'vector') {
+    loadEmbeddingModels()
+    if (!vectorIdx.value) runVectorIndex(false)
+  }
 })
 
 onActivated(async () => {
@@ -463,6 +606,16 @@ onActivated(async () => {
   margin-top: 10px;
   font-size: 12px;
   color: #606266;
+}
+.vector-index {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.vector-index .danger {
+  color: var(--el-color-danger);
 }
 .results {
   min-height: 200px;

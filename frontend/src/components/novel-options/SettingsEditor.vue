@@ -11,6 +11,7 @@
           v-if="aiEnabled"
           :cfg="aiCfg"
           :api-model="ai.apiModel"
+          :llama="ai.llama"
           :local-models="ai.localModels"
           :adapters="ai.adapters"
           :blocked-books="blockedBooks"
@@ -134,6 +135,20 @@
     />
 
     <MaterialPicker v-model="picker.visible" :categories="categories" :initial-category="picker.category" @apply="onApplyMaterials" />
+    <!-- 每次 AI 生成 / 润色前必经的素材选择（可以什么都不选） -->
+    <MaterialPicker
+      v-model="aiPicker.visible"
+      pick-only
+      :title="aiPicker.title"
+      :action-label="aiPicker.action"
+      :vector-query="aiPicker.query"
+      :auto-vector="aiPicker.auto"
+      :initial-selected="aiPicker.initial"
+      :exclude-books="blockedBooks"
+      :feedback-context="aiPicker.context"
+      @apply="onAiPicked"
+      @cancel="onAiPickCancel"
+    />
 
     <el-dialog v-model="jsonVisible" title="设定 JSON" width="680px">
       <el-radio-group v-model="jsonMode" size="small" class="json-mode">
@@ -299,18 +314,18 @@ const aiCfg = reactive({ source: 'api', baseId: '', adapterId: '', hint: '', pic
 watch(() => props.ai?.model, (m) => {
   if (!m) return
   Object.assign(aiCfg, {
-    source: m.source === 'local' ? 'local' : 'api',
+    source: m.source === 'local' || m.source === 'gguf' ? m.source : 'api',
     baseId: m.baseId || props.ai.localModels?.[0]?.id || '',
     adapterId: m.source === 'local' ? m.adapterId || '' : ''
   })
 }, { immediate: true })
-// 进行中的 AI 请求：标识 → 作用范围（位置路径）。本地模型一次只能处理一个（显卡上一个模型、生成串行）；
+// 进行中的 AI 请求：标识 → 作用范围（位置路径）。本地模型 / GGUF 一次只能处理一个（显卡上一个模型、生成串行）；
 // 大模型可以同时发多个，只锁住会写到同一处的按钮（范围互为前缀，见 aiFill.scopesOverlap）
 const aiRunning = reactive(new Map())
 const aiLoading = (key) => aiRunning.has(key)
 function aiLocked(scope) {
   if (!aiRunning.size) return false
-  if (aiCfg.source === 'local') return true
+  if (aiSerial()) return true
   return [...aiRunning.values()].some((s) => scopesOverlap(s, scope))
 }
 // 屏蔽的来源书（按工作区记住，与「AI 构思」共用）：这些书的素材不参与 AI 填写（保留的素材除外）
@@ -326,7 +341,16 @@ function aiModelBody() {
   }
 }
 
+/** 本地模型和 GGUF（llama.cpp 只开一个并发槽）一次只处理一个 AI 请求 */
+function aiSerial() {
+  return aiCfg.source === 'local' || aiCfg.source === 'gguf'
+}
+
 function aiModelReady() {
+  if (aiCfg.source === 'gguf') {
+    if (!props.ai.llama) ElMessage.warning('llama.cpp 没有运行：请先到「llama.cpp」页启动 GGUF 模型，或在「AI 填写设置」里换模型')
+    return !!props.ai.llama
+  }
   if (aiCfg.source !== 'local' && !props.ai.apiModel) {
     ElMessage.warning('没有可用的大模型：请在「模型配置」中启用，或在「AI 填写设置」里改用本地模型')
     return false
@@ -338,24 +362,61 @@ function aiModelReady() {
   return true
 }
 
-/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面；scope：会写到的位置（见 aiLocked）；
- *  overrides：替换请求里的字段（如自定义选项只用自己选的素材：{materialIds, autoMaterials: false}） */
-async function aiCall(fill, busyKey, extraHint = '', scope = [], overrides = {}) {
+/** AI 请求前的检查：同一处 / 本地模型是否正忙、模型是否可用 */
+function aiPreflight(busyKey, scope) {
   if (aiRunning.has(busyKey) || aiLocked(scope)) {
-    ElMessage.warning(aiCfg.source === 'local' ? '本地模型一次只能处理一个 AI 请求，请等上一个完成' : '这一处正在由 AI 生成，请稍候')
-    return null
+    ElMessage.warning(aiSerial() ? '本地模型 / GGUF 一次只能处理一个 AI 请求，请等上一个完成' : '这一处正在由 AI 生成，请稍候')
+    return false
   }
-  if (!aiModelReady()) return null
+  return aiModelReady()
+}
+
+/* ---- 每次 AI 生成 / 润色前必须先选素材（可以什么都不选）：「AI 填写设置」里的素材预先勾上，
+       开着「自动匹配」时用本地向量模型按 query 检索并预勾选前几条 ---- */
+const aiPicker = reactive({ visible: false, action: '', title: '', query: '', context: '', initial: [], auto: false })
+let aiPickResolve = null
+
+/** → 选中的素材数组（可为空 = 不用素材）；取消返回 null。
+ *  action：动作名（生成 / 润色 / 创建 / 补全）；target：作用对象（显示在标题里）；query：向量检索预填内容（会加上补充要求）；
+ *  initial：预选（默认「AI 填写设置」里选的素材） */
+function pickMaterials({ action, target, query = '', initial = null }) {
+  aiPickResolve?.(null)
+  return new Promise((resolve) => {
+    aiPickResolve = resolve
+    Object.assign(aiPicker, {
+      visible: true, action, title: `AI ${action}「${target}」：先选参考素材（可以不选）`, context: `设定 › ${target}`,
+      query: [query, aiCfg.hint].map((s) => (s || '').trim()).filter(Boolean).join('；').slice(0, 500),
+      initial: initial ?? aiCfg.picked, auto: aiCfg.autoMaterials
+    })
+  })
+}
+function onAiPicked(list) {
+  const r = aiPickResolve
+  aiPickResolve = null
+  r?.(list)
+}
+function onAiPickCancel() {
+  const r = aiPickResolve
+  aiPickResolve = null
+  r?.(null)
+}
+
+/** extraHint：本次额外的要求（如「一句话创建角色」的构想），放在补充要求前面；scope：会写到的位置（见 aiLocked）；
+ *  pick：先弹素材选择（见 pickMaterials 的参数），取消则不请求；materials：已选好的素材（不再弹选择）。
+ *  素材只用这次选的（不选 = 不用素材），不再自动匹配 */
+async function aiCall(fill, busyKey, extraHint = '', scope = [], { pick = null, materials = null } = {}) {
+  if (!aiPreflight(busyKey, scope)) return null
+  let chosen = materials
+  if (!chosen && pick) {
+    chosen = await pickMaterials(pick)
+    if (!chosen) return null
+    if (!aiPreflight(busyKey, scope)) return null
+  }
   const hint = [extraHint.trim(), aiCfg.hint.trim()].filter(Boolean).join('；').slice(0, 500)
-  const autoMaterials = overrides.autoMaterials ?? aiCfg.autoMaterials
-  if (autoMaterials && !hint) {
-    ElMessage.warning('自动匹配素材需要在「AI 填写设置」里填写补充要求')
-    return null
-  }
   aiRunning.set(busyKey, scope)
   try {
     const res = await generateIdeas(props.novelId, {
-      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials, ...overrides
+      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: false, materialIds: (chosen || []).map((m) => m.id)
     })
     if (res.code !== 0) throw new Error(res.message || 'AI 填写失败')
     return res.data.result
@@ -389,10 +450,12 @@ async function aiFillField(field, container, siblings, path, action = 'generate'
       return
     }
   }
+  const label = action === 'polish' ? '润色' : '生成'
   const r = await aiCall({
     mode: 'field', path, fields: [fieldSchema(field)], current: currentValues(siblings, container, field.key),
     ...(text ? { action, seed } : {})
-  }, `${busyKeyOf(path, field)}|${action}`, '', [...path, field.label])
+  }, `${busyKeyOf(path, field)}|${action}`, '', [...path, field.label],
+  { pick: { action: label, target: [...path, field.label].join(' › '), query: [...path, field.label, seed].filter(Boolean).join(' ') } })
   if (!r) return
   if (!applyValue(field, container, r.values?.[field.key], addOption)) {
     ElMessage.warning('模型没有给出这个字段的内容，请重试')
@@ -419,19 +482,25 @@ async function aiFillField(field, container, siblings, path, action = 'generate'
 
 /**
  * 选择类字段「自定义」里的 AI：polish = 把框里写的整理成一个选项；generate = 按框里的方向 / 选的素材设计新选项。
- * 素材只用这个自定义框自己选的（不用「AI 填写设置」里的素材和自动匹配）。返回 {label, desc} 草稿，由作者确认后再添加。
+ * 先弹素材选择（预选这个自定义框上次选的素材）。返回 {option: {label, desc} 草稿, materials: 这次选的}；取消 / 失败返回 null
+ * （选了素材但请求失败时 option 为 null）。
  */
 async function aiCustomOption(field, { action, seed, materials, path, container, siblings }) {
-  if (!seed && !materials.length) {
-    ElMessage.warning('先在自定义框里写点内容，或选择素材')
-    return null
+  const busyKey = `${busyKeyOf(path, field)}|option`
+  const scope = [...path, field.label]
+  if (!aiPreflight(busyKey, scope)) return null
+  const target = [...path, field.label, '自定义选项'].join(' › ')
+  const chosen = await pickMaterials({ action: action === 'polish' ? '润色' : '生成', target, query: [...scope, seed].filter(Boolean).join(' '), initial: materials })
+  if (!chosen) return null
+  if (!seed && !chosen.length) {
+    ElMessage.warning('自定义框里没有内容时，需要至少选一条素材')
+    return { option: null, materials: chosen }
   }
   const r = await aiCall({
     mode: 'option', path, fields: [fieldSchema(field)], action, seed,
     current: siblings ? currentValues(siblings, container, field.key) : {}
-  }, `${busyKeyOf(path, field)}|option`, '', [...path, field.label],
-  { materialIds: materials.map((m) => m.id), autoMaterials: false })
-  return r?.option || null
+  }, busyKey, '', scope, { materials: chosen })
+  return { option: r?.option || null, materials: chosen }
 }
 
 /** 分组新增 count 项（如关键情节节点、角色），每项的文本 / 标签 / 选择字段都由 AI 填写；
@@ -447,7 +516,8 @@ async function aiGenItems(field, list, path, count, concept = '') {
   const r = await aiCall({
     mode: 'items', path: [...path, field.label], itemLabel: label, count, fields: fields.map(fieldSchema),
     existing: nameField ? list.map((it) => it[nameField.key]).filter(Boolean) : []
-  }, busyKeyOf(path, field), concept ? `${label}构想：${concept}` : '', [...path, field.label, NEW_ITEMS])
+  }, busyKeyOf(path, field), concept ? `${label}构想：${concept}` : '', [...path, field.label, NEW_ITEMS],
+  { pick: { action: concept ? '创建' : `生成 ${count} 个${label}`, target: [...path, field.label].join(' › '), query: [...path, field.label, concept].filter(Boolean).join(' ') } })
   if (!r) return []
   const added = []
   for (const it of r.items || []) {
@@ -468,7 +538,7 @@ async function aiFillItem(field, item, path) {
     return
   }
   const r = await aiCall({ mode: 'category', path, fields: targets.map(fieldSchema), current: currentValues(field.fields, item) },
-    `item:${item._id}`, '', path)
+    `item:${item._id}`, '', path, { pick: { action: '补全', target: path.join(' › '), query: path.join(' ') } })
   if (!r) return
   const filled = targets.filter((f) => applyValue(f, item, r.values?.[f.key], addOption))
   ElMessage.success(`AI 补全了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)
@@ -516,7 +586,7 @@ async function fillCategory(cat) {
     return
   }
   const r = await aiCall({ mode: 'category', path: [cat.label], fields: targets.map(fieldSchema), current: currentValues(cat.fields, container) },
-    `cat:${cat.key}`, '', [cat.label])
+    `cat:${cat.key}`, '', [cat.label], { pick: { action: '补全', target: cat.label, query: `${cat.label} ${targets.map((f) => f.label).join(' ')}` } })
   if (!r) return
   const filled = targets.filter((f) => applyValue(f, container, r.values?.[f.key], addOption))
   ElMessage.success(`AI 填写了 ${filled.length} 项：${filled.map((f) => f.label).join('、') || '无'}`)

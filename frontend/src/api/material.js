@@ -43,6 +43,29 @@ export const deleteMaterialSource = (book, withCandidates = false) => post('/api
 export const pinMaterial = (id, pinned) => post(`/api/material/${id}/pin`, { pinned })
 /** AI 语义检索（使用「模型配置」中启用的模型）：{query, category?, tags?, excludeBooks?, limit?} → {expansion, considered, results: [{material, score, reason}]} */
 export const semanticSearch = (body) => post('/api/material/semantic-search', body, { timeout: 150000 })
+/* ---------- 向量检索（本地 embedding 模型，如 bge-small-zh；不用大模型） ---------- */
+/** 选用的向量模型 id（素材库页与素材选择弹窗共用）；空 = 服务端默认 */
+const VECTOR_MODEL_KEY = 'nan_novel.material.vectorModel'
+export function getVectorModelId() {
+  try {
+    return localStorage.getItem(VECTOR_MODEL_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+export function setVectorModelId(id) {
+  try {
+    localStorage.setItem(VECTOR_MODEL_KEY, id || '')
+  } catch {
+    /* 隐私模式等：不记住也能用 */
+  }
+}
+/** {query, modelId?, category?, tags?, excludeBooks?, limit?} → {results[{material, score(0–100), similarity}], total, considered, model, modelId, device, encoded, cached, ms} */
+export const vectorSearch = (body) => post('/api/material/vector-search', { modelId: getVectorModelId() || undefined, ...body }, { timeout: 200000 })
+/** 全部素材的向量化情况（encode=false）/ 一键全部向量化 → {total, cached, encoded, pending, model, device, ms} */
+export const vectorIndex = (encode = false) => post('/api/material/vector-index', { modelId: getVectorModelId() || undefined, encode }, { timeout: 600000 })
+/** 向量检索后勾选 / 没勾选的素材 {query, modelId, shownIds, pickedIds, context}（以后微调向量模型用）；失败不打扰 */
+export const vectorFeedback = (body) => post('/api/material/vector-feedback', body).catch(() => null)
 export const getMaterial = (id) => get(`/api/material/${id}`)
 /** 新增（无 id）或修改 */
 export const saveMaterial = (m) => post('/api/material/save', m)
