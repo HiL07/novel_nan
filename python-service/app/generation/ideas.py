@@ -244,11 +244,12 @@ def _parse(text: str, local: dict | None) -> dict:
         raise IdeaError(f"{e}{hint}") from e
 
 
-def _run_api(api: dict, messages: list[dict], max_tokens: int) -> tuple[dict, str]:
+def _run_api(api: dict, messages: list[dict], max_tokens: int, temperature: float = 0.9,
+             json_mode: bool = True) -> tuple[dict, str]:
     cfg = llm_client.ModelConfig(**api)
     try:
-        return llm_client.complete(cfg, messages, max_tokens=max_tokens, temperature=0.9, top_p=0.95,
-                                   json_mode=True, timeout=170), cfg.model
+        return llm_client.complete(cfg, messages, max_tokens=max_tokens, temperature=temperature, top_p=0.95,
+                                   json_mode=json_mode, timeout=170), cfg.model
     except llm_client.LLMError as e:
         raise IdeaError(f"大模型调用失败：{e}") from e
 
@@ -261,6 +262,8 @@ def _run_local(local: dict, messages: list[dict], max_tokens: int, temperature: 
         raise IdeaError("有章节正在生成或润色，完成后再用本地模型构思")
     if local_jobs.gpu_busy():
         raise IdeaError("有训练任务正在使用 GPU，请等待训练完成或换用大模型")
+    if inference.extract_busy():
+        raise IdeaError("小说提取正在使用本地模型，请等待提取完成或换用大模型")
     base_id, adapter_id = local["baseId"], local.get("adapterId") or None
     try:
         if adapter_id:
@@ -395,8 +398,9 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
         # 角色卡这类字段多的分组：按字段类型估算每项输出长度，避免截断
         per_item = sum(FILL_TOKEN_BUDGET[f["type"]] for f in fields) + 60
         max_tokens = min(8000, max(350, per_item) * count + 300)
-    elif plain_text := (local and mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")):
-        # 本地小模型按 JSON 输出很不稳定：单个文本字段直接要正文
+    elif plain_text := ((local or req.get("gguf")) and mode == "field" and len(fields) == 1
+                        and fields[0]["type"] in ("text", "textarea")):
+        # 本地小模型（含 GGUF）按 JSON 输出很不稳定（实测会原样返回字段名）：单个文本字段直接要正文
         f = fields[0]
         size = ("一个简短的名称或短语（20 字内）" if f["type"] == "text"
                 else "润色扩写后的完整内容" if polish else "一段 80~200 字的具体描述")
@@ -414,6 +418,7 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
                 {"role": "user", "content": user}]
     # 本地：JSON 输出用基础模型（文风适配器常写完 JSON 不停、格式出错）；单个文本字段直接要正文，保留适配器的文风
     r, model_name = (_run_local(local, messages, max_tokens, temperature=0.5, use_adapter=bool(plain_text)) if local
+                     else _run_api(req["api"], messages, max_tokens, temperature=0.5, json_mode=False) if plain_text
                      else _run_api(req["api"], messages, max_tokens))
     if plain_text:
         value = _plain_value(r["text"], fields[0]["type"], truncated=r["finishReason"] == "length")

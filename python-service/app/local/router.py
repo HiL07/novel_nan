@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import text_loader
-from . import download, hardware, inference, jobfiles, jobs, registry, settings, train_config
+from . import download, embedding, hardware, llama, reranker, inference, jobfiles, jobs, registry, settings, train_config
 
 log = logging.getLogger("local.api")
 router = APIRouter(prefix="/api/local", tags=["local-models"])
@@ -48,9 +48,11 @@ def system():
 
 
 def _with_load_status(models: list[dict]) -> list[dict]:
-    st = inference.status()
+    st, emb, rr = inference.status(), embedding.status(), reranker.status()
     for m in models:
-        m["loadStatus"] = st["status"] if st["baseId"] == m["id"] else "idle"
+        s = {"embedding": emb, "reranker": rr}.get(m["task"], st)
+        # GGUF 由外部的 llama.cpp 运行，本服务从不加载
+        m["loadStatus"] = s["status"] if s["baseId"] == m["id"] and m["task"] != "gguf" else "idle"
         m["managed"] = registry.is_managed(m)
     return models
 
@@ -148,6 +150,13 @@ def delete_model(model_id: str):
     st = inference.status()
     if st["baseId"] == model_id and st["status"] in ("loaded", "loading"):
         raise LocalError(400, "该模型正在使用中，请先卸载")
+    if embedding.status()["baseId"] == model_id:
+        embedding.unload()
+    if reranker.status()["baseId"] == model_id:
+        reranker.unload()
+    ls = llama.status()
+    if ls["baseId"] == model_id and ls["status"] in ("starting", "running"):
+        raise LocalError(400, "该 GGUF 正在 llama.cpp 中运行，请先在「llama.cpp」页停止")
     _guard(registry.delete_base, model_id)
     return ok()
 
@@ -273,6 +282,117 @@ def inference_evaluate(req: EvaluateReq):
     return ok(_guard(inference.evaluate, req.text, max_tokens=req.maxTokens))
 
 
+# ---------------------------------------------------------------- 向量（embedding）模型
+
+class EmbedLoadReq(BaseModel):
+    baseId: Optional[str] = None  # 空 = 默认向量模型
+
+
+class SimilarityReq(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    texts: list[str] = Field(min_length=1, max_length=200)
+    baseId: Optional[str] = None  # 空 = 已加载的 / 默认向量模型
+
+
+@router.get("/embedding")
+def embedding_status():
+    return ok(embedding.status())
+
+
+@router.post("/embedding/load")
+def embedding_load(req: EmbedLoadReq):
+    return ok(_guard(embedding.load, req.baseId or None))
+
+
+@router.post("/embedding/unload")
+def embedding_unload():
+    return ok(embedding.unload())
+
+
+@router.post("/embedding/similarity")
+def embedding_similarity(req: SimilarityReq):
+    """主动调用 / 调试：query 与每段文本的余弦相似度。"""
+    return ok(_guard(embedding.similarity, req.query, req.texts, req.baseId or None))
+
+
+class RerankReq(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    texts: list[str] = Field(min_length=1, max_length=200)
+    baseId: Optional[str] = None  # 空 = 已加载的 / 默认重排模型
+
+
+@router.get("/reranker")
+def reranker_status():
+    return ok(reranker.status())
+
+
+@router.post("/reranker/unload")
+def reranker_unload():
+    return ok(reranker.unload())
+
+
+@router.post("/reranker/score")
+def reranker_score(req: RerankReq):
+    """主动调用 / 调试：query 与每段文本的相关度（0–1）。"""
+    return ok(_guard(reranker.score, req.query, req.texts, req.baseId or None))
+
+
+# ---------------------------------------------------------------- llama.cpp（GGUF）
+
+class LlamaModelReq(BaseModel):
+    baseId: Optional[str] = None                        # 已登记的 GGUF
+    path: Optional[str] = Field(default=None, max_length=1000)  # 或直接给 .gguf 路径
+    ctx: int = Field(default=12288, ge=512, le=131072)
+    ngl: int = Field(default=99, ge=0, le=999)          # 放进显存的层数；99 = 全部
+
+
+class LlamaStartReq(LlamaModelReq):
+    stopExternal: bool = False  # 端口上有别的 llama-server（如 start-llama.bat 开的）时，确认后结束它
+
+
+class LlamaSettingsReq(BaseModel):
+    serverPath: str = Field(min_length=1, max_length=1000)
+
+
+def _llama(fn, *args):
+    try:
+        return fn(*args)
+    except (llama.LlamaError, registry.RegistryError) as e:
+        raise LocalError(400, str(e), getattr(e, "data", None)) from e
+
+
+@router.get("/llama")
+def llama_status():
+    return ok({**llama.status(), "settings": llama.get_settings(), "gpu": hardware.gpu_info()})
+
+
+@router.post("/llama/settings")
+def llama_settings(req: LlamaSettingsReq):
+    return ok(_llama(llama.save_settings, req.serverPath))
+
+
+@router.post("/llama/check")
+def llama_check(req: LlamaModelReq):
+    """启动前检查：文件、llama-server、端口、显存估算 → {level ok|warn|error, problems[], estimate, …}。"""
+    return ok(_llama(llama.check, req.baseId or None, req.path, req.ctx, req.ngl))
+
+
+@router.post("/llama/start")
+def llama_start(req: LlamaStartReq):
+    """启动（已有本页启动的 llama 时先关掉它）；异步加载，状态见 GET /llama。"""
+    return ok(_llama(llama.start, req.baseId or None, req.path, req.ctx, req.ngl, req.stopExternal))
+
+
+@router.post("/llama/stop")
+def llama_stop():
+    return ok(llama.stop())
+
+
+@router.get("/llama/log")
+def llama_log(lines: int = 80):
+    return ok({"text": llama.tail(lines)})
+
+
 # ---------------------------------------------------------------- 训练任务
 
 class SampleFile(BaseModel):
@@ -388,6 +508,8 @@ def start_training(req: TrainReq):
     base = _guard(registry.get_base, req.baseModelId)
     if not base["exists"]:
         raise LocalError(400, f"模型目录不存在：{base['path']}")
+    if base["task"] != "causal-lm":
+        raise LocalError(400, registry.not_generation_reason(base, "做 LoRA 风格微调"))
     deps = hardware.deps_info()
     if not deps["ready"]:
         raise LocalError(400, "未安装本地训练依赖（torch / transformers / peft / accelerate），见 requirements-local.txt")

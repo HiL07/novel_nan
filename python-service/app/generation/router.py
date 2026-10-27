@@ -5,9 +5,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from .. import llm_client
-from ..local import inference, registry
+from ..local import inference, llama, registry
 from ..local.router import LocalError, ok
-from . import chapter, defaults, ideas, spec as spec_mod, store
+from . import chapter, defaults, facts as facts_mod, ideas, spec as spec_mod, store
 from .backends import GenerationError
 
 router = APIRouter(prefix="/api/gen", tags=["novel-generation"])
@@ -18,13 +18,14 @@ def _guard(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except (store.StoreError, registry.RegistryError, ideas.IdeaError, GenerationError, chapter.JobError,
-            RuntimeError) as e:
+            llama.LlamaError, RuntimeError) as e:
         raise LocalError(400, str(e)) from e
 
 
 class ModelRef(BaseModel):
-    # local = 本机模型（+ LoRA 适配器）；api = 大模型（Java「模型配置」中启用的）；remote = 远程 GPU 模型（预留）
-    source: Literal["local", "api", "remote"] = "local"
+    # local = 本机模型（safetensors + LoRA 适配器）；api = 大模型（Java「模型配置」中启用的）；
+    # gguf = 「llama.cpp」页正在运行的 GGUF 模型；remote = 远程 GPU 模型（预留）
+    source: Literal["local", "api", "gguf", "remote"] = "local"
     baseId: Optional[str] = None
     adapterId: Optional[str] = None  # 本地 LoRA 适配器（须与 baseId 兼容）；None = 只用基础模型
     # 大模型：生成时由 Java 附带「模型配置」中启用的模型；这里只存展示用的名称（如 DeepSeek · deepseek-chat）
@@ -136,6 +137,8 @@ def load_model(novel_id: str):
     """加载工作区所选的模型（+ 所选 LoRA 适配器；同一基础模型已驻留时只切换适配器）。"""
     novel = _guard(store.get_novel, novel_id)
     m = novel["model"]
+    if m.get("source") == "gguf":
+        raise LocalError(400, "GGUF 工作区用「llama.cpp」页启动的模型，不在这里加载")
     if m.get("source") != "local":
         raise LocalError(400, "大模型工作区不需要加载本地模型（润色时会自动加载所选的本地模型）")
     return ok(_guard(inference.load, m["baseId"], m.get("adapterId") or None, "auto"))
@@ -196,12 +199,17 @@ class IdeasReq(BaseModel):
     spec: Optional[list] = None   # kind=fill / direction / chat：设定编辑器当前（可能未保存）的设定
     api: Optional[llm_client.ModelConfig] = None  # 用大模型：Java 附带的配置
     local: Optional[PolishReq] = None             # 用本地模型：{baseId, adapterId}（enabled 忽略）
+    gguf: bool = False                            # 用「llama.cpp」页正在运行的 GGUF 模型
 
 
 @router.post("/novels/{novel_id}/ideas")
 def novel_ideas(novel_id: str, req: IdeasReq):
     """AI 构思（书名 / 大纲 / 下一章标题与目标），结合设定与素材；只返回建议，不保存。经 Java 转发。"""
-    return ok(_guard(ideas.generate, novel_id, req.model_dump()))
+    data = req.model_dump()
+    if data.pop("gguf"):
+        # 本机小模型：走大模型的调用方式，但单个文本字段同本地模型一样直接要正文（见 ideas._fill）
+        data["api"], data["local"], data["gguf"] = _guard(llama.api_config), None, True
+    return ok(_guard(ideas.generate, novel_id, data))
 
 
 @router.post("/novels/{novel_id}/chapters/{index}/polish")
@@ -221,6 +229,53 @@ class EditChapterReq(BaseModel):
 def edit_chapter(novel_id: str, index: int, req: EditChapterReq):
     """手动修改章节（AI 生成的标题 / 目标 / 正文 / 摘要都可以改）；只改传入的字段。"""
     return ok(_guard(chapter.edit_chapter, novel_id, index, req.model_dump()))
+
+
+class RecheckReq(BaseModel):
+    digest: bool = True    # 重新抽取本章摘要与故事事实（替换账本里本章的旧记录）
+    review: bool = False   # 重新检查一致性
+    api: Optional[llm_client.ModelConfig] = None  # 大模型工作区：经 Java 转发时附带
+
+
+@router.post("/novels/{novel_id}/chapters/{index}/recheck")
+def recheck_chapter(novel_id: str, index: int, req: RecheckReq):
+    """已完成章节：重新提取事实 / 重新检查一致性（后台任务 kind=recheck，进度见 /jobs/{jobId}）。
+    本地模型工作区由前端直接调用；大模型工作区经 Java 转发。"""
+    return ok(_guard(chapter.start_recheck, novel_id, index, req.model_dump()))
+
+
+class IgnoreReviewReq(BaseModel):
+    ignored: bool = True
+
+
+@router.post("/novels/{novel_id}/chapters/{index}/review/ignore")
+def ignore_review(novel_id: str, index: int, req: IgnoreReviewReq):
+    return ok(_guard(chapter.set_review_ignored, novel_id, index, req.ignored))
+
+
+# ---------------------------------------------------------------- 故事账本
+
+@router.get("/novels/{novel_id}/facts")
+def get_facts(novel_id: str):
+    """伏笔 / 角色状态 / 时间线（每章写完自动抽取，可手动修改）。"""
+    _guard(store.get_novel, novel_id)
+    return ok(_guard(store.get_facts, novel_id))
+
+
+class FactsReq(BaseModel):
+    facts: dict
+
+
+@router.post("/novels/{novel_id}/facts/update")
+def update_facts(novel_id: str, req: FactsReq):
+    """保存手动修改后的整个账本（作者新建 / 修改的条目带 manual=true，AI 之后只追加历史、不改它）。"""
+    job = chapter.active_job()
+    if job and job["novelId"] == novel_id:
+        raise LocalError(400, "本工作区正在生成或处理章节，完成后再修改账本")
+    _guard(store.get_novel, novel_id)
+    f = facts_mod.sanitize(req.facts)
+    _guard(store.save_facts, novel_id, f)
+    return ok(f)
 
 
 @router.post("/novels/{novel_id}/chapters/{index}/polish/revert")

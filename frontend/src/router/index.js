@@ -77,6 +77,12 @@ const routes = [
     name: 'aiLocal',
     component: () => import('@/views/ai/local.vue'),
     meta: { title: '本地模型', icon: 'Monitor' }
+  },
+  {
+    path: '/ai/llama',
+    name: 'aiLlama',
+    component: () => import('@/views/ai/llama.vue'),
+    meta: { title: 'llama.cpp', icon: 'VideoPlay' }
   }
 ]
 
