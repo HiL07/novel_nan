@@ -14,6 +14,18 @@ export const RECOMMENDED_MODELS = [
     size: '约 15 GB',
     note: '8GB 显存只能 4bit 推理（约 5.5 GB，需关掉其他占显存的程序）；本机训练会超出资源，适合加载远程训练的 7B 适配器',
     big: true
+  },
+  {
+    repoId: 'BAAI/bge-small-zh-v1.5',
+    size: '约 0.1 GB',
+    note: '向量（embedding）模型：只用于素材库「向量检索」，不能生成 / 微调',
+    embedding: true
+  },
+  {
+    repoId: 'BAAI/bge-reranker-v2-m3',
+    size: '约 2.1 GB',
+    note: '重排模型：给素材检索结果按相关度重新排序（GPU 约 1.1 GB 显存），不能生成 / 微调',
+    embedding: true
   }
 ]
 
@@ -44,7 +56,57 @@ export const deleteModel = (id) => post(`/api/local/models/${id}/delete`)
  *  推理时按服务当前驻留情况估算：同一基础模型已加载 → 只算适配器增量（resident: true） */
 export const estimate = (body) => post('/api/local/estimate', body)
 
+/** task：causal-lm = 生成模型；embedding = 向量模型；reranker = 重排模型。后两者只用于素材检索，不能推理 / 微调 / 写小说 */
+export const isEmbeddingModel = (m) => m?.task === 'embedding'
+export const isRerankerModel = (m) => m?.task === 'reranker'
+/** 只用于检索的模型（向量 / 重排）：生成、微调、工作区的模型下拉里不出现 */
+export const isRetrievalModel = (m) => isEmbeddingModel(m) || isRerankerModel(m)
+/** GGUF（llama.cpp 格式）：只登记展示，本服务不能推理 / 训练，要用 llama-server 跑后到「模型配置」添加 */
+export const isGgufModel = (m) => m?.task === 'gguf'
+/** 可在本服务推理 / 加适配器 / 微调的 Hugging Face 生成模型（所有生成模型下拉框都用它过滤） */
+export const isGenerationModel = (m) => (m?.task || 'causal-lm') === 'causal-lm'
+
+/** 模型种类：本地模型页的醒目标签与图例 */
+export const MODEL_KINDS = {
+  'causal-lm': { label: '生成模型', type: 'primary', desc: 'Hugging Face 格式，本服务可直接推理、挂 LoRA 适配器、风格微调、写小说 / 提取' },
+  embedding: { label: '向量模型', type: 'success', desc: '如 bge-small：把素材转成向量，用于素材库「向量检索」，不能生成文字' },
+  reranker: { label: '重排模型', type: 'success', desc: '如 bge-reranker：给检索结果按相关度重新排序，不能生成文字' },
+  gguf: { label: 'GGUF · llama.cpp', type: 'warning', desc: '量化后的单文件格式，只能用 llama.cpp 运行：启动 llama-server 后到「模型配置」添加' }
+}
+export const modelKind = (m) => MODEL_KINDS[m?.task] || MODEL_KINDS['causal-lm']
+
+/* ---------- 向量（embedding）模型 ---------- */
+/** → {status: idle|loading|loaded|error, baseId, name, device: cuda|cpu, dim, error} */
+export const getEmbedding = () => get('/api/local/embedding')
+export const unloadEmbedding = () => post('/api/local/embedding/unload')
+/** {query, texts[], baseId?} → {scores[], device, model, instruction, ms}；未加载时自动加载 */
+export const embeddingSimilarity = (body) => post('/api/local/embedding/similarity', body)
+/* ---------- 重排模型 ---------- */
+export const getReranker = () => get('/api/local/reranker')
+export const unloadReranker = () => post('/api/local/reranker/unload')
+/** {query, texts[], baseId?} → {scores[0–1], device, model, ms}；未加载时自动加载 */
+export const rerankerScore = (body) => post('/api/local/reranker/score', body)
+
 /* ---------- LoRA 适配器 ---------- */
+/* llama.cpp（GGUF）：由 Python 启动 / 停止 llama-server（同一时间一个）；运行后各处模型来源可选「GGUF」 */
+export const getLlama = () => get('/api/local/llama')
+export const saveLlamaSettings = (serverPath) => post('/api/local/llama/settings', { serverPath })
+/** body: {baseId? | path?, ctx, ngl} → {level ok|warn|error, problems[{level, text}], model, estimate, gpu, portOwner} */
+export const checkLlama = (body) => post('/api/local/llama/check', body)
+/** body: {baseId? | path?, ctx, ngl, stopExternal?}；端口上有别的 llama-server 时 400 + data.needConfirm */
+export const startLlama = (body) => post('/api/local/llama/start', body)
+export const stopLlama = () => post('/api/local/llama/stop')
+export const getLlamaLog = (lines = 80) => get('/api/local/llama/log', { params: { lines } })
+/** llama 是否正在运行（模型来源「GGUF」只有运行时才能选）→ 运行中的状态对象，否则 null */
+export async function runningLlama() {
+  try {
+    const r = await getLlama()
+    return r.code === 0 && r.data.status === 'running' ? r.data : null
+  } catch {
+    return null
+  }
+}
+
 export const listAdapters = () => get('/api/local/adapters')
 export const renameAdapter = (id, name) => post(`/api/local/adapters/${id}/rename`, { name })
 export const deleteAdapter = (id) => post(`/api/local/adapters/${id}/delete`)

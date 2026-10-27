@@ -100,6 +100,7 @@
 
 <script setup>
 import { onActivated, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { MODEL_PRESETS, activateModel, deleteModel, listModels, saveModel, verifyModel } from '@/api/aiModel'
@@ -111,6 +112,9 @@ const STATUS = {
   FAILED: { label: '验证失败', type: 'danger' }
 }
 
+const LLAMACPP_PRESET = MODEL_PRESETS.find((p) => p.baseUrl.includes('127.0.0.1:8001'))?.label
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const models = ref([])
 const verifyingId = ref(null)
@@ -237,7 +241,17 @@ async function onDelete(row) {
   loadModels()
 }
 
-onActivated(loadModels)
+onActivated(() => {
+  loadModels()
+  // 从「本地模型」的 GGUF「使用方法」跳来：?llamacpp=1&name=…&model=… → 打开新增表单并填好 llama.cpp 地址
+  if (route.query.llamacpp) {
+    openForm()
+    applyPreset(LLAMACPP_PRESET)
+    if (route.query.name) form.name = String(route.query.name).slice(0, 60)
+    if (route.query.model) form.model = String(route.query.model).slice(0, 100)
+    router.replace({ path: route.path })
+  }
+})
 </script>
 
 <style scoped>

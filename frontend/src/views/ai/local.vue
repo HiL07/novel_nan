@@ -43,16 +43,37 @@
           <div class="toolbar">
             <el-button type="primary" :icon="FolderAdd" @click="registerDlg.visible = true">登记本地模型</el-button>
             <el-button :icon="Download" @click="downloadDlg.visible = true">下载模型</el-button>
-            <span class="toolbar-hint">登记只记录路径、不复制文件；仅支持 Hugging Face 格式（config.json + safetensors），GGUF 不能用于训练</span>
+            <span class="toolbar-hint">登记只记录路径、不复制文件；支持 Hugging Face 目录（config.json + safetensors）和 GGUF 文件（只登记展示，用 llama.cpp 运行）</span>
+          </div>
+          <div class="kind-legend">
+            <span v-for="(k, key) in MODEL_KINDS" :key="key" class="kind-legend-item">
+              <el-tag :type="k.type" effect="dark" size="small">{{ k.label }}</el-tag>
+              <span>{{ k.desc }}</span>
+            </span>
           </div>
           <el-empty v-if="!models.length" description="还没有基础模型，请登记本机已有的模型目录或下载一个小模型" />
           <el-table v-else :data="models" stripe>
             <el-table-column prop="name" label="名称" min-width="170" show-overflow-tooltip />
-            <el-table-column label="类型" min-width="150">
-              <template #default="{ row }">{{ row.modelType }} · {{ row.architecture }}</template>
+            <el-table-column label="种类 / 能力" min-width="300">
+              <template #default="{ row }">
+                <div class="kind-row">
+                  <el-tag :type="modelKind(row).type" effect="dark" :title="modelKind(row).desc">{{ modelKind(row).label }}</el-tag>
+                  <el-tag
+                    v-for="c in capabilities(row)"
+                    :key="c.label"
+                    :type="c.type || ''"
+                    effect="plain"
+                    size="small"
+                    :title="c.title"
+                  >{{ c.label }}</el-tag>
+                </div>
+                <div class="kind-tech">{{ techInfo(row) }}</div>
+              </template>
             </el-table-column>
             <el-table-column label="参数 / 大小" width="140">
-              <template #default="{ row }">{{ (row.numParams / 1e9).toFixed(2) }}B · {{ gb(row.sizeBytes) }}</template>
+              <template #default="{ row }">
+                <template v-if="row.numParams">{{ (row.numParams / 1e9).toFixed(2) }}B · </template>{{ gb(row.sizeBytes) }}
+              </template>
             </el-table-column>
             <el-table-column label="路径" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
@@ -61,14 +82,19 @@
             </el-table-column>
             <el-table-column label="状态" width="110">
               <template #default="{ row }">
-                <el-tag v-if="!row.exists" type="danger" size="small">目录不存在</el-tag>
+                <el-tag v-if="!row.exists" type="danger" size="small">{{ isGgufModel(row) ? '文件不存在' : '目录不存在' }}</el-tag>
+                <el-tag v-else-if="isGgufModel(row)" type="info" size="small" title="由 llama.cpp 在本服务之外运行">llama.cpp 外部运行</el-tag>
                 <el-tag v-else :type="LOAD_STATUS[row.loadStatus].type" size="small">{{ LOAD_STATUS[row.loadStatus].label }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="210" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" :disabled="!row.exists" @click="goInfer(row.id)">推理测试</el-button>
-                <el-button link type="primary" :disabled="!row.exists" @click="goTrain(row.id)">风格微调</el-button>
+                <el-button v-if="isRetrievalModel(row)" link type="primary" :disabled="!row.exists" @click="openSimilarity(row)">{{ isRerankerModel(row) ? '相关度测试' : '相似度测试' }}</el-button>
+                <el-button v-else-if="isGgufModel(row)" link type="primary" @click="openGgufHelp(row)">使用方法</el-button>
+                <template v-else>
+                  <el-button link type="primary" :disabled="!row.exists" @click="goInfer(row.id)">推理测试</el-button>
+                  <el-button link type="primary" :disabled="!row.exists" @click="goTrain(row.id)">风格微调</el-button>
+                </template>
                 <el-button link type="danger" @click="onDeleteModel(row)">删除</el-button>
               </template>
             </el-table-column>
@@ -81,7 +107,7 @@
             <el-form-item label="基础模型" required>
               <el-select v-model="train.baseModelId" placeholder="选择基础模型" style="width: 360px">
                 <el-option
-                  v-for="m in models.filter((x) => x.exists)"
+                  v-for="m in genModels"
                   :key="m.id"
                   :label="`${m.name}（${(m.numParams / 1e9).toFixed(1)}B）`"
                   :value="m.id"
@@ -228,7 +254,7 @@
         <el-tab-pane label="推理测试" name="infer">
           <div class="infer-load">
             <el-select v-model="infer.baseId" placeholder="基础模型" style="width: 240px" @change="infer.adapterId = ''">
-              <el-option v-for="m in models.filter((x) => x.exists)" :key="m.id" :label="m.name" :value="m.id" />
+              <el-option v-for="m in genModels" :key="m.id" :label="m.name" :value="m.id" />
             </el-select>
             <el-select v-model="infer.adapterId" placeholder="不使用适配器（原始模型）" clearable style="width: 300px">
               <el-option label="不使用适配器（原始基础模型）" value="" />
@@ -318,9 +344,16 @@
     <el-dialog v-model="registerDlg.visible" title="登记本地模型" width="600px">
       <el-form label-width="80px">
         <el-form-item label="名称"><el-input v-model="registerDlg.name" placeholder="如：Qwen2.5-1.5B-Instruct" /></el-form-item>
-        <el-form-item label="目录">
-          <el-input v-model="registerDlg.path" placeholder="包含 config.json 和 .safetensors 的文件夹路径" />
-          <div class="hint">例如 D:\workplace\llama.cpp_cuda12-12.4\HuggingFac\Qwen2.5-1.5B-Instruct\Qwen2.5-1.5B-Instruct</div>
+        <el-form-item label="路径">
+          <el-input v-model="registerDlg.path" placeholder="Hugging Face 模型文件夹，或 .gguf 文件路径" />
+          <div class="hint">
+            <el-tag type="primary" effect="dark" size="small">生成模型</el-tag> / <el-tag type="success" effect="dark" size="small">向量·重排</el-tag>
+            填包含 config.json 和 .safetensors 的文件夹，例如 D:\workplace\llama.cpp_cuda12-12.4\HuggingFac\Qwen2.5-1.5B-Instruct\Qwen2.5-1.5B-Instruct
+          </div>
+          <div class="hint">
+            <el-tag type="warning" effect="dark" size="small">GGUF</el-tag>
+            填 .gguf 文件（多分片填任一个即可）：只登记展示，不能在本服务推理 / 微调，要用 llama.cpp 运行
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -329,11 +362,63 @@
       </template>
     </el-dialog>
 
+    <!-- GGUF：llama.cpp 使用方法 -->
+    <el-dialog v-model="ggufDlg.visible" :title="`使用 GGUF 模型 · ${ggufDlg.model?.name || ''}`" width="680px">
+      <template v-if="ggufDlg.model">
+        <p class="gguf-p">
+          GGUF 是 llama.cpp 的量化格式，本服务（Transformers）加载不了，也不能挂适配器或微调。用 llama.cpp 启动后，它就是一个本机的
+          OpenAI 兼容服务，在「模型配置」里添加后可用于<b>小说提取、AI 构思、大模型写作</b>，不花钱。
+        </p>
+        <div class="section-title">1. 在 llama.cpp 目录里启动（-ngl 99 = 尽量放 GPU，显存不够就调小）</div>
+        <div class="gguf-cmd">
+          <code>{{ ggufCommand }}</code>
+          <el-button size="small" @click="copyText(ggufCommand)">复制</el-button>
+        </div>
+        <div class="section-title">2. 到「模型配置」添加：地址 http://127.0.0.1:8001/v1，并发 1，然后验证</div>
+        <el-button type="primary" @click="goModelConfig">去模型配置添加</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 向量模型：相似度测试（主动调用 embedding 模型） -->
+    <el-dialog v-model="simDlg.visible" :title="`${simRerank ? '相关度' : '相似度'}测试 · ${simDlg.model?.name || ''}`" width="640px">
+      <div class="sim-state">
+        <template v-if="embedState?.status === 'loaded' && embedState.baseId === simDlg.model?.id">
+          <el-tag type="success" size="small">已加载</el-tag> 运行在 {{ embedState.device === 'cuda' ? 'GPU（fp16）' : 'CPU' }} · {{ embedState.dim }} 维
+          <el-button link type="danger" @click="onUnloadEmbedding">卸载</el-button>
+        </template>
+        <template v-else>
+          <el-tag type="info" size="small">未加载</el-tag> 测试时自动加载（与生成模型互不占用，显存{{ simRerank ? '约 1.1 GB' : '不到 200 MB' }}）
+        </template>
+      </div>
+      <el-form label-width="70px">
+        <el-form-item label="查询"><el-input v-model="simDlg.query" placeholder="如：笑里藏刀的宗门长老" maxlength="2000" /></el-form-item>
+        <el-form-item label="候选文本">
+          <el-input v-model="simDlg.texts" type="textarea" :autosize="{ minRows: 5, maxRows: 12 }" placeholder="每行一段，与查询逐一比较" />
+        </el-form-item>
+      </el-form>
+      <el-table v-if="simDlg.result" :data="simDlg.result.rows" size="small" stripe>
+        <el-table-column :label="simRerank ? '相关度' : '相似度'" width="90">
+          <template #default="{ row }"><b>{{ (row.score * 100).toFixed(1) }}</b></template>
+        </el-table-column>
+        <el-table-column prop="text" label="文本" show-overflow-tooltip />
+      </el-table>
+      <div v-if="simDlg.result" class="hint sim-foot">
+        {{ simDlg.result.device === 'cuda' ? 'GPU' : 'CPU' }} · {{ simDlg.result.ms }} ms
+        <template v-if="simDlg.result.instruction"> · 查询前缀「{{ simDlg.result.instruction }}」</template>
+        · {{ simRerank ? '分数 = 重排模型给出的相关度 × 100，可以当阈值看（30 以上一般算相关）' : '分数 = 余弦相似度 × 100，只看相对高低' }}
+      </div>
+      <template #footer>
+        <el-button @click="simDlg.visible = false">关闭</el-button>
+        <el-button type="primary" :loading="simDlg.loading" :disabled="!simDlg.query.trim() || !simDlg.texts.trim()" @click="onSimilarity">计算{{ simRerank ? '相关度' : '相似度' }}</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 下载模型 -->
     <el-dialog v-model="downloadDlg.visible" title="下载模型" width="660px">
       <div class="rec-list">
         <div v-for="r in RECOMMENDED_MODELS" :key="r.repoId" class="rec-item" :class="{ 'is-active': downloadDlg.repoId === r.repoId }" @click="pickRecommended(r)">
           <b>{{ r.repoId }}</b> <el-tag v-if="r.big" size="small" type="warning" effect="plain">大模型</el-tag>
+          <el-tag v-if="r.embedding" size="small" type="success" effect="plain">检索用</el-tag>
           <span class="hint">{{ r.size }} · {{ r.note }}</span>
         </div>
       </div>
@@ -421,10 +506,13 @@
 
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Folder, FolderAdd, FolderOpened, MagicStick, Monitor, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import {
-  DOWNLOAD_SOURCES, RECOMMENDED_MODELS, cancelJob, checkDownload, listDirs, compareGenerate, deleteAdapter, evaluateAdapter, deleteModel, downloadModel, estimate, generate, getInference,
+  DOWNLOAD_SOURCES, MODEL_KINDS, RECOMMENDED_MODELS, cancelJob, embeddingSimilarity, getEmbedding, getReranker, isEmbeddingModel, isGenerationModel,
+  isGgufModel, isRerankerModel, isRetrievalModel, modelKind,
+  rerankerScore, unloadEmbedding, unloadReranker, checkDownload, listDirs, compareGenerate, deleteAdapter, evaluateAdapter, deleteModel, downloadModel, estimate, generate, getInference,
   getJobLog, getSystem, listAdapters, listJobs, listModels, loadModel, registerModel, renameAdapter,
   startTraining, unloadModel
 } from '@/api/localModel'
@@ -470,6 +558,9 @@ const jobList = ref([])
 const files = ref([])
 const inferState = ref(null)
 
+const router = useRouter()
+/** 生成模型（推理 / 微调用）；向量 / 重排模型只用于素材检索，GGUF 要用 llama.cpp 运行 */
+const genModels = computed(() => models.value.filter((x) => x.exists && isGenerationModel(x)))
 const textFiles = computed(() => files.value.filter((f) => TEXT_EXTS.includes((f.fileExt || '').toLowerCase())))
 const activeJob = computed(() => jobList.value.find((j) => ['queued', 'running'].includes(j.status)))
 const activeTrain = computed(() => activeJob.value?.kind === 'train')
@@ -507,7 +598,7 @@ async function refreshAll() {
     jobList.value = j
     inferState.value = s.inference
     loadError.value = ''
-    if (!train.baseModelId && m.length) train.baseModelId = m.find((x) => x.exists)?.id || ''
+    if (!train.baseModelId && m.length) train.baseModelId = genModels.value[0]?.id || ''
     if (s.deps && !s.deps.qloraReady && train.method === 'qlora') train.method = 'lora'
   } catch (e) {
     loadError.value = `${e.message}（AI 服务地址见 VITE_AI_BASE_URL，请确认 python-service 已启动）`
@@ -534,7 +625,14 @@ async function onRegister() {
   try {
     const name = registerDlg.name.trim() || registerDlg.path.trim().split(/[\\/]/).filter(Boolean).pop()
     const rec = await call(registerModel(name, registerDlg.path.trim()), '登记失败')
-    ElMessage.success(`已登记「${rec.name}」（${(rec.numParams / 1e9).toFixed(2)}B）`)
+    if (isGgufModel(rec)) {
+      ElMessage.success({
+        message: `已登记 GGUF「${rec.name}」（${rec.quant || '未知量化'}）：只作展示，需用 llama.cpp 运行，见该行「使用方法」`,
+        duration: 6000
+      })
+    } else {
+      ElMessage.success(`已登记「${rec.name}」（${(rec.numParams / 1e9).toFixed(2)}B）`)
+    }
     Object.assign(registerDlg, { visible: false, name: '', path: '' })
     refreshAll()
   } catch (e) {
@@ -557,6 +655,50 @@ function readDownloadDir() {
     return localStorage.getItem(DOWNLOAD_DIR_KEY) || ''
   } catch {
     return ''
+  }
+}
+
+const embedState = ref(null)
+const simDlg = reactive({
+  visible: false, model: null, loading: false, result: null, query: '笑里藏刀、表面和善的宗门长老',
+  texts: '角色 · 青云宗执事 · 待人和气，暗中克扣弟子资源，借刀杀人\n角色 · 铁匠老张 · 性格耿直，嗓门大，打铁手艺一流\n势力 · 天剑门 · 以剑立派，门规森严，弟子多为孤儿'
+})
+
+const simRerank = computed(() => isRerankerModel(simDlg.model))
+const retrievalState = () => (simRerank.value ? getReranker() : getEmbedding())
+
+async function openSimilarity(row) {
+  Object.assign(simDlg, { visible: true, model: row, result: null })
+  try {
+    embedState.value = await call(retrievalState(), '获取模型状态失败')
+  } catch {
+    embedState.value = null
+  }
+}
+
+async function onSimilarity() {
+  const texts = simDlg.texts.split('\n').map((t) => t.trim()).filter(Boolean).slice(0, 200)
+  simDlg.loading = true
+  try {
+    const body = { query: simDlg.query.trim(), texts, baseId: simDlg.model.id }
+    const r = await call(simRerank.value ? rerankerScore(body) : embeddingSimilarity(body), '计算失败')
+    const rows = texts.map((text, i) => ({ text, score: r.scores[i] })).sort((a, b) => b.score - a.score)
+    simDlg.result = { ...r, rows }
+    embedState.value = await call(retrievalState(), '获取模型状态失败')
+    refreshAll()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    simDlg.loading = false
+  }
+}
+
+async function onUnloadEmbedding() {
+  try {
+    embedState.value = await call(simRerank.value ? unloadReranker() : unloadEmbedding(), '卸载失败')
+    refreshAll()
+  } catch (e) {
+    ElMessage.error(e.message)
   }
 }
 
@@ -800,6 +942,81 @@ function goTrain(baseId) {
   tab.value = 'train'
 }
 
+/* ---------------- 模型种类 / 能力标签 ---------------- */
+// 8GB 显存本机 QLoRA 的上限（与 CLAUDE.md 的硬件假设一致：0.5B–3B 可训，7B 超出）
+const QLORA_MAX_PARAMS = 3.5e9
+const NO_TRAIN_QUANT = ['gptq', 'awq', 'fp8', 'exl2', 'hqq', 'aqlm']
+
+/** 种类标签后面的能力小标签：[{label, type?, title}] */
+function capabilities(row) {
+  if (isGgufModel(row)) {
+    const out = []
+    if (row.quant) out.push({ label: row.quant, type: 'warning', title: '量化级别：Q4_K_M 体积小、质量够用；Q5 / Q6 / Q8 更接近原模型，也更占显存' })
+    if (row.contextLength) out.push({ label: `上下文 ${Math.round(row.contextLength / 1024)}K`, title: '模型支持的最大上下文；llama-server 的 -c 可以设小一些省显存' })
+    if (row.shardsMissing) out.push({ label: `缺 ${row.shardsMissing} 个分片`, type: 'danger', title: '分片文件不全，llama.cpp 无法加载' })
+    out.push({ label: '不能在应用内运行', type: 'info', title: '本服务用 Transformers 加载，读不了 GGUF；请用 llama.cpp 运行（见「使用方法」）' })
+    return out
+  }
+  if (isRetrievalModel(row)) {
+    return [
+      { label: '素材检索用', type: 'success', title: isRerankerModel(row) ? '素材检索的重排阶段' : '素材检索的向量召回阶段' },
+      { label: '不能生成 / 微调', type: 'info', title: '不是文本生成模型，不会出现在生成 / 微调的模型下拉中' }
+    ]
+  }
+  const out = [{ label: '可直接运行', type: 'success', title: '本服务用 Transformers 加载即可推理（「推理测试」/ 写作工作区 / 小说提取）' }]
+  const n = adapters.value.filter((a) => a.matchedBaseId === row.id).length
+  out.push(n
+    ? { label: `适配器 ${n} 个`, type: 'primary', title: '已有基于此模型训练的 LoRA 适配器，加载时可选择挂上' }
+    : { label: '可加适配器', title: '可以在「风格微调」里训练 LoRA 适配器，生成时挂上改变文风' })
+  const q = (row.quantMethod || '').toLowerCase()
+  if (q) out.push({ label: `已量化 · ${q.toUpperCase()}`, type: 'warning', title: '这是预量化的模型（config.json 里有 quantization_config）' })
+  if (NO_TRAIN_QUANT.includes(q)) {
+    out.push({ label: '不能本机微调', type: 'info', title: `${q.toUpperCase()} 预量化模型无法在本机做 QLoRA` })
+  } else if (row.numParams && row.numParams > QLORA_MAX_PARAMS) {
+    out.push({ label: '仅推理（本机微调超出显存）', type: 'info', title: '8GB 显存约可 QLoRA 微调 3B 以内；更大的模型 4bit 推理仍可行' })
+  } else {
+    out.push({ label: '可 QLoRA 微调', type: 'success', title: '8GB 显存可以 4bit QLoRA 风格微调' })
+  }
+  if (row.hasChatTemplate === false) {
+    out.push({ label: '无对话模板', type: 'danger', title: '基座（续写）模型：构思 / 填写设定 / 提取这类按指令输出的任务效果差，建议用 Instruct 版本' })
+  }
+  return out
+}
+
+/** 第二行的技术信息 */
+function techInfo(row) {
+  if (isGgufModel(row)) {
+    return [row.modelType, row.ggufName, row.shards > 1 ? `${row.shards} 个分片` : '', `GGUF v${row.ggufVersion || '?'}`]
+      .filter(Boolean).join(' · ')
+  }
+  return `${row.modelType} · ${row.architecture}`
+}
+
+/* ---------------- GGUF：llama.cpp 使用方法 ---------------- */
+const ggufDlg = reactive({ visible: false, model: null })
+const ggufCommand = computed(() => {
+  const m = ggufDlg.model
+  if (!m) return ''
+  const ctx = Math.min(m.contextLength || 8192, 8192)
+  return `llama-server -m "${m.path}" --port 8001 -c ${ctx} -ngl 99`
+})
+function openGgufHelp(row) {
+  Object.assign(ggufDlg, { visible: true, model: row })
+}
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选中复制')
+  }
+}
+function goModelConfig() {
+  const m = ggufDlg.model
+  ggufDlg.visible = false
+  router.push({ path: '/ai/model', query: { llamacpp: 1, name: `${m.name}（llama.cpp）`, model: m.ggufName || m.name } })
+}
+
 async function onLoad() {
   try {
     const s = await call(loadModel(infer.baseId, infer.adapterId || null, infer.quantization), '加载失败')
@@ -917,6 +1134,53 @@ onDeactivated(() => clearTimeout(timer))
 }
 .hint {
   margin-left: 8px;
+}
+.kind-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: -4px 0 12px;
+  padding: 8px 12px;
+  background: #f7f8fa;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #606266;
+}
+.kind-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.kind-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.kind-tech {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #a8abb2;
+}
+.gguf-p {
+  margin: 0 0 12px;
+  line-height: 1.7;
+  color: #606266;
+}
+.gguf-cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.gguf-cmd code {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  background: #f4f4f5;
+  border-radius: 4px;
+  font-size: 12px;
+  word-break: break-all;
 }
 .train-form {
   max-width: 980px;

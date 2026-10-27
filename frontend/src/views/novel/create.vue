@@ -89,7 +89,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { CONTEXT_WINDOWS, createNovel, deleteNovel, getGenStatus, listNovels } from '@/api/novelGen'
-import { downloadModel, listAdapters, listModels } from '@/api/localModel'
+import { downloadModel, isGenerationModel, listAdapters, listModels } from '@/api/localModel'
 import { listModels as listAiModels } from '@/api/aiModel'
 import { errorMessage } from '@/api/request'
 
@@ -103,7 +103,7 @@ const apiError = ref('')
 const loadError = ref('')
 const downloading = ref(false)
 
-const localModels = computed(() => models.value.filter((m) => m.exists))
+const localModels = computed(() => models.value.filter((m) => m.exists && isGenerationModel(m)))
 /** 新工作区的默认模型：有可用的大模型就用它，否则用默认的本地模型（进入工作区后可随时切换） */
 const defaultModel = computed(() => {
   const baseId = status.value?.defaultModel.model?.id || localModels.value[0]?.id
@@ -117,6 +117,7 @@ const defaultModelLabel = computed(() => {
   return m.apiName || '还没有可用的大模型（可先创建，稍后在「模型配置」中启用，或在工作区里改用本地模型）'
 })
 const modelLabel = (m) => {
+  if (m?.source === 'gguf') return 'GGUF · llama.cpp 页运行中的模型'
   if (m?.source !== 'local') return `大模型 · ${m?.apiName || '当前启用的模型'}`
   const base = models.value.find((x) => x.id === m.baseId)?.name || m.baseId
   return m.adapterId ? `${base} + ${adapters.value.find((a) => a.id === m.adapterId)?.name || m.adapterId}` : base
