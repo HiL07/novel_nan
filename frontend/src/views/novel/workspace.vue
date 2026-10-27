@@ -7,17 +7,19 @@
         <el-input v-model="titleDraft" class="title-input" maxlength="100" @change="saveTitle" />
         <span class="head-item">
           模型
-          <el-select :model-value="novel.model.source" size="small" style="width: 150px" :disabled="busy" @change="changeSource">
+          <el-select :model-value="novel.model.source" size="small" style="width: 200px" :disabled="busy" @change="changeSource">
             <el-option label="大模型（API）" value="api" />
-            <el-option label="本地模型" value="local" :disabled="!localModels.length" />
+            <el-option label="本地模型（safetensors · 可训练）" value="local" :disabled="!localModels.length" />
+            <el-option :label="llama ? 'GGUF（llama.cpp）' : 'GGUF（llama.cpp · 未启动）'" value="gguf" :disabled="!llama" />
             <el-option label="远程模型（即将支持）" value="remote" disabled />
           </el-select>
           <template v-if="isApi">{{ apiModel ? `${apiModel.name} · ${apiModel.model}` : novel.model.apiName || '当前启用的模型' }}</template>
+          <template v-else-if="isGguf">{{ llama ? llama.name : '—' }}</template>
           <el-select v-else :model-value="novel.model.baseId" size="small" style="width: 200px" :disabled="busy" @change="changeBase">
             <el-option v-for="m in localModels" :key="m.id" :label="m.name" :value="m.id" />
           </el-select>
         </span>
-        <el-tooltip v-if="!isApi" content="LoRA 风格适配器：章节正文用它生成，章节摘要始终用基础模型。切换后点击「加载模型」生效（同一基础模型只切换适配器，不重载）" placement="bottom">
+        <el-tooltip v-if="isLocal" content="LoRA 风格适配器：章节正文用它生成，章节摘要始终用基础模型。切换后点击「加载模型」生效（同一基础模型只切换适配器，不重载）" placement="bottom">
           <el-select
             :model-value="novel.model.adapterId || ''"
             size="small"
@@ -40,6 +42,11 @@
           <el-button v-if="!apiModel" size="small" type="primary" @click="router.push('/ai/model')">去配置模型</el-button>
           <el-button v-if="!apiModel" size="small" @click="detectApi">重新检测</el-button>
         </span>
+        <span v-else-if="isGguf" class="head-item model-state">
+          <el-tag :type="llama ? 'success' : 'warning'" size="small">{{ llama ? 'llama.cpp 运行中' : 'llama.cpp 未启动' }}</el-tag>
+          <el-button v-if="!llama" size="small" type="primary" @click="router.push('/ai/llama')">去启动</el-button>
+          <el-button v-if="!llama" size="small" @click="detectLlama">重新检测</el-button>
+        </span>
         <span v-else class="head-item model-state">
           <el-tag :type="modelReady ? 'success' : inferState?.status === 'loading' ? 'warning' : 'info'" size="small">
             {{ modelReady ? '模型已加载' : inferState?.status === 'loading' ? '加载中…' : '模型未加载' }}
@@ -51,7 +58,7 @@
       <el-alert v-if="inferState?.status === 'error'" type="error" :closable="false" show-icon :title="`模型加载失败：${inferState.error}`" class="mt" />
       <el-alert v-if="isApi && apiError" type="warning" :closable="false" show-icon :title="apiError" class="mt" />
       <el-alert
-        v-if="!isApi && inferState?.status === 'loaded' && !modelReady"
+        v-if="isLocal && inferState?.status === 'loaded' && !modelReady"
         type="info"
         :closable="false"
         show-icon
@@ -70,7 +77,7 @@
             ref="editorRef"
             :config="novel.settings.config"
             :novel-id="novel.id"
-            :ai="{ apiModel, localModels, adapters, model: novel.model }"
+            :ai="{ apiModel, localModels, adapters, llama, model: novel.model }"
             @change="settingsDirty = true"
           >
             <template #actions>
@@ -88,6 +95,7 @@
             :local-models="localModels"
             :adapters="adapters"
             :api-model="apiModel"
+            :llama="llama"
             :next-index="nextIndex"
             @updated="onNovelUpdated"
             @use-chapter="useChapterIdea"
@@ -113,7 +121,12 @@
               >
                 <div class="chapter-line">
                   <span>第{{ c.index }}章 {{ c.title }}</span>
-                  <el-tag size="small" :type="CH_STATUS[c.status]?.type">{{ CH_STATUS[c.status]?.label || c.status }}</el-tag>
+                  <span class="chapter-tags">
+                    <el-tooltip v-if="c.reviewIssues" :content="`一致性检查发现 ${c.reviewIssues} 个问题`" placement="top">
+                      <el-tag size="small" type="danger" effect="plain">{{ c.reviewIssues }}</el-tag>
+                    </el-tooltip>
+                    <el-tag size="small" :type="CH_STATUS[c.status]?.type">{{ CH_STATUS[c.status]?.label || c.status }}</el-tag>
+                  </span>
                 </div>
                 <div class="muted">{{ c.chars }} 字<template v-if="c.totals"> · {{ c.totals.promptTokens + c.totals.completionTokens }} tokens</template></div>
               </div>
@@ -179,15 +192,28 @@
                     <span class="muted hint">{{ localModels.length ? '生成后逐段改写用词与句式，原文保留可恢复；改动过大的段落自动保留原文' : '没有登记本地模型，无法本地润色' }}</span>
                   </div>
                 </el-form-item>
+                <el-form-item label="写作流程">
+                  <div class="polish-row">
+                    <el-tooltip content="动笔前把本章拆成 3~6 个节拍 + 章末钩子，分段写时每段按节拍推进（多 1 次调用）" placement="top">
+                      <el-checkbox :model-value="flow.planChapter" :disabled="busy" @change="(v) => saveFlow('planChapter', v)">先规划节拍</el-checkbox>
+                    </el-tooltip>
+                    <el-tooltip content="写摘要时同时抽取伏笔 / 角色状态 / 时间线，记入「故事账本」，后续章节自动参考（与摘要同一次调用）" placement="top">
+                      <el-checkbox :model-value="flow.extractFacts" :disabled="busy" @change="(v) => saveFlow('extractFacts', v)">提取故事事实</el-checkbox>
+                    </el-tooltip>
+                    <el-tooltip content="写完对照设定、故事账本和前情检查矛盾，只报告不改稿（多 1 次调用；本地小模型默认关闭，查得不准）" placement="top">
+                      <el-checkbox :model-value="flow.reviewChapter" :disabled="busy" @change="(v) => saveFlow('reviewChapter', v)">写完检查一致性</el-checkbox>
+                    </el-tooltip>
+                  </div>
+                </el-form-item>
                 <el-form-item>
                   <el-button :icon="View" :loading="previewing" :disabled="!form.goal.trim()" @click="onPreview">预览上下文</el-button>
                   <el-button v-if="!busy" type="primary" :icon="VideoPlay" :disabled="!form.goal.trim() || !canGenerate" @click="onStart">开始生成</el-button>
                   <el-button v-else type="danger" :icon="VideoPause" @click="onCancel">取消</el-button>
-                  <span v-if="!canGenerate && !busy" class="muted hint">{{ isApi ? '请先在「模型配置」中启用大模型' : '请先加载模型' }}</span>
+                  <span v-if="!canGenerate && !busy" class="muted hint">{{ isApi ? '请先在「模型配置」中启用大模型' : isGguf ? '请先到「llama.cpp」页启动 GGUF 模型' : '请先加载模型' }}</span>
                 </el-form-item>
               </el-form>
 
-              <template v-if="job && job.kind !== 'polish'">
+              <template v-if="job && job.kind === 'chapter'">
                 <div class="progress-row">
                   <el-tag :type="JOB_STATUS[job.status].type">{{ JOB_STATUS[job.status].label }}</el-tag>
                   <span>{{ phaseText(job) }}</span>
@@ -196,6 +222,13 @@
                   <span class="muted">{{ liveChapter?.text.length || 0 }} / {{ liveChapter?.targetChars || form.targetChars }} 字</span>
                 </div>
                 <el-alert v-if="job.error" type="error" :closable="false" show-icon :title="job.error" class="mt" />
+                <ChapterInsight
+                  v-if="liveChapter?.plan || liveChapter?.planError"
+                  :key="`live-${liveChapter.index}`"
+                  :chapter="liveChapter"
+                  live
+                  :current-beat="job.phase === 'writing' ? beatAt(liveChapter) : -1"
+                />
                 <pre ref="liveBox" class="chapter-text">{{ (job.phase === 'polish' && liveChapter?.polishDraft) || liveChapter?.text || '（生成中，首段需要几十秒…）' }}</pre>
                 <ContextReport v-if="job.lastContext" :report="job.lastContext" title="最近一次调用的上下文" />
                 <CallTable v-if="liveChapter?.calls?.length" :calls="liveChapter.calls" :totals="liveChapter.totals" />
@@ -256,11 +289,33 @@
               <div class="muted goal">本章目标：{{ viewChapter.goal }}</div>
               <el-alert v-if="viewChapter.error" type="error" :closable="false" show-icon :title="viewChapter.error" class="mt" />
               <div v-if="viewChapter.summary" class="summary"><b>摘要：</b>{{ viewChapter.summary }}</div>
-              <pre class="chapter-text">{{ showOriginal && viewChapter.originalText ? viewChapter.originalText : (busy && job?.kind === 'polish' && job.chapterIndex === viewChapter.index && liveChapter?.polishDraft) || viewChapter.text }}</pre>
+              <ChapterInsight
+                v-if="viewChapter.status === 'done'"
+                :key="`view-${viewChapter.index}`"
+                :chapter="viewChapter"
+                :can-run="!busy && canGenerate"
+                @recheck="onRecheck"
+                @ignore="onIgnoreReview"
+                @jump="jumpToQuote"
+              />
+              <div v-if="recheckJob" class="progress-row mt">
+                <el-tag type="warning">{{ recheckJob.phase === 'review' ? '一致性检查中' : '提取事实中' }}</el-tag>
+                <span class="muted">第{{ recheckJob.chapterIndex }}章</span>
+                <el-button size="small" type="danger" :icon="VideoPause" @click="onCancel">取消</el-button>
+              </div>
+              <pre class="chapter-text"><template v-if="highlight.parts">{{ highlight.parts[0] }}<mark ref="markEl" class="quote-mark">{{ highlight.parts[1] }}</mark>{{ highlight.parts[2] }}</template><template v-else>{{ shownText }}</template></pre>
               </template>
               <CallTable v-if="viewChapter.calls?.length" :calls="viewChapter.calls" :totals="viewChapter.totals" />
             </div>
           </div>
+        </el-tab-pane>
+
+        <!-- ===================== 故事账本 ===================== -->
+        <el-tab-pane name="facts">
+          <template #label>
+            故事账本<el-badge v-if="openForeshadows" :value="openForeshadows" type="warning" class="facts-badge" />
+          </template>
+          <FactsPanel :novel-id="novel.id" :locked="!!busy" :reload-key="factsKey" @open-count="(n) => (openForeshadows = n)" />
         </el-tab-pane>
       </el-tabs>
     </el-card>
@@ -300,11 +355,13 @@ import { ElMessage, ElMessageBox, ElTable, ElTableColumn, ElTag } from 'element-
 import { Back, Check, CopyDocument, Delete, EditPen, MagicStick, VideoPause, VideoPlay, View } from '@element-plus/icons-vue'
 import SettingsEditor from '@/components/novel-options/SettingsEditor.vue'
 import IdeaPanel from '@/components/novel/IdeaPanel.vue'
+import FactsPanel from '@/components/novel/FactsPanel.vue'
+import ChapterInsight from '@/components/novel/ChapterInsight.vue'
 import {
-  CONTEXT_WINDOWS, cancelGenJob, deleteChapter, editChapter, getChapter, getGenJob, getGenStatus, getNovel, loadNovelModel,
-  polishChapter, previewContext, revertPolish, startChapter, updateNovel
+  CONTEXT_WINDOWS, cancelGenJob, deleteChapter, editChapter, getChapter, getGenJob, getGenStatus, getNovel, ignoreReview,
+  loadNovelModel, polishChapter, previewContext, recheckChapter, revertPolish, startChapter, updateNovel
 } from '@/api/novelGen'
-import { listAdapters, listModels } from '@/api/localModel'
+import { isGenerationModel, listAdapters, listModels, runningLlama } from '@/api/localModel'
 import { listModels as listAiModels } from '@/api/aiModel'
 import { errorMessage } from '@/api/request'
 
@@ -321,7 +378,10 @@ const JOB_STATUS = {
   cancelled: { label: '已取消', type: 'info' },
   failed: { label: '失败', type: 'danger' }
 }
-const LAYER_LABEL = { L0_core: 'L0 核心规则', L1_cards: 'L1 按需设定', L2_story: 'L2 前情', L3_recent: 'L3 最近正文', L4_task: 'L4 本次任务' }
+const LAYER_LABEL = {
+  L0_core: 'L0 核心规则', L1_cards: 'L1 按需设定', L1b_facts: 'L1b 故事账本', L2_story: 'L2 前情', L3_recent: 'L3 最近正文',
+  L4_task: 'L4 本次任务'
+}
 
 /** 分层 token 用量展示 */
 const ContextReport = defineComponent({
@@ -339,10 +399,13 @@ const ContextReport = defineComponent({
         h('div', { class: 'muted mt' }, [
           `已放入设定卡片：${r.included.cards.join('、') || '无'}；前情摘要：${r.included.summaries.length ? r.included.summaries.map((i) => `第${i}章`).join('、') : '无'}`,
           r.included.arcSummary ? '（含前情概要）' : '',
+          r.included.facts ? '；含故事账本' : '',
+          r.included.nextPreview ? '；含下一章预告' : '',
           `；最近正文 ${r.included.recentChars} 字`
         ]),
-        r.dropped.cards.length || r.dropped.summaries.length
-          ? h('div', { class: 'muted' }, `未放入（不相关或超出预算）：${[...r.dropped.cards, ...r.dropped.summaries.map((i) => `第${i}章摘要`)].join('、')}`)
+        r.dropped.cards.length || r.dropped.summaries.length || r.dropped.facts || r.dropped.nextPreview
+          ? h('div', { class: 'muted' }, `未放入（不相关或超出预算）：${[...r.dropped.cards, ...r.dropped.summaries.map((i) => `第${i}章摘要`),
+            ...(r.dropped.facts ? ['故事账本'] : []), ...(r.dropped.nextPreview ? ['下一章预告'] : [])].join('、')}`)
           : null
       ])
     }
@@ -353,7 +416,7 @@ const ContextReport = defineComponent({
 const CallTable = defineComponent({
   props: { calls: Array, totals: Object },
   setup(props) {
-    const TYPE = { segment: '正文分段', summary: '章节摘要', arc: '前情合并' }
+    const TYPE = { segment: '正文分段', summary: '章节摘要', arc: '前情合并', plan: '章节规划', digest: '摘要+事实', review: '一致性检查', polish: '润色' }
     return () => h('div', { class: 'ctx-report' }, [
       h('div', { class: 'col-title' }, `本章 token：输入 ${props.totals.promptTokens} · 输出 ${props.totals.completionTokens} · 调用 ${props.totals.calls} 次`),
       h(ElTable, { data: props.calls, size: 'small' }, () => [
@@ -413,7 +476,15 @@ const modelReady = computed(() => inferState.value?.status === 'loaded' && infer
 const isApi = computed(() => novel.value?.model.source === 'api')
 const apiModel = ref(null)
 const apiError = ref('')
-const canGenerate = computed(() => (isApi.value ? !!apiModel.value : modelReady.value))
+const canGenerate = computed(() => (isApi.value ? !!apiModel.value : isGguf.value ? !!llama.value : modelReady.value))
+
+/* ---- GGUF：「llama.cpp」页启动的模型（没在运行时不能选、不能生成；本地直连 Python，不经 Java） ---- */
+const isGguf = computed(() => novel.value?.model.source === 'gguf')
+const isLocal = computed(() => novel.value?.model.source === 'local')
+const llama = ref(null)
+async function detectLlama() {
+  llama.value = await runningLlama()
+}
 async function detectApi() {
   try {
     const list = await call(listAiModels(), '获取模型配置失败')
@@ -426,7 +497,7 @@ async function detectApi() {
 }
 
 /* ---- 润色：本地基础模型 + 可选 LoRA 适配器 ---- */
-const localModels = computed(() => models.value.filter((m) => m.exists))
+const localModels = computed(() => models.value.filter((m) => m.exists && isGenerationModel(m)))
 const polish = reactive({ mode: 'none', baseId: '', adapterId: '' }) // mode: none | local | remote（预留）
 const polishAdapters = computed(() => adapters.value.filter((a) => a.compat === 'ok' && a.matchedBaseId === polish.baseId))
 const polishLabel = computed(() => {
@@ -464,7 +535,75 @@ function useChapterIdea({ title, goal }) {
 
 function phaseText(j) {
   if (j.phase === 'polish') return `正在润色 ${j.polishDone || 0} / ${j.polishTotal || '?'} 段（首次需加载本地模型）`
-  return j.phase === 'summary' ? '正在生成章节摘要…' : `第 ${j.segment} 段`
+  if (j.phase === 'plan') return '正在规划本章节拍…'
+  if (j.phase === 'review') return '正在检查一致性…'
+  if (j.phase === 'summary') return flow.value.extractFacts ?'正在写摘要并提取故事事实…' : '正在生成章节摘要…'
+  return `第 ${j.segment} 段`
+}
+
+/* ---- 写作流程：规划节拍 / 提取故事事实 / 一致性检查（存在工作区 params；reviewChapter 为 null = 大模型开、本地关） ---- */
+const flow = computed(() => {
+  const p = novel.value?.params || {}
+  return {
+    planChapter: p.planChapter ?? true,
+    extractFacts: p.extractFacts ?? true,
+    reviewChapter: p.reviewChapter ?? isApi.value
+  }
+})
+async function saveFlow(key, value) {
+  try {
+    const n = await call(updateNovel(novel.value.id, { params: { [key]: value } }), '保存失败')
+    novel.value = { ...novel.value, params: n.params }
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+/** 与后端 prompts.beat_at 相同：按已写字数占比估计当前节拍 */
+function beatAt(c) {
+  const n = c?.plan?.beats?.length
+  if (!n) return -1
+  return Math.min(n - 1, Math.floor(((c.text?.length || 0) / Math.max(c.targetChars || 1, 1)) * n))
+}
+
+/* ---- 故事账本 / 重新提取 / 一致性检查 ---- */
+const factsKey = ref(0)
+const openForeshadows = ref(0)
+const recheckJob = computed(() => (busy.value && job.value?.kind === 'recheck' && job.value.chapterIndex === viewChapter.value?.index ? job.value : null))
+async function onRecheck({ digest, review }) {
+  try {
+    job.value = await call(recheckChapter(novel.value.id, viewChapter.value.index, { digest, review }, isApi.value), '启动失败')
+    liveChapter.value = null
+    if (!busy.value) await openChapter(viewChapter.value.index)
+    schedule()
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 6000 })
+  }
+}
+async function onIgnoreReview(ignored) {
+  try {
+    viewChapter.value = await call(ignoreReview(novel.value.id, viewChapter.value.index, ignored), '操作失败')
+    await loadNovel()
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+/* 一致性问题定位：把摘录的原句高亮并滚动到可见 */
+const markEl = ref()
+const highlight = reactive({ quote: '', parts: null })
+const shownText = computed(() => {
+  const c = viewChapter.value
+  if (!c) return ''
+  if (showOriginal.value && c.originalText) return c.originalText
+  return (busy.value && job.value?.kind === 'polish' && job.value.chapterIndex === c.index && liveChapter.value?.polishDraft) || c.text
+})
+watch(shownText, () => Object.assign(highlight, { quote: '', parts: null }))
+async function jumpToQuote(quote) {
+  const text = shownText.value
+  const i = text.indexOf(quote)
+  if (i < 0) return ElMessage.warning(showOriginal.value ? '原文中找不到这句（问题针对的是当前正文）' : '正文中找不到这句（可能已修改）')
+  Object.assign(highlight, { quote, parts: [text.slice(0, i), quote, text.slice(i + quote.length)] })
+  await nextTick()
+  markEl.value?.scrollIntoView({ block: 'center', behavior: 'smooth' })
 }
 const busy = computed(() => job.value && ['queued', 'running'].includes(job.value.status))
 const nextIndex = computed(() => (novel.value?.chapters.length ? novel.value.chapters[novel.value.chapters.length - 1].index + 1 : 1))
@@ -494,6 +633,7 @@ async function loadNovel() {
     titleDraft.value = n.title
     loadError.value = ''
     detectApi() // 大模型工作区生成用；所有工作区的「AI 构思」都用它
+    detectLlama()
     if (first) {
       initPolish(n)
       settingsDirty.value = false
@@ -540,6 +680,11 @@ async function saveAdapter(adapterId) {
 
 /** 切换模型来源（大模型 / 本地模型）；本地默认用原来的基础模型或第一个已登记的 */
 async function changeSource(source) {
+  if (source === 'gguf') {
+    await detectLlama()
+    if (!llama.value) return ElMessage.warning('llama.cpp 没有运行：请先到「llama.cpp」页启动一个 GGUF 模型')
+    return saveModel({ source: 'gguf' }, `已切换为 GGUF：${llama.value.name}`)
+  }
   const model = source === 'api'
     ? { source: 'api', apiName: apiModel.value ? `${apiModel.value.name} · ${apiModel.value.model}` : null }
     : { source: 'local', baseId: novel.value.model.baseId || localModels.value[0]?.id, adapterId: null }
@@ -676,6 +821,15 @@ async function saveChapterEdit() {
     chapterEdit.active = false
     ElMessage.success('已保存修改')
     await loadNovel()
+    if (viewChapter.value.factsStale && canGenerate.value && !busy.value) {
+      try {
+        await ElMessageBox.confirm('正文改过了，要重新提取本章的摘要和故事事实吗？（会替换故事账本里本章的记录，调用一次模型）',
+          '重新提取本章事实', { confirmButtonText: '重新提取', cancelButtonText: '以后再说', type: 'info' })
+      } catch {
+        return
+      }
+      await onRecheck({ digest: true, review: false })
+    }
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -719,6 +873,7 @@ async function onDeleteChapter(index) {
   }
   try {
     await call(deleteChapter(novel.value.id, index), '删除失败')
+    factsKey.value++ // 账本已回滚该章的记录
     view.value = 'new'
     viewChapter.value = null
     await loadNovel()
@@ -752,7 +907,12 @@ function schedule() {
         await nextTick()
         if (liveBox.value) liveBox.value.scrollTop = liveBox.value.scrollHeight
         if (!['queued', 'running'].includes(rest.status)) {
-          if (rest.status === 'succeeded' && rest.kind === 'polish') {
+          if (rest.kind !== 'polish') factsKey.value++ // 章节完成 / 重新提取后账本可能变了
+          if (rest.status === 'failed' && rest.kind === 'recheck') {
+            ElMessage.error({ message: `第${rest.chapterIndex}章处理失败：${rest.error}`, duration: 6000 })
+          } else if (rest.status === 'succeeded' && rest.kind === 'recheck') {
+            ElMessage.success(`第${rest.chapterIndex}章${rest.phase === 'review' ? '一致性检查' : '事实提取'}完成`)
+          } else if (rest.status === 'succeeded' && rest.kind === 'polish') {
             ElMessage.success(`第${rest.chapterIndex}章润色完成`)
           } else if (rest.status === 'succeeded') {
             ElMessage.success(`第${rest.chapterIndex}章完成${rest.phase === 'polish' ? '（已润色）' : ''}`)
@@ -760,7 +920,7 @@ function schedule() {
             form.goal = ''
           }
           await loadNovel()
-          if (rest.status === 'succeeded' && rest.kind !== 'polish') fillFromOutline() // 有大纲时自动填入下一章
+          if (rest.status === 'succeeded' && rest.kind === 'chapter') fillFromOutline() // 有大纲时自动填入下一章
           if (view.value === rest.chapterIndex) await openChapter(rest.chapterIndex)
         }
       } catch {
@@ -871,6 +1031,19 @@ onDeactivated(() => clearTimeout(timer))
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+}
+.chapter-tags {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.facts-badge {
+  margin-left: 4px;
+}
+.quote-mark {
+  padding: 0 2px;
+  background: #fde2e2;
+  border-radius: 2px;
 }
 .totals {
   margin-top: 14px;

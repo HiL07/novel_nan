@@ -4,7 +4,8 @@
 
 novels/<id>/
 ├── novel.json          工作区：标题、模型、上下文窗口、设定（编辑器配置 + 规范化设定）、生成参数、前情概要、token 统计
-└── chapters/0001.json  章节：目标、正文、摘要、状态、每次模型调用的 token 明细
+├── facts.json          故事账本：伏笔 / 角色状态 / 时间线（见 facts.py）
+└── chapters/0001.json  章节：目标、规划、正文、摘要、本章事实、一致性检查、状态、每次模型调用的 token 明细
 
 以后若改为数据库存储，只需替换本模块的函数实现，接口保持不变。
 """
@@ -17,12 +18,15 @@ import uuid
 from pathlib import Path
 
 from ..config import DATA_DIR
+from . import facts as facts_mod
 
 NOVELS_DIR = Path(os.getenv("NOVELS_DIR") or DATA_DIR / "novels").resolve()
 NOVELS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_PARAMS = {"segmentTokens": 768, "temperature": 0.7, "topP": 0.8, "topK": 20, "repetitionPenalty": 1.1,
-                  "recentTokens": 900}
+                  "recentTokens": 900,
+                  # 写作流程：先规划节拍 / 写完抽取故事事实（与摘要同一次调用）/ 写完检查一致性（None = 大模型开、本地关）
+                  "planChapter": True, "extractFacts": True, "reviewChapter": None}
 CONTEXT_WINDOWS = (8192, 32768)
 
 _lock = threading.RLock()
@@ -131,8 +135,15 @@ def list_chapters(novel_id: str) -> list[dict]:
         c = _read(f)
         if c:
             out.append({k: c.get(k) for k in ("index", "title", "goal", "targetChars", "summary", "status", "error",
-                                               "createdAt", "updatedAt", "totals")} | {"chars": len(c.get("text", ""))})
+                                               "createdAt", "updatedAt", "totals")}
+                       | {"chars": len(c.get("text", "")), "reviewIssues": _review_count(c)})
     return out
+
+
+def _review_count(c: dict) -> int | None:
+    """一致性检查发现的问题数（没检查过 / 检查失败 / 已忽略 = None）。"""
+    r = c.get("review")
+    return None if not r or r.get("ignored") or r.get("error") else len(r.get("issues") or [])
 
 
 def get_chapter(novel_id: str, index: int) -> dict:
@@ -152,7 +163,23 @@ def delete_last_chapter(novel_id: str, index: int) -> None:
     chapters = list_chapters(novel_id)
     if not chapters or chapters[-1]["index"] != index:
         raise StoreError("只能删除最后一章（保证前情摘要连贯）")
-    _chapter_path(novel_id, index).unlink()
+    with _lock:
+        _chapter_path(novel_id, index).unlink()
+        f = get_facts(novel_id)  # 账本回滚：去掉这一章抽取的伏笔 / 角色状态 / 时间线
+        facts_mod.drop_from(f, index)
+        save_facts(novel_id, f)
     novel = get_novel(novel_id)
     if novel["arcUpTo"] >= index:  # 被合并进前情概要的章节被删除：清空概要，下次生成时重新合并
         update_novel(novel_id, arcSummary="", arcUpTo=0)
+
+
+# ---------------------------------------------------------------- 故事账本
+
+def get_facts(novel_id: str) -> dict:
+    return facts_mod.sanitize(_read(_dir(novel_id) / "facts.json"))
+
+
+def save_facts(novel_id: str, facts: dict) -> None:
+    facts["updatedAt"] = now()
+    with _lock:
+        _write(_dir(novel_id) / "facts.json", facts)

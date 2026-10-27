@@ -32,6 +32,7 @@ class GenParams:
     top_k: int = 20
     repetition_penalty: float = 1.1
     use_adapter: bool = True  # False：本次停用工作区的 LoRA 适配器（摘要等指令型调用用基础模型更稳）
+    json_mode: bool = False   # 大模型：要求输出 JSON（response_format）；本地模型忽略，由调用方容错解析
     stop_event: threading.Event | None = field(default=None, repr=False)
 
 
@@ -145,7 +146,8 @@ class ApiChatGenerator(TextGenerator):
         if not text:
             return 0
         cjk = len(_CJK.findall(text))
-        return math.ceil(cjk * 0.75 + (len(text) - cjk) * 0.35)  # 中文约 0.6 token/字，英文约 4 字符/token，略放大
+        # 中文因模型而异（DeepSeek 约 0.6、部分模型接近 1 token/字），按 1.0 估算以免低估上下文；英文约 4 字符/token，略放大
+        return math.ceil(cjk * 1.0 + (len(text) - cjk) * 0.35)
 
     def count_messages(self, messages: list[dict]) -> int:
         return sum(self.count_text(m["content"]) + 6 for m in messages) + 4
@@ -173,7 +175,7 @@ class ApiChatGenerator(TextGenerator):
         start = time.monotonic()
         try:
             r = llm_client.complete(self.cfg, messages, max_tokens=params.max_new_tokens,
-                                    temperature=params.temperature, top_p=params.top_p)
+                                    temperature=params.temperature, top_p=params.top_p, json_mode=params.json_mode)
         except llm_client.LLMError as e:
             raise GenerationError(f"大模型调用失败：{e}") from e
         prompt = r["promptTokens"] or self.count_messages(messages)
@@ -183,8 +185,9 @@ class ApiChatGenerator(TextGenerator):
 
 
 def get_generator(model: dict, api: dict | None = None) -> TextGenerator:
-    """按工作区的模型配置创建调用器。model: {source: local|api|remote, baseId?, adapterId?, apiName?}；
-    api：本次请求由 Java 附带的大模型配置 {baseUrl, apiKey, model, concurrency}（只在 source=api 时使用）。"""
+    """按工作区的模型配置创建调用器。model: {source: local|api|gguf|remote, baseId?, adapterId?, apiName?}；
+    api：本次请求由 Java 附带的大模型配置 {baseUrl, apiKey, model, concurrency}（只在 source=api 时使用）；
+    gguf：「llama.cpp」页正在运行的 GGUF 模型（本机 OpenAI 兼容接口，按大模型同样的方式调用）。"""
     source = (model or {}).get("source", "local")
     if source == "local":
         if not model.get("baseId"):
@@ -193,6 +196,14 @@ def get_generator(model: dict, api: dict | None = None) -> TextGenerator:
     if source == "api":
         cfg = llm_client.ModelConfig(**api) if api else None
         return ApiChatGenerator(cfg, (cfg.model if cfg else model.get("apiName")) or "大模型")
+    if source == "gguf":
+        from ..local import llama
+
+        try:
+            cfg = llm_client.ModelConfig(**llama.api_config())
+        except llama.LlamaError as e:
+            raise GenerationError(str(e)) from e
+        return ApiChatGenerator(cfg, llama.display_name())
     if source == "remote":
         raise GenerationError("远程模型（远程 GPU 上的模型 + 适配器）暂未接入")
     raise GenerationError(f"未知的模型来源：{source}")

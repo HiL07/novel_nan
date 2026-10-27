@@ -37,8 +37,15 @@ public class NovelGenController {
         return ResultResponses.handle(() -> genService.startChapter(novelId, req), log, "启动章节生成失败");
     }
 
+    /** POST /api/novel/gen/{novelId}/chapters/{index}/recheck {digest?, review?} → Python 任务（重新提取事实 / 检查一致性） */
+    @PostMapping("/{novelId}/chapters/{index}/recheck")
+    public ResponseEntity<Result<JsonNode>> recheckChapter(@PathVariable String novelId, @PathVariable int index,
+                                                           @RequestBody Map<String, Object> req) {
+        return ResultResponses.handle(() -> genService.recheckChapter(novelId, index, req), log, "重新提取失败");
+    }
+
     /**
-     * POST /api/novel/gen/{novelId}/ideas {kind: title|outline|chapter|fill|direction|chat, source?: api|local, baseId?,
+     * POST /api/novel/gen/{novelId}/ideas {kind: title|outline|chapter|fill|direction|chat, source?: api|local|gguf, baseId?,
      *                                      adapterId?, hint?, count?, purpose?, materialIds?[], autoMaterials?, query?,
      *                                      excludeBooks?[], fill?, chat?, spec?}
      * → {kind, nextIndex, result, usage, model, usedMaterials, blockedMaterials}（只是建议，不保存）

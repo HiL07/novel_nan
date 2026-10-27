@@ -42,5 +42,22 @@ export const polishChapter = (id, index, body) => post(`/api/gen/novels/${id}/ch
 export const editChapter = (id, index, body) => post(`/api/gen/novels/${id}/chapters/${index}/update`, body)
 /** 恢复润色前的原文 */
 export const revertPolish = (id, index) => post(`/api/gen/novels/${id}/chapters/${index}/polish/revert`)
+/** 已完成章节：重新提取本章摘要与故事事实（digest）/ 重新检查一致性（review），后台任务 kind=recheck。
+ *  本地模型直接调 Python（须已加载）；大模型（api=true）经 Java */
+export const recheckChapter = (id, index, body, api = false) =>
+  api
+    ? request.post(`/api/novel/gen/${id}/chapters/${index}/recheck`, body).then((res) => res.data)
+    : post(`/api/gen/novels/${id}/chapters/${index}/recheck`, body)
+/** 一致性检查结果标为已读（ignored=true）/ 取消 */
+export const ignoreReview = (id, index, ignored = true) =>
+  post(`/api/gen/novels/${id}/chapters/${index}/review/ignore`, { ignored })
+
+/* ---------- 故事账本 ---------- */
+/** {foreshadows[{id, text, status: open|resolved, plantedIn, manual, history[{chapter, action, note}]}],
+ *   characters{name: {state, updatedIn, manual, history[{chapter, change, state}]}}, timeline[{chapter, when, event, manual}]} */
+export const getFacts = (id) => get(`/api/gen/novels/${id}/facts`)
+/** 保存整个账本（作者改过的条目带 manual: true） */
+export const updateFacts = (id, facts) => post(`/api/gen/novels/${id}/facts/update`, { facts })
+
 export const getGenJob = (jobId) => get(`/api/gen/jobs/${jobId}`)
 export const cancelGenJob = (jobId) => post(`/api/gen/jobs/${jobId}/cancel`)
