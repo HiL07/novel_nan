@@ -39,6 +39,36 @@ function findTargetCategory(categories, target) {
     : categories.find((c) => c.custom && c.templateKey === target.template)
 }
 
+const MARKS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫'
+
+/**
+ * 多版本素材（合并而来的主条目）复制进设定前，按选的用法展开成一条普通素材：
+ * 只用某一版 = 共性 + 那一版的概括 / 属性 / 详细；让 AI 选 / 融合 = 共性 + 「可选版本」逐条写进详细（落到备注里，作者自己挑）。
+ * members：主条目详情里的成员素材。
+ */
+export function resolveVersions(master, members = []) {
+  const variants = master.source?.variants || []
+  if (master.source?.type !== 'merge' || variants.length < 2) return master
+  const memberOf = (id) => members.find((m) => m.id === id)
+  const chosen = variants.find((v) => String(v.id) === String(master.variant))
+  if (chosen) {
+    const mem = memberOf(chosen.id) || {}
+    return {
+      ...master,
+      summary: mem.summary || chosen.note || master.summary,
+      attributes: { ...(master.attributes || {}), ...(mem.attributes || {}) },
+      detail: [chosen.note, mem.detail].filter(Boolean).join('\n')
+    }
+  }
+  const lines = variants.map((v, i) => {
+    const mem = memberOf(v.id) || {}
+    const book = v.book ? `《${v.book}》` : ''
+    return `${MARKS[i] || i + 1}${v.label || v.title}${book}：${v.note || mem.summary || ''}`
+  })
+  const head = master.variant === 'blend' ? '可选版本（打算融合使用）：' : '可选版本（选一种用）：'
+  return { ...master, detail: [master.detail, head, ...lines].filter(Boolean).join('\n') }
+}
+
 /** 应用前的预览文字，如「自定义元素·怪物 → 典型怪物（新增一项）」 */
 export function describeTarget(material, categories) {
   const target = APPLY_TARGETS[material.category]

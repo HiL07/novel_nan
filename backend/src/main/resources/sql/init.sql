@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS novel_extract (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id         INTEGER NOT NULL,              -- 源文件 id（file 表，逻辑关联）
     file_name       TEXT,
-    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/SUCCEEDED/FAILED
+    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
     progress        INTEGER NOT NULL DEFAULT 0,    -- 0~100
     message         TEXT,                          -- 进度说明 / 失败原因（≤1000 字）
     job_id          TEXT,                          -- Python 服务任务 id
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS novel_extract (
     word_count      INTEGER,                       -- 统计：总字数
     chapter_count   INTEGER,                       -- 统计：章节数
     candidate_count INTEGER,                       -- 统计：素材候选数
+    options         TEXT,                          -- 提交参数 JSON {model, materials}，「继续提取」时复用
     create_time     TEXT    NOT NULL,
     update_time     TEXT    NOT NULL
 );
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS material (
     source      TEXT,                              -- JSON：{type, extractId, fileId, fileName, chapters, excerpt}
     source_book TEXT,                              -- 来源书名（文件名去扩展名；手动添加可自填），按书筛选 / 屏蔽 / 删除
     pinned      INTEGER NOT NULL DEFAULT 0,        -- 1 = 保留：按书删除、屏蔽来源书都不影响它
+    merged_into INTEGER,                           -- 已并入哪个主条目（精炼 / 合并）；非空的素材不出现在列表 / 检索 / AI 里，拆分时清空
     use_count   INTEGER NOT NULL DEFAULT 0,
     create_time TEXT    NOT NULL,
     update_time TEXT    NOT NULL
@@ -169,6 +171,42 @@ CREATE TABLE IF NOT EXISTS material_candidate (
     UNIQUE (extract_id, candidate_key)
 );
 CREATE INDEX IF NOT EXISTS idx_material_candidate_status ON material_candidate (status);
+
+-- 整理卡片任务（SQLite）：对一次小说提取（novel_extract）的实体档案单独发起，产出的素材卡 / 剧情段进入待确认候选。
+-- 一次提取可以整理多次（换模型 / 换范围）。断点在 Python 的 data/extract-cache/k<id>/
+CREATE TABLE IF NOT EXISTS material_compile (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    extract_id      INTEGER NOT NULL,              -- 来源提取任务（novel_extract，逻辑关联）
+    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
+    progress        INTEGER NOT NULL DEFAULT 0,    -- 0~100
+    message         TEXT,                          -- 进度说明 / 失败原因（≤1000 字）
+    job_id          TEXT,                          -- Python 服务任务 id
+    options         TEXT,                          -- 参数 JSON {model, entityKeys?, categories?, topN?, plot}，继续时复用
+    entity_count    INTEGER,                       -- 交给模型整理的实体数
+    card_count      INTEGER,                       -- 统计：素材卡（含体系卡）
+    arc_count       INTEGER,                       -- 统计：剧情段
+    candidate_count INTEGER,                       -- 统计：实际进入待确认的条数（同书重复的不算）
+    create_time     TEXT    NOT NULL,
+    update_time     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_material_compile_extract ON material_compile (extract_id);
+
+-- 精炼 / 合并建议：本地向量模型找出的相似素材组（同分类，跨书或同书），可让 AI 写合并稿，用户确认后才合并
+-- （主条目 = 新素材，source = {type: merge, members, variants}；成员的 material.merged_into 指向它，可拆分还原）
+CREATE TABLE IF NOT EXISTS material_merge (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT    NOT NULL,
+    member_ids  TEXT    NOT NULL,                  -- JSON 数组：组内素材 id（按 id 升序，同一组成员 = 同一建议）
+    score       REAL,                              -- 组内平均相似度（余弦）
+    cross_book  INTEGER NOT NULL DEFAULT 0,        -- 1 = 成员来自不同的书
+    status      TEXT    NOT NULL,                  -- FOUND（待处理）/DRAFTING/DRAFTED（AI 合并稿已写好）/APPLIED（已合并）/IGNORED
+    draft       TEXT,                              -- AI 合并稿 JSON {same, title, subtype, summary, detail, attributes, tags, variants, model}
+    message     TEXT,                              -- 写合并稿失败的原因等
+    material_id INTEGER,                           -- 合并后的主条目 id
+    create_time TEXT    NOT NULL,
+    update_time TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_material_merge_status ON material_merge (status);
 
 -- AI 解析地址学到的站点抓取规则（每个域名一行）
 CREATE TABLE IF NOT EXISTS crawl_site_rule (

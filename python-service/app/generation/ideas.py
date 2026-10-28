@@ -40,14 +40,16 @@ CATEGORY_LABELS = {"world": "世界观", "faction": "势力", "character": "角�
 SYSTEM = """你是资深网络小说策划编辑，擅长构思书名、搭建大纲、设计章节。只输出 JSON，不要任何多余文字。
 原则：
 1. 严格遵守【已确定的设定】，不得与之矛盾；设定没提到的可以发挥。
-2. 【素材库素材】是作者挑选的创作素材：要有机地融入构思（可改写、组合、改名），不要照搬原作的专有名词和情节。
+2. 【素材库素材】是作者挑选的创作素材：要有机地融入构思（可改写、组合、改名），不要照搬原作的专有名词和情节；
+   标着「共 N 种写法」的素材按它后面括号里的要求使用（选一个版本 / 融合 / 用选定的版本）。
 3. 构思要具体、有冲突和悬念，避免空泛套话。"""
 
 
 FILL_SYSTEM = """你是资深网络小说策划编辑，正在帮作者补全小说设定。只输出 JSON，不要任何多余文字。
 原则：
 1. 与【已确定的设定】保持一致，不得矛盾；补全的内容要具体、有画面感、能直接用于写作。
-2. 【素材库素材】是作者挑选的参考：可以借鉴、改写、组合，不要照搬原作的专有名词。
+2. 【素材库素材】是作者挑选的参考：可以借鉴、改写、组合，不要照搬原作的专有名词；
+   标着「共 N 种写法」的素材按它后面括号里的要求使用。
 3. 选择类字段优先从给出的可选项里选。"""
 
 
@@ -76,19 +78,58 @@ class IdeaError(ValueError):
     pass
 
 
+VARIANT_TEXT_CHARS = 200   # 多版本素材里单个版本的上限（整条约 600 字）
+CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
+VARIANT_USAGE = {
+    "auto": "（这是同一素材的不同写法：从中选一个最贴合当前设定的版本使用，不要把不同版本的设定混在一起）",
+    "blend": "（作者要求融合：把这些写法组合成一个新的设定，例如一个作表面、一个作内里，组合后要自洽）",
+    "fixed": "（作者选定了这个版本，按它来用）",
+}
+
+
+def _near_dup(a: str, b: str) -> bool:
+    """短的那句的字符二元组有 70% 以上出现在长的那句里：算重复"""
+    ga, gb = ({t[i:i + 2] for i in range(len(t) - 1)} for t in (re.sub(r"[\s\W_]+", "", x) for x in (a, b)))
+    short, long_ = (ga, gb) if len(ga) <= len(gb) else (gb, ga)
+    return bool(short) and len(short & long_) / len(short) >= 0.7
+
+
+def _attr_text(attrs: dict) -> str:
+    return "；".join(f"{k}：{'、'.join(map(str, v)) if isinstance(v, list) else v}" for k, v in (attrs or {}).items())
+
+
 def _material_lines(materials: list[dict]) -> list[str]:
+    """素材 → 提示词里的行。合并而来的多版本素材（带 variants）先写共性，再逐个写版本，并按 variantMode 说明怎么用。"""
     lines = []
     for m in materials[:MAX_MATERIALS]:
         cat = CATEGORY_LABELS.get(m.get("category"), m.get("category") or "素材")
         head = f"- [{cat}] {m.get('title', '')}" + (f"（{m['subtype']}）" if m.get("subtype") else "")
-        parts = [m.get("summary") or ""]
-        attrs = m.get("attributes") or {}
-        if attrs:
-            parts.append("；".join(f"{k}：{'、'.join(v) if isinstance(v, list) else v}" for k, v in attrs.items()))
-        if m.get("tags"):
+        summary = m.get("summary") or ""
+        if m.get("variantMode") == "fixed" and re.search(r"种写法|[①②③]", summary):
+            summary = ""  # 主条目的概括常常把各版本都列一遍：只用选定版本时不要把别的版本带进去
+        parts = [summary]
+        if m.get("attributes"):
+            parts.append(_attr_text(m["attributes"]))
+        if m.get("tags") and m.get("variantMode") != "fixed":  # 主条目标签含各版本名：只用一版时不带
             parts.append("标签：" + "、".join(m["tags"]))
         body = "；".join(p for p in parts if p)
-        lines.append(f"{head}：{body[:MATERIAL_TEXT_CHARS]}")
+        variants = m.get("variants") or []
+        if not variants:
+            lines.append(f"{head}：{body[:MATERIAL_TEXT_CHARS]}")
+            continue
+        mode = m.get("variantMode") if m.get("variantMode") in VARIANT_USAGE else "auto"
+        count = "作者选定了其中一种写法" if mode == "fixed" else f"共 {len(variants)} 种写法"
+        out = [f"{head}（{count}）" + (f"：{body[:MATERIAL_TEXT_CHARS]}" if body else "")]
+        for i, v in enumerate(variants):
+            mark = CIRCLED[i] if i < len(CIRCLED) else f"({i + 1})"
+            book = f"（《{v['book']}》）" if v.get("book") else ""
+            note, vsum = v.get("note") or "", v.get("summary") or ""
+            if note and vsum and _near_dup(note, vsum):
+                note, vsum = ("", vsum) if len(vsum) >= len(note) else (note, "")  # 两句几乎一样：只留长的
+            vbody = "；".join(p for p in (note, vsum, _attr_text(v.get("attributes") or {})) if p)
+            out.append(f"  {mark}{v.get('label') or f'版本{i + 1}'}{book}：{vbody[:VARIANT_TEXT_CHARS]}")
+        out.append("  " + VARIANT_USAGE["fixed" if mode == "fixed" else mode])
+        lines.append("\n".join(out))
     return lines
 
 
@@ -133,13 +174,13 @@ def _task(kind: str, hint: str, count: int, next_index: int, purpose: str = "", 
         hint_line += "作者选定的后续走向（必须沿着这些走向展开）：\n" + "\n".join(f"- {c}" for c in chosen) + "\n"
     if kind == "direction":
         use = f"这些走向用于：{purpose}。\n" if purpose else ""
+        # 走向只围绕构思方向展开；基调（tone_line）只约束风格，设定 / 章节只是背景
         if hint:
-            base = (f"作者的构思方向：「{hint}」\n围绕这个构思，结合上面提供的设定和章节（如果有），"
-                    "构思故事接下来可能的发展走向——每个走向是一条不同的发展路线。\n")
-        elif tone:
-            base = "围绕这个基调，结合上面提供的设定和章节（如果有），从不同角度给出故事可能的发展走向。\n"
+            base = (f"作者的构思方向：「{hint}」\n所有走向都必须在这个构思之内展开：保留它的前提、人物和核心冲突，"
+                    "沿着它往下发展，不要偏离成别的故事。上面提供的设定和章节（如果有）只作背景参考。"
+                    "每个走向是这个构思下一条不同的发展路线。\n")
         else:
-            base = "作者还没有想法，请结合上面提供的内容主动给出灵感。\n"
+            base = "作者还没有写构思方向，请结合上面提供的内容主动给出灵感。\n"
         avoid = ("以下走向已经给过或被作者否定，不要给出相同或相似的：\n" + "\n".join(f"- {r}" for r in rejected) + "\n"
                  if rejected else "")
         return (f"{tone_line}{base}{avoid}{use}给出 {count} 个彼此差异明显的走向（可以从核心冲突、主角处境、反转、情感主线、"

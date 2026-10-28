@@ -149,6 +149,17 @@ public class NovelGenService {
         for (Material m : allowed) {
             used.put(m.getId(), usedEntry(m, null, "", false));
         }
+        // 多版本素材（合并而来的主条目）怎么用：auto = 让 AI 选一个版本（默认）、blend = 融合、成员 id = 只用这个版本
+        Map<Long, String> variantChoice = new HashMap<>();
+        if (req.get("materialVariants") instanceof Map<?, ?> mv) {
+            mv.forEach((k, v) -> {
+                try {
+                    variantChoice.put(Long.parseLong(String.valueOf(k)), String.valueOf(v));
+                } catch (NumberFormatException ignored) {
+                    // 不是素材 id：忽略
+                }
+            });
+        }
         if (Boolean.TRUE.equals(req.get("autoMaterials"))) {
             String query = Objects.toString(req.get("query"), "").trim();
             if (query.isEmpty()) {
@@ -172,7 +183,11 @@ public class NovelGenService {
                             && r.get("score") instanceof Integer score
                             && (reranked ? score >= MaterialService.RERANK_MIN_SCORE : taken < AUTO_UNRANKED)) {
                         taken++;
-                        used.putIfAbsent(m.getId(), usedEntry(m, score, how + score, true));
+                        if (used.putIfAbsent(m.getId(), usedEntry(m, score, how + score, true)) == null
+                                && r.get("matchedVariant") instanceof Number variant) {
+                            variantChoice.putIfAbsent(m.getId(), String.valueOf(variant.longValue()));
+                            used.get(m.getId()).put("variant", r.get("matchedLabel"));
+                        }
                     }
                 }
             }
@@ -190,6 +205,9 @@ public class NovelGenService {
                     : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
             item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
             item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
+            if (MaterialService.isMergeMaster(m)) {
+                addVariants(item, m, variantChoice.getOrDefault(m.getId(), "auto"));
+            }
             materials.add(item);
         }
 
@@ -252,6 +270,37 @@ public class NovelGenService {
         out.put("usedMaterials", new ArrayList<>(used.values()));
         out.put("blockedMaterials", picked.size() - allowed.size());
         return out;
+    }
+
+    /**
+     * 多版本素材：附上各版本 {label, book, note, summary, attributes}（来自成员素材）和 variantMode：
+     * auto（全部版本，让模型选一个）/ blend（全部版本，融合成新设定）/ fixed（只给选定的那一个版本）。
+     */
+    private void addVariants(Map<String, Object> item, Material master, String choice) {
+        List<Material> members = materialService.membersOf(master.getId());
+        String mode = "blend".equals(choice) ? "blend" : "auto";
+        if (choice.matches("\\d+")) {
+            long id = Long.parseLong(choice);
+            List<Material> one = members.stream().filter(x -> x.getId() == id).toList();
+            if (!one.isEmpty()) {
+                members = one;
+                mode = "fixed";
+            }
+        }
+        List<Map<String, Object>> variants = new ArrayList<>();
+        for (Material member : members) {
+            Map<String, Object> v = new LinkedHashMap<>();
+            v.put("label", MaterialService.variantLabel(master, member));
+            v.put("book", Objects.requireNonNullElse(member.getSourceBook(), ""));
+            v.put("note", Objects.toString(MaterialService.variantOf(master, member.getId()).get("note"), ""));
+            v.put("summary", Objects.requireNonNullElse(member.getSummary(), ""));
+            v.put("attributes", Objects.requireNonNullElse(member.getAttributes(), Map.of()));
+            variants.add(v);
+        }
+        if (!variants.isEmpty()) {
+            item.put("variants", variants);
+            item.put("variantMode", mode);
+        }
     }
 
     private static Map<String, Object> usedEntry(Material m, Integer score, String reason, boolean auto) {

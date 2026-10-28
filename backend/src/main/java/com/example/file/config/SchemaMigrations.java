@@ -35,6 +35,9 @@ public class SchemaMigrations {
         boolean addedBook = addColumn("material", "source_book", "TEXT");
         addColumn("material", "pinned", "INTEGER NOT NULL DEFAULT 0");
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_material_source_book ON material (source_book)");
+        // 精炼 / 合并：成员指向主条目
+        addColumn("material", "merged_into", "INTEGER");
+        jdbc.execute("CREATE INDEX IF NOT EXISTS idx_material_merged_into ON material (merged_into)");
         if (addedBook) {
             backfillSourceBook();
         }
@@ -50,6 +53,7 @@ public class SchemaMigrations {
         addColumn("crawl_site_rule", "attempt_log", "TEXT");
         // 文件管理显示小说章节数（老文件由 FileService 启动后在后台补数）
         addColumn("file", "chapter_count", "INTEGER");
+        addColumn("novel_extract", "options", "TEXT");
     }
 
     /** 列不存在时添加，返回是否新加 */

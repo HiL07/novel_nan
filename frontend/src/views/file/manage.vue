@@ -199,7 +199,7 @@ async function loadExtracts() {
       if (t.status === 'SUCCEEDED') {
         e.done++
         if (!e.last || (t.createTime || '') > (e.last.createTime || '')) e.last = t
-      } else if (t.status === 'QUEUED' || t.status === 'RUNNING') {
+      } else if (t.status === 'QUEUED' || t.status === 'RUNNING' || t.status === 'INTERRUPTED') {
         e.running++
       }
       map.set(book, e)

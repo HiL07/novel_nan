@@ -21,6 +21,8 @@ public class NovelExtract {
     public static final String RUNNING = "RUNNING";
     public static final String SUCCEEDED = "SUCCEEDED";
     public static final String FAILED = "FAILED";
+    /** 中断（服务重启 / 出错 / 用户暂停）：仍算「提取中」，可从断点继续，或取消后变为 FAILED */
+    public static final String INTERRUPTED = "INTERRUPTED";
 
     /** 主键（自增） */
     @TableId(type = IdType.AUTO)
@@ -32,7 +34,7 @@ public class NovelExtract {
     /** 源文件名（冗余，便于列表展示） */
     private String fileName;
 
-    /** 状态：QUEUED / RUNNING / SUCCEEDED / FAILED */
+    /** 状态：QUEUED / RUNNING / INTERRUPTED / SUCCEEDED / FAILED */
     private String status;
 
     /** 进度 0~100 */
@@ -58,6 +60,21 @@ public class NovelExtract {
     private Integer wordCount;
     private Integer chapterCount;
     private Integer candidateCount;
+
+    /** 提交参数 JSON 字符串 {model, materials}（model 只存 source / configId / baseId 等，不含密钥），「继续提取」时复用 */
+    private String options;
+
+    /** 列表：这次提取还没确认（PENDING）的素材候选数（不是数据库列） */
+    @TableField(exist = false)
+    private Long pendingCount;
+
+    /** 列表：最近一次整理卡片任务（不是数据库列） */
+    @TableField(exist = false)
+    private MaterialCompile latestCompile;
+
+    /** 详情（未成功的任务）：Python 断点情况 {exists, stages, running}，AI 服务不可达时为 null（不是数据库列） */
+    @TableField(exist = false)
+    private Object checkpoint;
 
     /** 提取结果 JSON 字符串：详情接口从 resultPath 文件读出后填入（不是数据库列），保持原接口结构 */
     @TableField(exist = false)

@@ -26,11 +26,20 @@
         <span class="muted cand-src">{{ c.fileName }}<template v-if="c.payload.chapters?.length"> · {{ c.payload.chapters.slice(0, 3).join('、') }}{{ c.payload.chapters.length > 3 ? ' 等' : '' }}</template></span>
       </div>
       <el-input v-model="c.edit.summary" type="textarea" :autosize="{ minRows: 1, maxRows: 3 }" maxlength="300" placeholder="一句话概括" />
+      <el-input
+        v-if="c.payload.detail !== undefined"
+        v-model="c.edit.detail"
+        type="textarea"
+        :autosize="{ minRows: 2, maxRows: 6 }"
+        placeholder="详细描述"
+        class="cand-detail"
+      />
       <div class="cand-body">
         <AttributeEditor v-model="c.edit.attributes" :category="c.edit.category" class="cand-attrs" />
         <div class="cand-side">
           <el-input-tag v-model="c.edit.tags" size="small" placeholder="标签，回车添加" :max="12" />
-          <div v-if="c.payload.excerpt" class="excerpt">“{{ c.payload.excerpt }}”</div>
+          <div v-if="c.payload.excerpt && !c.payload.facts?.length" class="excerpt">“{{ c.payload.excerpt }}”</div>
+          <FactList v-if="c.payload.facts?.length" :facts="c.payload.facts" />
         </div>
       </div>
     </div>
@@ -52,6 +61,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, Close } from '@element-plus/icons-vue'
 import AttributeEditor from './AttributeEditor.vue'
+import FactList from './FactList.vue'
 import { MATERIAL_CATEGORIES, ignoreCandidates, listCandidates, saveCandidates } from '@/api/material'
 import { errorMessage } from '@/api/request'
 
@@ -96,7 +106,8 @@ async function load() {
         subtype: c.payload.subtype || '',
         summary: c.payload.summary || '',
         attributes: { ...(c.payload.attributes || {}) },
-        tags: [...(c.payload.tags || [])]
+        tags: [...(c.payload.tags || [])],
+        ...(c.payload.detail !== undefined ? { detail: c.payload.detail || '' } : {})
       }
     }))
     Object.keys(checked).forEach((k) => delete checked[k])
@@ -191,6 +202,9 @@ defineExpose({ reload: load })
 .pager {
   margin-top: 12px;
   justify-content: center;
+}
+.cand-detail {
+  margin-top: 6px;
 }
 .excerpt {
   margin-top: 8px;

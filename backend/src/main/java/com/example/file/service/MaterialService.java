@@ -23,6 +23,7 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -86,7 +87,7 @@ public class MaterialService {
     public List<Map<String, Object>> categories() {
         Map<String, Long> counts = new LinkedHashMap<>();
         for (Map<String, Object> row : materialMapper.selectMaps(new QueryWrapper<Material>()
-                .select("category", "COUNT(*) AS cnt").groupBy("category"))) {
+                .select("category", "COUNT(*) AS cnt").isNull("merged_into").groupBy("category"))) {
             counts.put(String.valueOf(row.get("category")), ((Number) row.get("cnt")).longValue());
         }
         List<Map<String, Object>> out = new ArrayList<>();
@@ -139,17 +140,35 @@ public class MaterialService {
         }
         if (keyword != null && !keyword.isBlank()) {
             for (String word : keyword.trim().split("\\s+")) {
-                q.and(w -> w.like(Material::getTitle, word).or().like(Material::getSummary, word)
-                        .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
-                        .or().like(Material::getTags, word));
+                // 已并入主条目的成员命中关键词时，返回它的主条目（成员本身不单独出现）
+                List<Long> masters = mastersOfMembersMatching(word);
+                q.and(w -> {
+                    w.like(Material::getTitle, word).or().like(Material::getSummary, word)
+                            .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
+                            .or().like(Material::getTags, word);
+                    if (!masters.isEmpty()) {
+                        w.or().in(Material::getId, masters);
+                    }
+                });
             }
         }
         q.orderByDesc(Material::getUpdateTime);
         return materialMapper.selectPage(pg, q);
     }
 
+    /** 名称 / 概括 / 子类 / 详细 / 标签含 word 的已合并成员 → 它们的主条目 id（参数化 LIKE） */
+    private List<Long> mastersOfMembersMatching(String word) {
+        return materialMapper.selectObjs(new LambdaQueryWrapper<Material>().select(Material::getMergedInto)
+                        .isNotNull(Material::getMergedInto)
+                        .and(w -> w.like(Material::getTitle, word).or().like(Material::getSummary, word)
+                                .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
+                                .or().like(Material::getTags, word)))
+                .stream().map(o -> ((Number) o).longValue()).distinct().toList();
+    }
+
+    /** 列表 / 检索 / AI 用的基础条件：已并入主条目的成员不出现（只在主条目的「各书写法」里看到） */
     private LambdaQueryWrapper<Material> baseQuery(String category, List<Long> ids) {
-        LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<>();
+        LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<Material>().isNull(Material::getMergedInto);
         if (category != null && !category.isBlank()) {
             q.eq(Material::getCategory, checkCategory(category));
         }
@@ -324,17 +343,41 @@ public class MaterialService {
             return out;
         }
         String q = query.trim();
-        List<Map<String, Object>> items = vectorItems(pool);
+        // 多版本主条目：共性一条 + 每个版本（成员）各一条参与召回，命中任一版本都返回主条目（不把版本拼成一个向量：
+        // 写法差别大时拼出来的向量落在中间，哪个版本都搜不准）
+        List<Map<String, Object>> items = new ArrayList<>(vectorItems(pool));
+        Map<Long, Material> masterOf = new HashMap<>();   // 成员 id → 主条目
+        Map<Long, Material> memberById = new HashMap<>();
+        Map<Long, Material> masters = pool.stream().filter(MaterialService::isMergeMaster)
+                .collect(Collectors.toMap(Material::getId, x -> x));
+        if (!masters.isEmpty()) {
+            for (Material member : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                    .in(Material::getMergedInto, masters.keySet()))) {
+                Material master = masters.get(member.getMergedInto());
+                masterOf.put(member.getId(), master);
+                memberById.put(member.getId(), member);
+                items.add(Map.of("id", member.getId(), "text", variantText(master, member)));
+            }
+        }
+        int want = Math.min(Math.max(limit, 1), 200);
         String m0 = "vector".equals(mode) ? "vector" : "hybrid";
         List<String> vocab = "hybrid".equals(m0) ? tagVocabulary() : List.of();
         JsonNode res = callAi(() -> aiClient.vectorSearchMaterials(modelId, q.substring(0, Math.min(q.length(), 2000)),
-                items, Math.min(Math.max(limit, 1), 200), m0, rerank, vocab), "向量检索失败");
+                items, masterOf.isEmpty() ? want : Math.min(want * 2, 200), m0, rerank, vocab), "向量检索失败");
         Map<Long, Material> byId = pool.stream().collect(Collectors.toMap(Material::getId, m -> m));
+        Set<Long> seen = new java.util.HashSet<>();
         for (JsonNode r : res.path("results")) {
-            Material m = byId.get(r.path("id").asLong());
-            if (m != null) {
+            long hit = r.path("id").asLong();
+            Material member = memberById.get(hit);
+            Material m = member != null ? masterOf.get(hit) : byId.get(hit);
+            // 结果已按分数从高到低：同一主条目只留第一次出现（= 各版本里分数最高的）
+            if (m != null && results.size() < want && seen.add(m.getId())) {
                 Map<String, Object> row = new LinkedHashMap<>();
                 row.put("material", m);
+                if (member != null) {
+                    row.put("matchedVariant", member.getId());
+                    row.put("matchedLabel", variantLabel(m, member));
+                }
                 row.put("score", (int) Math.round(r.path("score").asDouble() * 100));
                 row.put("similarity", r.path("similarity").asDouble());
                 row.put("vecRank", r.path("vecRank").isNumber() ? r.path("vecRank").asInt() : null);
@@ -347,6 +390,32 @@ public class MaterialService {
             out.put(k, objectMapper.convertValue(res.path(k), Object.class));
         }
         return out;
+    }
+
+    /** 主条目某个版本的检索文本：主条目名称 + 版本名 / 独有设定 + 成员原文（搜「神水」时各版本都能召回） */
+    private static String variantText(Material master, Material member) {
+        Map<String, Object> v = variantOf(master, member.getId());
+        return String.join("\n", master.getTitle(), Objects.toString(v.get("label"), ""),
+                Objects.toString(v.get("note"), ""), vectorText(member)).trim();
+    }
+
+    /** 主条目 source.variants 里这个成员的那一项（没有返回空 Map） */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> variantOf(Material master, Long memberId) {
+        if (master.getSource() != null && master.getSource().get("variants") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> v && v.get("id") instanceof Number n && n.longValue() == memberId) {
+                    return (Map<String, Object>) v;
+                }
+            }
+        }
+        return Map.of();
+    }
+
+    /** 版本名：合并时写的 label，没有就用成员名称 */
+    static String variantLabel(Material master, Material member) {
+        String label = Objects.toString(variantOf(master, member.getId()).get("label"), "").trim();
+        return label.isEmpty() ? member.getTitle() : label;
     }
 
     /** 重排后的相关度达到这个分（0–100）才算「相关」：用于 AI 构思的自动匹配、选择弹窗的预勾选 */
@@ -382,7 +451,7 @@ public class MaterialService {
      * 素材 → 向量化文本：只拼有内容的部分（名称 / 子类 / 标签 / 概括 / 属性值）。分类名、属性键名每条都差不多，
      * 写进去会把向量互相拉近，所以不写（分类用作过滤条件）。素材都在 512 token 以内，不需要切块
      */
-    private static String vectorText(Material m) {
+    static String vectorText(Material m) {
         List<String> parts = new ArrayList<>();
         parts.add(m.getTitle());
         parts.add(m.getSubtype());
@@ -457,6 +526,25 @@ public class MaterialService {
             throw new BizException(404, "素材不存在：" + id);
         }
         return m;
+    }
+
+    /** 详情：主条目（合并而来）附带成员素材，供「各书写法」展示 */
+    public Material detail(Long id) {
+        Material m = get(id);
+        if (isMergeMaster(m)) {
+            m.setMembers(membersOf(id));
+        }
+        return m;
+    }
+
+    /** 主条目的成员（各版本），按 id 升序 */
+    public List<Material> membersOf(Long masterId) {
+        return materialMapper.selectList(new LambdaQueryWrapper<Material>().eq(Material::getMergedInto, masterId)
+                .orderByAsc(Material::getId));
+    }
+
+    public static boolean isMergeMaster(Material m) {
+        return m.getSource() != null && "merge".equals(m.getSource().get("type"));
     }
 
     /** 新增（id 为空）或修改；标签同步写入 material_tag */
@@ -586,6 +674,9 @@ public class MaterialService {
     @Transactional
     public void delete(Long id) {
         get(id);
+        // 删除主条目 = 拆分：成员重新出现在素材库
+        materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getMergedInto, id)
+                .set(Material::getMergedInto, null));
         materialMapper.deleteById(id);
         tagMapper.delete(new LambdaQueryWrapper<MaterialTag>().eq(MaterialTag::getMaterialId, id));
         candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>()
@@ -717,6 +808,18 @@ public class MaterialService {
         return list;
     }
 
+    /** 各提取任务还没确认的候选数 {extractId: n}（没有待确认候选的任务不在里面） */
+    public Map<Long, Long> pendingCountsByExtract() {
+        Map<Long, Long> out = new LinkedHashMap<>();
+        for (Map<String, Object> row : candidateMapper.selectMaps(new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<MaterialCandidate>()
+                .select("extract_id AS eid", "COUNT(*) AS n").eq("status", MaterialCandidate.PENDING).groupBy("extract_id"))) {
+            if (row.get("eid") instanceof Number eid && row.get("n") instanceof Number n) {
+                out.put(eid.longValue(), n.longValue());
+            }
+        }
+        return out;
+    }
+
     public long pendingCount() {
         return candidateMapper.selectCount(new LambdaQueryWrapper<MaterialCandidate>()
                 .eq(MaterialCandidate::getStatus, MaterialCandidate.PENDING));
@@ -751,6 +854,9 @@ public class MaterialService {
             source.put("fileName", c.getFileName());
             source.put("chapters", p.getOrDefault("chapters", List.of()));
             source.put("excerpt", str(p.get("excerpt")));
+            if (p.get("facts") instanceof List<?> facts && !facts.isEmpty()) {
+                source.put("facts", facts); // 新版提取：每条事实 + 原文依据 + 章节
+            }
             m.setSource(source);
             Material created = save(m);
             candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>().eq(MaterialCandidate::getId, id)

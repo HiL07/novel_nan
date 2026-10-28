@@ -74,23 +74,26 @@ class LocalSession:
             raise LLMError(f"本地模型加载失败：{e}", fatal=True) from e
 
     def analyze_chunk(self, title: str, content: str, extra: str = "") -> dict:
+        prompt = llm_client.build_chunk_prompt(title, content, extra)
+        messages = [{"role": "system", "content": llm_client.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}]
+        return parse_lenient(self.chat(messages, MAX_NEW_TOKENS + (MATERIAL_EXTRA_TOKENS if extra else 0)))
+
+    def chat(self, messages: list[dict], max_tokens: int) -> str:
+        """一次对话（素材提取 v2 等按自己的提示词调用），返回文本。"""
         if local_jobs.gpu_busy():
             raise LLMError("训练任务占用了 GPU，提取中止", fatal=True)
         loaded = inference.loaded_model()
         if not loaded or loaded["baseId"] != self.base_id:
             raise LLMError("本地模型已被卸载或切换，提取中止", fatal=True)
-        prompt = llm_client.build_chunk_prompt(title, content, extra)
-        messages = [{"role": "system", "content": llm_client.SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}]
         try:
-            r = inference.chat_generate(messages, max_new_tokens=MAX_NEW_TOKENS + (MATERIAL_EXTRA_TOKENS if extra else 0),
-                                        temperature=0.2, top_p=0.9, top_k=40, repetition_penalty=1.05,
-                                        stop_event=self.stop_event, use_adapter=False)
+            r = inference.chat_generate(messages, max_new_tokens=max_tokens, temperature=0.2, top_p=0.9, top_k=40,
+                                        repetition_penalty=1.05, stop_event=self.stop_event, use_adapter=False)
         except RuntimeError as e:  # 含 CUDA OOM
             raise LLMError(f"本地模型生成失败：{e}") from e
         if r["finishReason"] == "cancelled":
             raise LLMError("已取消", fatal=True)
-        return parse_lenient(r["text"])
+        return r["text"]
 
 
 def parse_lenient(text: str) -> dict:

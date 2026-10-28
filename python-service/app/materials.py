@@ -1,50 +1,38 @@
-"""创作素材：提取时的素材候选（提示词片段 + 跨分块合并）与 AI 语义检索（查询扩展 + 重排）。
+"""创作素材：分类与属性模板、提取选项，以及 AI 语义检索（查询扩展 + 重排）。
 
-素材只是「候选」：由 Java 后端存为待确认，用户确认后才进入素材库。
+素材流程分步：提取（只读原文，记实体和事实）→ 整理卡片（material_facts.compile）→ 待确认候选（Java）→ 用户确认后进素材库。
 分类代码与 Java MaterialService / 前端 api/material.js 保持一致。
 """
-import hashlib
 import re
 
 from pydantic import BaseModel, Field
 
 from .llm_client import ModelConfig, chat, parse_json
 
-# 分类：代码 → (名称, 建议的属性字段)
+# 分类：代码 → (名称, 建议的属性字段)。与前端 api/material.js 的 attrs 保持一致
 CATEGORIES: dict[str, tuple[str, list[str]]] = {
-    "world": ("世界观", ["规则", "影响", "适用题材"]),
-    "faction": ("势力", ["类型", "立场", "实力", "特点"]),
-    "character": ("角色", ["身份", "性格", "能力", "经历"]),
-    "monster": ("怪物", ["外形", "能力", "弱点", "栖息地", "习性"]),
-    "location": ("地点", ["类型", "特点"]),
-    "item": ("物品功法", ["类别", "作用", "代价"]),
-    "plot": ("情节", ["套路", "冲突", "转折", "可借鉴之处"]),
+    "world": ("世界观", ["规则内容", "代价", "限制", "谁能打破", "对社会的影响"]),
+    "faction": ("势力", ["结构", "目标", "资源", "内部矛盾"]),
+    "character": ("角色", ["人设核心", "反差", "能力", "动机", "关系", "名场面"]),
+    "monster": ("怪物", ["外形", "能力", "弱点及原因", "习性", "社会结构", "来源", "与人类的关系"]),
+    "location": ("地点", ["特征", "危险", "特殊规则", "产出"]),
+    "item": ("物品功法", ["作用", "代价", "获取方式", "限制"]),
+    "plot": ("情节", ["起因", "冲突", "转折", "结果", "功能"]),
 }
+
+
 class MaterialOptions(BaseModel):
-    """提取范围：是否提取素材、提取哪些分类、每块最多几条、额外关注点（自由文本）、候选上限。"""
+    """提取时是否记录设定实体（只读原文：实体 + 核实过的事实，见 material_facts.scan）、记哪些分类、额外关注点、
+    每块读几遍（第二遍带着已知实体补漏）、分块字数（短章节会合并到一块）。整理卡片是之后单独的一步。"""
 
     enabled: bool = False
     categories: list[str] = Field(default_factory=lambda: list(CATEGORIES))
-    maxPerChunk: int = Field(default=2, ge=1, le=5)
     focus: str = Field(default="", max_length=300)
-    # 合并去重后最多保留几条候选（按出现章节数从多到少）；超出的不进候选箱，任务说明里会写明
-    maxCandidates: int = Field(default=500, ge=20, le=3000)
+    rounds: int = Field(default=2, ge=1, le=2)
+    chunkChars: int = Field(default=3000, ge=1500, le=6000)
 
     def active_categories(self) -> list[str]:
         return [c for c in self.categories if c in CATEGORIES] or list(CATEGORIES)
-
-
-def prompt_fragment(opts: MaterialOptions) -> str:
-    cats = opts.active_categories()
-    cat_desc = "；".join(f"{c}={CATEGORIES[c][0]}（属性如：{'、'.join(CATEGORIES[c][1])}）" for c in cats)
-    focus = f"\n特别关注：{opts.focus.strip()}" if opts.focus.strip() else ""
-    return (
-        f'另外，在同一个 JSON 中增加字段 "materials"：从本片段提炼最多 {opts.maxPerChunk} 条可在其他小说中借用的创作素材，'
-        f"只提炼有独特价值的设定或创意，没有就输出空数组。分类只能是：{cat_desc}。\n"
-        '每条格式：{"category":"分类代码","subtype":"细分类型","title":"简短名称","summary":"一句话概括，不超过60字",'
-        '"attributes":{"属性名":"值"},"tags":["2~5个标签"],"excerpt":"原文中最能体现它的一句，不超过60字"}。\n'
-        f"用自己的话概括，不要大段照抄原文。{focus}"
-    )
 
 
 def _norm_title(t: str) -> str:
@@ -55,48 +43,6 @@ def _as_list(v) -> list[str]:
     if isinstance(v, list):
         return [str(x).strip() for x in v if str(x).strip()]
     return [s.strip() for s in re.split(r"[、,，;；/]", str(v or "")) if s.strip()]
-
-
-def merge_candidates(chunks: list[tuple[str, dict]], opts: MaterialOptions) -> list[dict]:
-    """chunks: [(章节标题, 分块解析结果)]。同分类、标题相近的候选合并（属性取并集，记录出现的章节）。
-    返回全部合并结果（出现章节多的在前），截断到 maxCandidates 由调用方做，以便告诉用户共识别了多少条。"""
-    allowed = set(opts.active_categories())
-    merged: dict[tuple[str, str], dict] = {}
-    for chapter_title, result in chunks:
-        for m in result.get("materials") or []:
-            if not isinstance(m, dict):
-                continue
-            cat, title = str(m.get("category", "")).strip(), str(m.get("title", "")).strip()[:100]
-            if cat not in allowed or not title:
-                continue
-            key = (cat, _norm_title(title))
-            attrs = m.get("attributes") if isinstance(m.get("attributes"), dict) else {}
-            cur = merged.get(key)
-            if cur is None:
-                cur = merged[key] = {
-                    "candidateId": hashlib.sha1(f"{cat}:{key[1]}".encode()).hexdigest()[:12],
-                    "category": cat, "subtype": str(m.get("subtype") or "")[:32], "title": title,
-                    "summary": str(m.get("summary") or "")[:300], "attributes": {}, "tags": [],
-                    "excerpt": str(m.get("excerpt") or "")[:200], "chapters": [],
-                }
-            for k, v in attrs.items():
-                k = str(k).strip()[:20]
-                if not k or v in (None, "", []):
-                    continue
-                if k not in cur["attributes"]:
-                    cur["attributes"][k] = v
-                elif isinstance(cur["attributes"][k], list) or isinstance(v, list):
-                    vals = _as_list(cur["attributes"][k]) + [x for x in _as_list(v) if x not in _as_list(cur["attributes"][k])]
-                    cur["attributes"][k] = vals[:10]
-            for t in _as_list(m.get("tags")):
-                if t not in cur["tags"] and len(cur["tags"]) < 8:
-                    cur["tags"].append(t[:20])
-            if len(str(m.get("summary") or "")) > len(cur["summary"]):
-                cur["summary"] = str(m["summary"])[:300]
-            if chapter_title not in cur["chapters"]:
-                cur["chapters"].append(chapter_title)
-    # 出现章节越多越可能是核心设定，排在前面
-    return sorted(merged.values(), key=lambda c: -len(c["chapters"]))
 
 
 # ---------------------------------------------------------------- AI 语义检索

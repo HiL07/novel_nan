@@ -180,9 +180,9 @@ import { errorMessage } from '@/api/request'
 import { NEW_ITEMS, aiFillable, applyValue, currentValues, fieldSchema, isTextField, scopesOverlap } from '@/novel-options/aiFill'
 import { getOptionSchema } from '@/api/novelOptions'
 import { EDITOR_KEY } from '@/novel-options/editor'
-import { applyMaterial } from '@/novel-options/materialApply'
+import { applyMaterial, resolveVersions } from '@/novel-options/materialApply'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
-import { recordMaterialUse } from '@/api/material'
+import { getMaterial, isMultiVersion, materialVariants, recordMaterialUse } from '@/api/material'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import { buildSpec, clone, initValues, isFilled, newGroupItem, specToJson, uid, upgradeConfig } from '@/novel-options/schema'
 
@@ -337,7 +337,7 @@ function aiModelBody() {
   const local = aiCfg.source === 'local'
   return {
     source: aiCfg.source, baseId: local ? aiCfg.baseId : undefined, adapterId: local ? aiCfg.adapterId || null : undefined,
-    materialIds: aiCfg.picked.map((m) => m.id), excludeBooks: blockedBooks.value, spec: spec.value
+    materialIds: aiCfg.picked.map((m) => m.id), materialVariants: materialVariants(aiCfg.picked), excludeBooks: blockedBooks.value, spec: spec.value
   }
 }
 
@@ -416,7 +416,8 @@ async function aiCall(fill, busyKey, extraHint = '', scope = [], { pick = null, 
   aiRunning.set(busyKey, scope)
   try {
     const res = await generateIdeas(props.novelId, {
-      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: false, materialIds: (chosen || []).map((m) => m.id)
+      ...aiModelBody(), kind: 'fill', fill, hint, autoMaterials: false, materialIds: (chosen || []).map((m) => m.id),
+      materialVariants: materialVariants(chosen)
     })
     if (res.code !== 0) throw new Error(res.message || 'AI 填写失败')
     return res.data.result
@@ -655,7 +656,7 @@ function openPicker() {
   picker.visible = true
 }
 
-function onApplyMaterials(list) {
+async function onApplyMaterials(list) {
   const ctx = {
     categories: categories.value,
     values,
@@ -669,7 +670,13 @@ function onApplyMaterials(list) {
   let lastKey = ''
   for (const m of list) {
     try {
-      lastKey = applyMaterial(m, ctx).categoryKey
+      // 多版本素材：取详情拿到各版本的成员，按选的用法展开
+      let material = m
+      if (isMultiVersion(m)) {
+        const res = await getMaterial(m.id)
+        material = resolveVersions(m, res.code === 0 ? res.data.members || [] : [])
+      }
+      lastKey = applyMaterial(material, ctx).categoryKey
       done.push(m.id)
     } catch (e) {
       failed.push(`${m.title}：${e.message}`)

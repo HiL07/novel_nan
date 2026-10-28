@@ -1,4 +1,12 @@
-"""小说提取主流程：取文件 → 纯文本 → 切章/分块 → 并发调用模型 → 合并结果。"""
+"""小说提取主流程：取文件 → 纯文本 → 切章/分块 → 并发调用模型 → 合并结果；以及之后单独的一步「整理卡片」。
+
+- 不记录素材：逐块章节分析（摘要 / 人物 / 事件 / 伏笔），``_extract``；
+- 记录素材（materials.enabled）：只读原文，记设定实体和核实过的事实（material_facts.scan），产出实体档案 + 章节摘要；
+- 整理卡片（``compile_job``）：对一次提取的实体档案单独发起，可换模型 / 换范围重做，产出素材候选。
+所有路径都按块 / 卡片写断点（extract_checkpoint），中断后从断点继续。
+"""
+import hashlib
+import json
 import logging
 import re
 import threading
@@ -6,7 +14,7 @@ from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Callable
 
-from . import config, llm_client, local_extract, materials, text_loader
+from . import config, extract_checkpoint, llm_client, local_extract, material_facts, materials, text_loader
 from .llm_client import LLMError, ModelConfig
 
 log = logging.getLogger(__name__)
@@ -18,23 +26,140 @@ class Cancelled(RuntimeError):
 
 def extract(file_id: int, file_ext: str, cfg: ModelConfig | None, on_progress: Callable[[int, str], None],
             material_opts: "materials.MaterialOptions | None" = None, *, local: dict | None = None,
-            stop_event: threading.Event | None = None) -> dict:
+            stop_event: threading.Event | None = None, resume_key: str | None = None) -> dict:
     """cfg = 大模型（OpenAI 兼容，含本机 llama.cpp 等）；local = {baseId, chunkChars} 应用内本地模型（二选一）。
-    stop_event 置位后不再开始新的分块，抛 Cancelled。"""
+    stop_event 置位后不再开始新的分块，抛 Cancelled；resume_key = 断点键（data/extract-cache/<key>/）。"""
+    facts = bool(material_opts and material_opts.enabled)
     if local:
         with local_extract.LocalSession(local["baseId"], stop_event) as session:
-            return _extract(file_id, file_ext, on_progress, material_opts, stop_event,
+            if facts:
+                return _extract_facts(file_id, file_ext, on_progress, material_opts, stop_event, call=session.chat,
+                                      concurrency=1, model_name=session.name, source="local", resume_key=resume_key,
+                                      usage=None, in_app=True)
+            return _extract(file_id, file_ext, on_progress, stop_event,
                             analyze=session.analyze_chunk, chunk_chars=local["chunkChars"], concurrency=1,
-                            model_name=session.name, source="local")
-    return _extract(file_id, file_ext, on_progress, material_opts, stop_event,
+                            model_name=session.name, source="local", resume_key=resume_key)
+    if facts:
+        usage = llm_client.new_usage(cfg)
+        source = llm_client.source_of(cfg)
+        return _extract_facts(file_id, file_ext, on_progress, material_opts, stop_event, call=_chat_fn(cfg, usage),
+                              concurrency=cfg.concurrency if source == "api" else 1, model_name=cfg.model,
+                              source=source, resume_key=resume_key, usage=usage, in_app=False)
+    return _extract(file_id, file_ext, on_progress, stop_event,
                     analyze=lambda title, part, extra: llm_client.analyze_chunk(cfg, title, part, extra),
                     chunk_chars=config.CHUNK_CHARS, concurrency=cfg.concurrency, model_name=cfg.model,
-                    source=llm_client.source_of(cfg))
+                    source=llm_client.source_of(cfg), resume_key=resume_key)
 
 
-def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None], material_opts,
+def _chat_fn(cfg: ModelConfig, usage: dict) -> Callable[[list[dict], int], str]:
+    lock = threading.Lock()
+
+    def call(messages: list[dict], max_tokens: int) -> str:
+        one: dict = {}
+        text = llm_client.chat(cfg, messages, max_tokens=max_tokens, usage=one)
+        with lock:
+            for k in ("calls", "promptTokens", "completionTokens", "cacheHitTokens"):
+                usage[k] = usage.get(k, 0) + one.get(k, 0)
+        return text
+
+    return call
+
+
+def _extract_facts(file_id: int, file_ext: str, on_progress: Callable[[int, str], None], opts, stop_event, *,
+                   call, concurrency: int, model_name: str, source: str, resume_key: str | None,
+                   usage: dict | None, in_app: bool) -> dict:
+    """读原文记实体和事实（material_facts.scan）：结果 = 章节列表（摘要来自第一遍）+ entities（实体档案），不出候选。"""
+    data = text_loader.fetch_file(file_id)
+    text = text_loader.to_plain_text(data, file_ext)
+    if not text:
+        raise ValueError("文件中没有可提取的文本")
+    chapters = text_loader.split_chapters(text)
+    blocks = material_facts.build_blocks(chapters, opts.chunkChars)
+    fingerprint = {"fileId": file_id, "chars": len(text), "chunkChars": opts.chunkChars, "blocks": len(blocks),
+                   "rounds": opts.rounds, "categories": sorted(opts.active_categories()), "focus": opts.focus.strip()}
+    ckpt = extract_checkpoint.Checkpoint(resume_key, fingerprint)
+    resumed = sum(len(ckpt.done(s)) for s in ("pass1", "pass2"))
+    on_progress(0, f"共 {len(chapters)} 章，{len(blocks)} 块，每块读 {opts.rounds} 遍，模型 {model_name}"
+                   + (f"，从断点继续（已读完 {resumed} 块次）" if resumed else ""))
+    try:
+        out = material_facts.scan(chapters, opts, call, concurrency, ckpt, on_progress, stop_event, local=in_app)
+    except material_facts.Cancelled as e:
+        raise Cancelled(str(e)) from e
+    finally:
+        ckpt.close()
+    stats = out["stats"]
+    if stats["failedChunks"] >= len(blocks) * opts.rounds:
+        raise LLMError("所有分块都解析失败，请检查模型配置或稍后重试")
+
+    out_chapters, counts, first = [], Counter(), {}
+    for ch, info in zip(chapters, out["chapters"]):
+        out_chapters.append({"title": ch["title"], "wordCount": len(ch["content"]), "summary": info["summary"],
+                             "characters": info["characters"], "events": [], "foreshadowing": []})
+        counts.update(info["characters"])
+        for n in info["characters"]:
+            first.setdefault(n, ch["title"])
+    result = {
+        "wordCount": len(text),
+        "chapterCount": len(chapters),
+        "failedChunks": stats["failedChunks"],
+        "characters": [{"name": n, "role": "", "firstAppear": first[n], "chapterCount": c}
+                       for n, c in counts.most_common()],
+        "style": {"dialogRatio": dialog_ratio(text), "pace": "", "tones": []},
+        "chapters": out_chapters,
+        "model": model_name,
+        "source": source,
+        "entities": out["entities"],
+        "factStats": stats,
+        "materialOptions": opts.model_dump(),
+    }
+    if usage:
+        result["usage"] = usage
+    on_progress(100, f"完成：{stats['entities']} 个实体、{stats['factsVerified']} 条事实")
+    return result
+
+
+def compile_job(entities: list[dict], chapters: list[dict], cfg: ModelConfig | None, on_progress, *,
+                local: dict | None = None, plot: bool = True, stop_event: threading.Event | None = None,
+                resume_key: str | None = None) -> dict:
+    """整理卡片：实体档案 + 章节摘要 → {materials, stats, usage, model, source}。cfg = 大模型 / GGUF，local = 应用内本地模型。
+    断点指纹 = 实体键 + 事实数 + 是否整理剧情段：同一范围续跑时已整理的卡片不重做。"""
+    sig = hashlib.sha1(json.dumps([(e.get("key"), len(e.get("facts") or [])) for e in entities],
+                                  ensure_ascii=False).encode()).hexdigest()
+    ckpt = extract_checkpoint.Checkpoint(resume_key, {"compile": sig, "plot": plot, "chapters": len(chapters)})
+    resumed = len(ckpt.done("cards"))
+    try:
+        if local:
+            with local_extract.LocalSession(local["baseId"], stop_event) as session:
+                on_progress(0, f"{len(entities)} 个实体，模型 {session.name}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
+                out = material_facts.compile_cards(entities, chapters, session.chat, 1, ckpt, on_progress, stop_event,
+                                                   local=True, plot=plot)
+                model_name, source, usage = session.name, "local", None
+        else:
+            usage = llm_client.new_usage(cfg)
+            source = llm_client.source_of(cfg)
+            on_progress(0, f"{len(entities)} 个实体，模型 {cfg.model}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
+            out = material_facts.compile_cards(entities, chapters, _chat_fn(cfg, usage),
+                                               cfg.concurrency if source == "api" else 1, ckpt, on_progress, stop_event,
+                                               local=False, plot=plot)
+            model_name = cfg.model
+    except material_facts.Cancelled as e:
+        raise Cancelled(str(e)) from e
+    finally:
+        ckpt.close()
+    st = out["stats"]
+    if st["entities"] and st["failedCards"] and not (st["cards"] or st["notUseful"]):
+        raise LLMError("所有卡片都整理失败，请检查模型配置或稍后重试")
+    on_progress(100, f"完成：{st['cards'] + st['systems']} 张素材卡、{st['arcs']} 个剧情段")
+    result = {"materials": out["materials"], "stats": st, "model": model_name, "source": source}
+    if usage:
+        result["usage"] = usage
+    return result
+
+
+def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None],
              stop_event: threading.Event | None, *, analyze: Callable[[str, str, str], dict], chunk_chars: int,
-             concurrency: int, model_name: str, source: str) -> dict:
+             concurrency: int, model_name: str, source: str, resume_key: str | None = None) -> dict:
+    """逐块章节分析（摘要 / 人物 / 事件 / 伏笔）。resume_key 不为空时每块结果写断点，续跑时跳过。"""
     data = text_loader.fetch_file(file_id)
     text = text_loader.to_plain_text(data, file_ext)
     if not text:
@@ -46,12 +171,16 @@ def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None
         for part in text_loader.split_chunks(ch["content"], chunk_chars):
             tasks.append((ci, part))
 
-    on_progress(0, f"共 {len(chapters)} 章，{len(tasks)} 个分块，{'本地模型' if source == 'local' else '模型'} "
-                   f"{model_name}，并发 {concurrency}")
-    results: list[dict | None] = [None] * len(tasks)
-    extra = materials.prompt_fragment(material_opts) if material_opts and material_opts.enabled else ""
+    extra = ""
+    ckpt = extract_checkpoint.Checkpoint(resume_key, {"fileId": file_id, "chars": len(text), "mode": "chunks",
+                                                      "chunkChars": chunk_chars, "chunks": len(tasks), "extra": extra})
+    saved = ckpt.done("chunks")
+    results: list[dict | None] = [saved.get(str(i)) for i in range(len(tasks))]
+    on_progress(int(len(saved) * 100 / max(1, len(tasks))),
+                f"共 {len(chapters)} 章，{len(tasks)} 个分块，{'本地模型' if source == 'local' else '模型'} "
+                f"{model_name}，并发 {concurrency}" + (f"，从断点继续（已完成 {len(saved)} 块）" if saved else ""))
     lock = threading.Lock()
-    state = {"done": 0, "failed": 0}
+    state = {"done": len(saved), "failed": 0}
 
     def run(i: int) -> None:
         if stop_event and stop_event.is_set():
@@ -60,6 +189,8 @@ def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None
         title = chapters[ci]["title"]
         try:
             results[i] = analyze(title, part, extra)
+            with lock:
+                ckpt.append("chunks", i, results[i])
         except LLMError as e:
             if stop_event and stop_event.is_set():
                 raise Cancelled("已取消") from e
@@ -76,13 +207,14 @@ def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None
 
     pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="chunk")
     try:
-        futures = [pool.submit(run, i) for i in range(len(tasks))]
+        futures = [pool.submit(run, i) for i in range(len(tasks)) if results[i] is None]
         finished, _ = wait(futures, return_when=FIRST_EXCEPTION)
         for f in finished:
             if f.exception():
                 raise f.exception()
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        ckpt.close()
 
     if state["failed"] == len(tasks):
         raise LLMError("所有分块都解析失败，请检查模型配置或稍后重试"
@@ -95,12 +227,6 @@ def _extract(file_id: int, file_ext: str, on_progress: Callable[[int, str], None
     result = merge(text, chapters, chunk_results, state["failed"])
     result["model"] = model_name
     result["source"] = source
-    if material_opts and material_opts.enabled:
-        merged = materials.merge_candidates(
-            [(chapters[ci]["title"], r) for (ci, _), r in zip(tasks, results) if r], material_opts)
-        result["materials"] = merged[:material_opts.maxCandidates]
-        result["materialsTotal"] = len(merged)   # 合并去重后共识别的条数（超过上限时 > len(materials)）
-        result["materialOptions"] = material_opts.model_dump()
     return result
 
 

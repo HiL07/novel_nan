@@ -55,6 +55,13 @@ public class Material {
     /** 保留：按来源书删除、在 AI 生成中屏蔽来源书时，保留的素材都不受影响 */
     private Boolean pinned;
 
+    /** 已并入的主条目 id（精炼 / 合并）；非空 = 不出现在列表 / 检索 / AI 里，拆分时清空 */
+    private Long mergedInto;
+
+    /** 主条目（source.type = merge）的成员素材：详情接口填充（不是数据库列） */
+    @TableField(exist = false)
+    private List<Material> members;
+
     /** 被应用到工作区的次数 */
     private Integer useCount;
 

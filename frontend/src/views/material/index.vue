@@ -153,6 +153,10 @@
                     <div class="mat-head">
                       <el-tag size="small" effect="plain">{{ categoryOf(r.material.category)?.label }}</el-tag>
                       <span class="mat-title">{{ r.material.title }}</span>
+                      <el-tag v-if="r.material.source?.type === 'merge'" size="small" type="success" title="由多条素材合并而来，打开可看各个可选版本">
+                        {{ r.material.source.variants?.length || 0 }} 种写法
+                      </el-tag>
+                      <el-tag v-if="r.matchedLabel" size="small" type="warning" title="检索命中的是这个版本">命中：{{ r.matchedLabel }}</el-tag>
                       <span v-if="r.score != null" class="score" :title="r.reason || rankTip(r)">{{ r.score }}</span>
                       <el-icon
                         class="pin"
@@ -190,6 +194,11 @@
               </div>
             </div>
           </div>
+        </el-tab-pane>
+
+        <!-- ===================== 精炼合并 ===================== -->
+        <el-tab-pane label="精炼合并" name="merge" lazy>
+          <MergePanel @changed="refreshAll" @open-material="openMaterialById" />
         </el-tab-pane>
 
         <!-- ===================== 待确认 ===================== -->
@@ -233,8 +242,9 @@ import { ElMessage } from 'element-plus'
 import { Collection, Delete, MagicStick, Notebook, Plus, Reading, Search, Star, StarFilled } from '@element-plus/icons-vue'
 import CandidateReview from '@/components/material/CandidateReview.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
+import MergePanel from '@/components/material/MergePanel.vue'
 import {
-  MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterialCategories, getMaterialSources, getMaterialTags,
+  MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterial, getMaterialCategories, getMaterialSources, getMaterialTags,
   getVectorModelId, pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, vectorFeedback,
   vectorIndex, vectorSearch
 } from '@/api/material'
@@ -402,13 +412,27 @@ async function runVector() {
   }
 }
 
+async function openMaterialById(id) {
+  if (!id) return
+  try {
+    const res = await getMaterial(id)
+    if (res.code !== 0) throw new Error(res.message)
+    editor.material = res.data
+    editor.visible = true
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '打开素材失败（可能已被拆分或删除）'))
+  }
+}
+
 function openResult(r) {
   if (mode.value === 'vector' && vector.value) {
     // 「这条需求 → 点开看的素材」，以后微调向量模型用
     vectorFeedback({ query: vector.value.query, modelId: vector.value.modelId || '', context: '素材库页·查看',
       shownIds: vector.value.results.map((x) => x.material.id), pickedIds: [r.material.id] })
   }
-  openEditor(r.material)
+  // 合并而来的主条目：取详情（带各版本的成员素材）
+  if (r.material.source?.type === 'merge') openMaterialById(r.material.id)
+  else openEditor(r.material)
 }
 
 function setCategory(code) {

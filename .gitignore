@@ -33,3 +33,6 @@ docker.zip
 data/*
 !data/.gitkeep
 !data/README.md
+
+# 本机迁移记录（只留在本地）
+迁移说明.txt

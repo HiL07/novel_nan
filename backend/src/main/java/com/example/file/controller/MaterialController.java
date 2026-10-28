@@ -125,7 +125,7 @@ public class MaterialController {
 
     @GetMapping("/{id}")
     public ResponseEntity<Result<Material>> get(@PathVariable Long id) {
-        return ResultResponses.handle(() -> materialService.get(id), log, "查询素材失败，id=" + id);
+        return ResultResponses.handle(() -> materialService.detail(id), log, "查询素材失败，id=" + id);
     }
 
     /** POST /api/material/save：id 为空新增（来源记为 manual），否则修改 */

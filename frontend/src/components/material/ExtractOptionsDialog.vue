@@ -67,41 +67,38 @@
         </el-alert>
       </template>
 
-      <el-form-item label="提取创作素材">
+      <el-form-item label="记录设定实体">
         <el-switch v-model="opts.enabled" />
-        <span class="hint">识别怪物、世界观、情节创意等可复用素材，提取后逐条确认才会存入素材库</span>
+        <span class="hint">
+          逐段记录魔物 / 世界观 / 角色 / 物品等在原文里的具体事实（每条附原文依据，对不上原文的自动丢弃），得到「实体档案」。
+          这一步只读原文：之后在「提取成功」里单独「整理卡片」，再逐条确认进素材库
+        </span>
       </el-form-item>
       <template v-if="opts.enabled">
-        <el-form-item label="素材类型">
+        <el-form-item label="实体分类">
           <el-checkbox-group v-model="opts.categories">
-            <el-checkbox v-for="c in MATERIAL_CATEGORIES" :key="c.code" :value="c.code">{{ c.label }}</el-checkbox>
+            <el-checkbox v-for="c in ENTITY_CATEGORIES" :key="c.code" :value="c.code">{{ c.label }}</el-checkbox>
           </el-checkbox-group>
         </el-form-item>
-        <el-form-item label="每段最多">
-          <el-input-number v-model="opts.maxPerChunk" :min="1" :max="5" />
-          <span class="hint">条 / 段。小说切段后逐段交给模型，每段最多挑出这么多条素材（各类型合计）；越大越全，也越费 token / 时间</span>
+        <el-form-item label="阅读遍数">
+          <el-radio-group v-model="opts.rounds">
+            <el-radio-button :value="1">1 遍</el-radio-button>
+            <el-radio-button :value="2">2 遍</el-radio-button>
+          </el-radio-group>
+          <span class="hint">第 2 遍带着已知实体再读一次，补上漏掉的细节和实体；本地 / GGUF 小模型建议 2 遍，耗时约翻倍</span>
         </el-form-item>
-        <el-form-item label="候选上限">
-          <el-input-number v-model="opts.maxCandidates" :min="20" :max="3000" :step="100" />
-          <span class="hint">条。全书提取完后同类同名的素材合并为一条，最多放这么多条进「待确认」，超出时保留出现章节最多的；再次提取同一本书时已有的会跳过</span>
+        <el-form-item label="分段字数">
+          <el-input-number v-model="opts.chunkChars" :min="1500" :max="6000" :step="500" />
+          <span class="hint">字 / 段。段越小越不容易漏，段数越多；短章节会合并成一段</span>
         </el-form-item>
         <el-form-item label="特别关注">
           <el-input
             v-model="opts.focus"
             maxlength="300"
-            placeholder="可选，如：重点提取怪物的弱点和习性；只要有新意的情节反转"
+            placeholder="可选，如：重点记录怪物的弱点和习性、魔法的代价"
           />
         </el-form-item>
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          :title="
-            model.source !== 'api'
-              ? '本地模型 / GGUF 不耗 token；开启素材提取后每段多输出一些内容，约慢 30%~50%'
-              : '开启素材提取后，每段输出约增加 150~250 tokens（DeepSeek 约增加 20%~30% 费用）'
-          "
-        />
+        <el-alert v-if="readEstimate" type="info" :closable="false" show-icon class="local-alert" :title="readEstimate" />
       </template>
     </el-form>
 
@@ -132,9 +129,21 @@ const STORE_KEY = 'nan_novel.extract.model'
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]', '::1']
 // 本地 1.5B 约 10~16 token/s：每段输出约 400~700 token，再加读入正文的时间
 const LOCAL_SECONDS_PER_CHUNK = 45
+// 记录实体的粗估：秒 / 千字 / 遍（GGUF Qwen3-4B Q4 在 RTX 4060 Laptop 实测约 16 秒，《耐瑟瑞尔》前 6 章 1.4 万字）；
+// token：每遍每千字约 1.3k 输入 + 0.25k 输出
+const READ_SECONDS = { gguf: 16, api: 1.5, local: 40 }
+const READ_TOKENS = { input: 1300, output: 250 }
+// 情节不在提取时记录：剧情段由「整理卡片」从章节摘要里找
+const ENTITY_CATEGORIES = MATERIAL_CATEGORIES.filter((c) => c.code !== 'plot')
 
 // 记住上次的选择（同一会话内）
-const opts = reactive({ enabled: true, categories: MATERIAL_CATEGORIES.map((c) => c.code), maxPerChunk: 2, focus: '', maxCandidates: 500 })
+const opts = reactive({
+  enabled: true,
+  categories: ENTITY_CATEGORIES.map((c) => c.code),
+  rounds: 2,
+  chunkChars: 3000,
+  focus: ''
+})
 const model = reactive({ source: 'api', configId: null, baseId: '', chunkChars: 2500, ...readSaved() })
 
 const configs = ref([])
@@ -230,6 +239,20 @@ const estimate = computed(() => {
   const seconds = chunks * LOCAL_SECONDS_PER_CHUNK * (opts.enabled ? 1.4 : 1)
   const text = seconds < 3600 ? `${Math.max(1, Math.round(seconds / 60))} 分钟` : `${(seconds / 3600).toFixed(1)} 小时`
   return { chunks, text }
+})
+
+const readEstimate = computed(() => {
+  if (!opts.enabled) return ''
+  const chars = props.charCount || Math.round(props.fileSize / 2.5)
+  if (!chars) return ''
+  const k = chars / 1000
+  const reads = k * opts.rounds
+  const sec = reads * READ_SECONDS[model.source]
+  const time = sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} 分钟` : `${(sec / 3600).toFixed(1)} 小时`
+  const head = `约 ${Math.round(k / 10)} 万字 × ${opts.rounds} 遍，预计 ${time}`
+  if (model.source !== 'api') return `${head}，不花钱；长篇可以随时「暂停」，中断后点「继续」从断点接着读`
+  const yuan = Math.round(((reads * READ_TOKENS.input * 2 + reads * READ_TOKENS.output * 3) / 1e6) * 10) / 10
+  return `${head}，约 ${((reads * (READ_TOKENS.input + READ_TOKENS.output)) / 1e6).toFixed(1)}M tokens（DeepSeek 约 ${yuan} 元，按 2 / 3 元每百万输入 / 输出粗算）`
 })
 
 const canStart = computed(() => {

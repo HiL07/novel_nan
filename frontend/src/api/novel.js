@@ -18,12 +18,54 @@ export function submitExtract(fileId, options = {}) {
 }
 
 /**
- * 取消排队中 / 进行中的提取任务（记为失败「已取消」）
+ * 取消排队中 / 进行中 / 中断的提取任务（记为失败「已取消」）
  * POST /api/novel/extract/{id}/cancel
  */
 export function cancelExtract(id) {
   return request.post(`/api/novel/extract/${id}/cancel`).then((res) => res.data)
 }
+
+/**
+ * 暂停排队中 / 进行中的提取任务（停下后为「已中断」，断点保留，可继续或取消）
+ * POST /api/novel/extract/{id}/pause
+ */
+export function pauseExtract(id) {
+  return request.post(`/api/novel/extract/${id}/pause`).then((res) => res.data)
+}
+
+/**
+ * 删除提取失败的任务（成功 / 提取中的跳过）→ {deleted, skipped}
+ * POST /api/novel/extract/delete {ids}
+ */
+export function deleteExtracts(ids) {
+  return request.post('/api/novel/extract/delete', { ids }).then((res) => res.data)
+}
+
+/**
+ * 继续中断的提取任务（同一任务，从断点接着做；AI 服务里还在跑就直接接上）
+ * POST /api/novel/extract/{id}/resume
+ */
+export function resumeExtract(id) {
+  return request.post(`/api/novel/extract/${id}/resume`).then((res) => res.data)
+}
+
+/**
+ * 整理卡片：对提取成功的小说，把实体档案整理成素材卡 / 体系卡 / 剧情段（进入待确认）
+ * POST /api/novel/extract/{id}/compile {model, entityKeys?, categories?, topN?, plot?}
+ */
+export function compileExtract(id, body) {
+  return request.post(`/api/novel/extract/${id}/compile`, body).then((res) => res.data)
+}
+
+/** 这次提取的整理记录（最近的在前）GET /api/novel/extract/{id}/compiles */
+export function listCompiles(id) {
+  return request.get(`/api/novel/extract/${id}/compiles`).then((res) => res.data)
+}
+
+/** 暂停 / 继续 / 取消整理：POST /api/novel/extract/compile/{cid}/pause|resume|cancel */
+export const pauseCompile = (cid) => request.post(`/api/novel/extract/compile/${cid}/pause`).then((res) => res.data)
+export const resumeCompile = (cid) => request.post(`/api/novel/extract/compile/${cid}/resume`).then((res) => res.data)
+export const cancelCompile = (cid) => request.post(`/api/novel/extract/compile/${cid}/cancel`).then((res) => res.data)
 
 /**
  * 提取任务列表（不含结果），按创建时间倒序

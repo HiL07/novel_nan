@@ -46,10 +46,35 @@ public class AiServiceClient {
     }
 
     /** POST /api/extract/jobs → Job（含 jobId）。materials 为素材候选提取范围（null 表示不提取） */
+    /**
+     * resumeKey：断点键（e&lt;任务id&gt;，Python 续跑时跳过已完成的块）。
+     * cfg = 大模型配置；local = {baseId, chunkChars} 应用内本地模型，或 {source: gguf} = llama.cpp 页运行中的 GGUF（三选一）
+     */
     public JsonNode submitExtract(Long fileId, String fileExt, AiModelConfig cfg, Map<String, Object> local,
-                                  Map<String, Object> materials) {
-        // cfg = 大模型配置；local = {baseId, chunkChars} 应用内本地模型，或 {source: gguf} = llama.cpp 页运行中的 GGUF（三选一）
+                                  Map<String, Object> materials, String resumeKey) {
         Map<String, Object> body = new HashMap<>(Map.of("fileId", fileId, "fileExt", fileExt));
+        if (resumeKey != null) {
+            body.put("resumeKey", resumeKey);
+        }
+        putModel(body, cfg, local);
+        if (materials != null) {
+            body.put("materials", materials);
+        }
+        return client.post().uri("/api/extract/jobs").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /**
+     * POST /api/extract/compile/jobs：整理卡片（实体档案 + 章节摘要 → 素材卡 / 剧情段），进度 / 取消同提取任务的 jobs 接口。
+     * body：{fileId, entities, chapters[{title, summary}], plot}；模型同 {@link #submitExtract}。
+     */
+    public JsonNode submitCompile(Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local, String resumeKey) {
+        Map<String, Object> req = new HashMap<>(body);
+        req.put("resumeKey", resumeKey);
+        putModel(req, cfg, local);
+        return slowClient.post().uri("/api/extract/compile/jobs").body(req).retrieve().body(JsonNode.class);
+    }
+
+    private void putModel(Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
         if (local != null && "gguf".equals(local.get("source"))) {
             body.put("gguf", true);
         } else if (local != null) {
@@ -57,10 +82,16 @@ public class AiServiceClient {
         } else {
             body.put("model", modelBody(cfg));
         }
-        if (materials != null) {
-            body.put("materials", materials);
-        }
-        return client.post().uri("/api/extract/jobs").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/checkpoints/{key}/delete：保存提取结果后删除断点（正被任务使用时 Python 返回 400） */
+    public void deleteExtractCheckpoint(String key) {
+        client.post().uri("/api/extract/checkpoints/{key}/delete", key).retrieve().toBodilessEntity();
+    }
+
+    /** GET /api/extract/checkpoints/{key} → {exists, stages: {pass1, pass2, cards, systems, arcs}, running} */
+    public JsonNode extractCheckpoint(String key) {
+        return client.get().uri("/api/extract/checkpoints/{key}", key).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/materials/expand：语义检索第 1 步，需求 → {ok, keywords, tags, categories} */
@@ -103,6 +134,26 @@ public class AiServiceClient {
             body.put("modelId", modelId.trim());
         }
         return slowClient.post().uri("/api/materials/vector-search").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/materials/merge/groups：本地向量模型找相似素材组 → {ok, groups: [{ids, score, minScore}], total, model, ms} */
+    public JsonNode mergeGroups(String modelId, List<Map<String, Object>> items, double threshold, int maxGroup) {
+        Map<String, Object> body = new HashMap<>(Map.of("items", items, "threshold", threshold, "maxGroup", maxGroup));
+        if (modelId != null && !modelId.isBlank()) {
+            body.put("modelId", modelId.trim());
+        }
+        return slowClient.post().uri("/api/materials/merge/groups").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/materials/merge/draft：一组素材 → AI 合并稿 {ok, same, title, …, variants, usage}；cfg 为 null 时用 GGUF */
+    public JsonNode mergeDraft(String category, List<Map<String, Object>> members, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>(Map.of("category", category, "members", members));
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/materials/merge/draft").body(body).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/materials/vector-feedback：向量检索后勾选 / 没勾选的素材（留作 embedding 微调数据） */

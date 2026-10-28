@@ -5,13 +5,13 @@ import request from './request'
  * 分类代码与 Java MaterialService.CATEGORIES、python-service/app/materials.py 一致。
  */
 export const MATERIAL_CATEGORIES = [
-  { code: 'world', label: '世界观', icon: 'MapLocation', attrs: ['规则', '影响', '适用题材'] },
-  { code: 'faction', label: '势力', icon: 'OfficeBuilding', attrs: ['类型', '立场', '实力', '特点'] },
-  { code: 'character', label: '角色', icon: 'User', attrs: ['身份', '性格', '能力', '经历'] },
-  { code: 'monster', label: '怪物', icon: 'Warning', attrs: ['外形', '能力', '弱点', '栖息地', '习性'] },
-  { code: 'location', label: '地点', icon: 'Location', attrs: ['类型', '特点'] },
-  { code: 'item', label: '物品功法', icon: 'Present', attrs: ['类别', '作用', '代价'] },
-  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['套路', '冲突', '转折', '可借鉴之处'] }
+  { code: 'world', label: '世界观', icon: 'MapLocation', attrs: ['规则内容', '代价', '限制', '谁能打破', '对社会的影响'] },
+  { code: 'faction', label: '势力', icon: 'OfficeBuilding', attrs: ['结构', '目标', '资源', '内部矛盾'] },
+  { code: 'character', label: '角色', icon: 'User', attrs: ['人设核心', '反差', '能力', '动机', '关系', '名场面'] },
+  { code: 'monster', label: '怪物', icon: 'Warning', attrs: ['外形', '能力', '弱点及原因', '习性', '社会结构', '来源', '与人类的关系'] },
+  { code: 'location', label: '地点', icon: 'Location', attrs: ['特征', '危险', '特殊规则', '产出'] },
+  { code: 'item', label: '物品功法', icon: 'Present', attrs: ['作用', '代价', '获取方式', '限制'] },
+  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['起因', '冲突', '转折', '结果', '功能'] }
 ]
 export const categoryOf = (code) => MATERIAL_CATEGORIES.find((c) => c.code === code)
 
@@ -79,3 +79,35 @@ export const pendingCandidateCount = () => get('/api/material/candidates/count')
 /** items: [{id, category?, subtype?, title?, summary?, attributes?, tags?, detail?}]（带修改后的内容） */
 export const saveCandidates = (items) => post('/api/material/candidates/save', { items })
 export const ignoreCandidates = (ids) => post('/api/material/candidates/ignore', { ids })
+
+// ------------------------------------------------------------------ 精炼 / 合并
+
+/** 查找相似素材组（本地向量模型，不花 token）{categories?, books?, crossBookOnly?, threshold?, maxGroup?, modelId?} → {found, skipped, …} */
+export const findMerges = (body) =>
+  post('/api/material/merge/find', { modelId: getVectorModelId() || undefined, ...body }, { timeout: 15 * 60 * 1000 })
+/** 合并建议（分页）status: open | APPLIED | IGNORED */
+export const listMerges = (params) => get('/api/material/merge/list', params)
+/** {open, drafted, cross, APPLIED, IGNORED} */
+export const mergeCounts = () => get('/api/material/merge/counts')
+/** AI 写合并稿（后台逐组）{ids, model} */
+export const draftMerges = (ids, model) => post('/api/material/merge/draft', { ids, model })
+export const mergeDraftStatus = () => get('/api/material/merge/draft/status')
+export const stopMergeDraft = () => post('/api/material/merge/draft/stop')
+/** 确认合并 {memberIds, title, subtype, summary, detail, attributes, tags, variants} → 主条目 */
+export const applyMerge = (id, body) => post(`/api/material/merge/${id}/apply`, body)
+export const ignoreMerges = (ids) => post('/api/material/merge/ignore', { ids })
+export const restoreMerges = (ids) => post('/api/material/merge/restore', { ids })
+/** 拆分主条目：成员回到素材库 */
+export const unmergeMaterial = (materialId) => post(`/api/material/merge/unmerge/${materialId}`)
+
+/** 合并而来、有多个可选版本的素材 */
+export const isMultiVersion = (m) => m?.source?.type === 'merge' && (m.source.variants?.length || 0) > 1
+
+/** 选中素材里多版本素材的用法 → 请求里的 materialVariants {素材 id: 'blend' | 成员 id}（'auto' = 让 AI 选，默认，不用发） */
+export function materialVariants(list) {
+  const out = {}
+  for (const m of list || []) {
+    if (isMultiVersion(m) && m.variant && m.variant !== 'auto') out[m.id] = String(m.variant)
+  }
+  return out
+}

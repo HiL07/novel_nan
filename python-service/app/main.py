@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import config, extractor, llm_client, local_extract
+from . import config, extract_checkpoint, extractor, llm_client, local_extract, material_merge
 from . import materials as material_mod
 from .llm_client import ModelConfig
 from .crawler.router import router as crawl_router
@@ -71,6 +71,25 @@ class ExtractRequest(BaseModel):
     local: Optional[LocalExtract] = None   # 本地模型；与 model 二选一
     gguf: bool = False                     # 用「llama.cpp」页正在运行的 GGUF 模型（代替 model）
     materials: Optional[material_mod.MaterialOptions] = None  # 素材候选提取范围；为空则不提取
+    # 断点键（Java 传 e<任务id>，续跑时跳过已完成的块）
+    resumeKey: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class CompileChapter(BaseModel):
+    title: str = Field(default="", max_length=200)
+    summary: str = Field(default="", max_length=2000)
+
+
+class CompileRequest(BaseModel):
+    """整理卡片：一次提取的实体档案（Java 从提取结果里取出、按用户选的范围过滤）+ 章节摘要（剧情段用）。"""
+    fileId: int = Field(gt=0)
+    entities: list[dict] = Field(max_length=5000)
+    chapters: list[CompileChapter] = Field(default_factory=list, max_length=20000)
+    plot: bool = True
+    model: Optional[ModelConfig] = None
+    local: Optional[LocalExtract] = None
+    gguf: bool = False
+    resumeKey: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class VerifyResult(BaseModel):
@@ -95,20 +114,28 @@ _jobs: dict[str, Job] = {}
 _lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="extract")
 _stops: dict[str, threading.Event] = {}  # jobId → 取消标记
+_active_keys: set[str] = set()  # 正在使用的断点键（不许删除）
 
 
-def _run(job: Job, file_ext: str, req: ExtractRequest) -> None:
+def _run(job: Job, file_ext: str, req: "ExtractRequest | CompileRequest") -> None:
     def on_progress(progress: int, message: str) -> None:
         job.progress, job.message = progress, message
 
     stop = _stops[job.jobId]
     if stop.is_set():  # 排队时已取消
         job.status, job.message = "cancelled", "已取消"
+        _active_keys.discard(req.resumeKey or "")
         return
     job.status = "running"
     try:
-        job.result = extractor.extract(job.fileId, file_ext, req.model, on_progress, req.materials,
-                                       local=req.local.model_dump() if req.local else None, stop_event=stop)
+        if isinstance(req, CompileRequest):
+            job.result = extractor.compile_job(req.entities, [c.model_dump() for c in req.chapters], req.model, on_progress,
+                                               local=req.local.model_dump() if req.local else None, plot=req.plot,
+                                               stop_event=stop, resume_key=req.resumeKey)
+        else:
+            job.result = extractor.extract(job.fileId, file_ext, req.model, on_progress, req.materials,
+                                           local=req.local.model_dump() if req.local else None, stop_event=stop,
+                                           resume_key=req.resumeKey)
         job.progress, job.status = 100, "succeeded"
     except extractor.Cancelled:
         job.status, job.message = "cancelled", "已取消"
@@ -118,6 +145,8 @@ def _run(job: Job, file_ext: str, req: ExtractRequest) -> None:
             return
         log.exception("提取失败 jobId=%s fileId=%s", job.jobId, job.fileId)
         job.status, job.error = "failed", str(e) or e.__class__.__name__
+    finally:
+        _active_keys.discard(req.resumeKey or "")
 
 
 @app.get("/api/health")
@@ -194,6 +223,48 @@ def materials_vector_search(req: VectorSearchRequest) -> dict:
         return {"ok": False, "message": str(e)}
 
 
+class MergeItem(BaseModel):
+    id: int
+    category: str = ""
+    title: str = Field(default="", max_length=200)
+    text: str = Field(default="", max_length=20000)
+
+
+class MergeGroupsRequest(BaseModel):
+    modelId: Optional[str] = Field(default=None, max_length=120)  # 空 = 默认向量模型
+    items: list[MergeItem] = Field(max_length=50000)
+    threshold: float = Field(default=0.82, ge=0.6, le=0.99)
+    maxGroup: int = Field(default=6, ge=2, le=12)
+
+
+@app.post("/api/materials/merge/groups")
+def materials_merge_groups(req: MergeGroupsRequest) -> dict:
+    """精炼 / 合并第 1 步：本地向量模型找出同分类里互相很像的素材组（不花 token）。"""
+    return _vector_call(material_merge.find_groups, req.modelId or None, [i.model_dump() for i in req.items],
+                        req.threshold, req.maxGroup)
+
+
+class MergeDraftRequest(BaseModel):
+    category: str
+    members: list[dict] = Field(min_length=2, max_length=12)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/materials/merge/draft")
+def materials_merge_draft(req: MergeDraftRequest) -> dict:
+    """精炼 / 合并第 2 步：一组素材 → 合并稿（同一种东西是哪些、主条目共性、每条的写法）。模型 = 大模型或 GGUF。"""
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        return {"ok": True, **material_merge.draft(req.category, req.members, cfg)}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
 class VectorFeedbackRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     modelId: str = Field(default="", max_length=120)
@@ -214,6 +285,11 @@ def submit(req: ExtractRequest) -> Job:
     ext = req.fileExt.lower()
     if ext not in config.SUPPORTED_EXTS:
         raise HTTPException(400, f"不支持的文件类型：{ext}")
+    return _queue(req, ext)
+
+
+def _queue(req: "ExtractRequest | CompileRequest", ext: str = "") -> Job:
+    """解析模型来源（gguf → llama.cpp 页运行中的模型）、检查断点键没被占用，排进单线程队列。"""
     if req.gguf:
         try:
             req.model = ModelConfig(**local_llama.api_config())
@@ -226,12 +302,24 @@ def submit(req: ExtractRequest) -> Job:
             local_extract.check_available()
         except llm_client.LLMError as e:
             raise HTTPException(400, str(e)) from e
+    if req.resumeKey and req.resumeKey in _active_keys:
+        raise HTTPException(400, "这个任务还在运行（断点正被使用），请等它结束或先取消")
     job = Job(jobId=uuid.uuid4().hex, fileId=req.fileId, message="排队中")
     with _lock:
         _jobs[job.jobId] = job
         _stops[job.jobId] = threading.Event()
+        if req.resumeKey:
+            _active_keys.add(req.resumeKey)
     _executor.submit(_run, job, ext, req)
     return job
+
+
+@app.post("/api/extract/compile/jobs")
+def submit_compile(req: CompileRequest) -> Job:
+    """整理卡片（和提取任务同一个队列，一次一个）；进度 / 取消用 /api/extract/jobs/{jobId}。"""
+    if not req.entities:
+        raise HTTPException(400, "没有要整理的实体")
+    return _queue(req)
 
 
 @app.get("/api/extract/jobs/{job_id}")
@@ -240,6 +328,27 @@ def get_job(job_id: str) -> Job:
     if job is None:
         raise HTTPException(404, "任务不存在")
     return job
+
+
+@app.get("/api/extract/checkpoints/{key}")
+def extract_checkpoint_info(key: str) -> dict:
+    """素材提取 v2 的断点：{exists, stages: {pass1: 块数, pass2, cards, systems, arcs}, running}"""
+    try:
+        return {**extract_checkpoint.info(key), "running": key in _active_keys}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/extract/checkpoints/{key}/delete")
+def extract_checkpoint_delete(key: str) -> dict:
+    """Java 保存结果后 / 删除任务时调用；正在使用的断点不能删。"""
+    if key in _active_keys:
+        raise HTTPException(400, "提取任务正在使用这个断点")
+    try:
+        extract_checkpoint.remove(key)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True}
 
 
 @app.post("/api/extract/jobs/{job_id}/cancel")

@@ -34,7 +34,7 @@
             <li>「设定」「章节」只提供勾选的项；设定分类没有内容时，勾了也不会发送。</li>
             <li>「已选走向」= 后续走向里点了「支持 / 追加」的项；没选的不会用到（等于拒绝）。</li>
             <li>「已采用的大纲」有就会带上；书名、大纲、章节题目、后续走向都参考它。</li>
-            <li>「素材」= 点「AI 构思后续走向」时在右侧抽屉里选的素材（打开时用 基调 + 构思方向 本地检索预勾选；屏蔽来源书也在那里改）。选好的素材也用于书名 / 大纲 / 章节题目，可在走向按钮下方删掉。</li>
+            <li>「素材」= 点「AI 构思后续走向」时在右侧抽屉里选的素材（打开时用 构思方向 框内文字本地检索预勾选；屏蔽来源书也在那里改）。选好的素材也用于书名 / 大纲 / 章节题目，可在走向按钮下方删掉。</li>
             <li>设定页里的「AI 填写」不受本页选择影响：它使用全部当前设定、已写章节和大纲。</li>
           </ul>
         </div>
@@ -152,7 +152,7 @@
           <el-button size="small" :icon="MagicStick" :loading="loading === 'direction'" :disabled="!!loading || !ready" @click="openDirectionPicker">
             {{ directionLabel }}
           </el-button>
-          <span class="muted">先在右侧选素材（可不选），再结合构思方向、基调、勾选的设定 / 章节生成；可重复生成，每次给出不同的走向</span>
+          <span class="muted">先在右侧选素材（可不选），再围绕构思方向框内的内容展开（基调只定风格，勾选的设定 / 章节作背景）；可重复生成，每次给出不同的走向</span>
         </div>
         <div v-if="picked.length" class="chips">
           <span class="muted">已选素材（也用于书名 / 大纲 / 章节题目）：</span>
@@ -294,7 +294,7 @@ import { ElInput, ElMessage, ElMessageBox, ElTag } from 'element-plus'
 import { EditPen, MagicStick, QuestionFilled } from '@element-plus/icons-vue'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
-import { categoryOf } from '@/api/material'
+import { categoryOf, materialVariants } from '@/api/material'
 import { generateIdeas, updateNovel } from '@/api/novelGen'
 import { errorMessage } from '@/api/request'
 
@@ -330,7 +330,7 @@ const saving = ref(false)
 const last = ref(null)
 const draft = ref(null)
 const pickerVisible = ref(false)
-const pickerQuery = ref('')      // 打开抽屉时的检索词（基调 + 构思方向）
+const pickerQuery = ref('')      // 打开抽屉时的检索词（构思方向）
 const directions = ref([])
 const blockedBooks = useBlockedBooks(props.novel.id)
 const isBlocked = (m) => !m.pinned && !!m.sourceBook && blockedBooks.value.includes(m.sourceBook)
@@ -414,7 +414,7 @@ function modelAndMaterials() {
     ...modelOnly(),
     spec: selectedSpec(),
     chapterContext: { current: useCurrent.value, past: usePast.value },
-    materialIds: picked.value.map((m) => m.id), excludeBooks: blockedBooks.value
+    materialIds: picked.value.map((m) => m.id), materialVariants: materialVariants(picked.value), excludeBooks: blockedBooks.value
   }
 }
 function modelOnly() {
@@ -424,8 +424,8 @@ function modelOnly() {
   }
 }
 
-/** 素材抽屉向量检索的检索词：基调 + 构思方向（检索词最多 500 字） */
-const materialQuery = () => [tone.value.trim(), hint.value.trim()].filter(Boolean).join('；').slice(0, 500)
+/** 素材抽屉向量检索的检索词：构思方向框内的文字（检索词最多 500 字） */
+const materialQuery = () => hint.value.trim().slice(0, 500)
 
 /** AI 润色：只把构思方向框里的文字发给模型扩写（不带设定 / 基调 / 章节 / 素材），结果由作者决定是否替换 */
 const polished = ref(null)
@@ -449,8 +449,7 @@ const chosenTexts = computed(() => chosenIds.value
   .map((id) => directions.value.find((d) => d.id === id))
   .filter(Boolean)
   .map(directionText))
-const directionLabel = computed(() => (hint.value.trim() ? 'AI 构思后续走向'
-  : tone.value.trim() ? 'AI 围绕基调给几个走向' : 'AI 给我几个走向'))
+const directionLabel = computed(() => (hint.value.trim() ? 'AI 构思后续走向' : 'AI 给我几个走向'))
 
 /** 点「AI 构思后续走向」：先在右侧抽屉选素材，确认后再生成 */
 function openDirectionPicker() {
@@ -502,11 +501,11 @@ function clearUnchosen() {
 const MANUAL_COLS = ['设定（勾选）', '章节（勾选）', '基调', '构思方向', '已选走向', '已采用大纲', '素材']
 const MANUAL_ROWS = [
   { name: 'AI 润色', uses: ['—', '—', '—', '只用框内文字', '—', '—', '—'] },
-  { name: 'AI 构思后续走向', uses: ['✓', '✓', '✓', '✓', '避开已给出 / 已拒绝的', '✓', '右侧抽屉里选的'] },
+  { name: 'AI 构思后续走向', uses: ['背景', '背景', '只定风格', '围绕它展开', '避开已给出 / 已拒绝的', '✓', '右侧抽屉里选的'] },
   { name: '生成书名', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
   { name: '生成大纲', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
   { name: '生成章节题目', uses: ['✓', '总是带全部已写章节', '✓', '✓', '✓', '✓', '已选素材'] },
-  { name: '素材抽屉预勾选', uses: ['—', '—', '检索词', '检索词', '—', '—', '本地向量检索素材库'] }
+  { name: '素材抽屉预勾选', uses: ['—', '—', '—', '检索词', '—', '—', '本地向量检索素材库'] }
 ]
 
 /** 大纲：一句话 + 梗概 + 分章表（readonly 时高亮下一章） */

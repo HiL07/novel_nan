@@ -276,6 +276,15 @@ def index(base_id: str | None, items: list[dict], encode: bool = True) -> dict:
             "ms": int((time.time() - t0) * 1000), **info}
 
 
+def vectors(base_id: str | None, texts: list[str]):
+    """一批文本的向量（L2 归一化，未缓存的顺便编码）→ (ndarray (n, dim), info {model, modelId, device, encoded})。"""
+    with _lock:
+        load(base_id)
+        bid = _state["baseId"]
+        mat, encoded, _ = _vectors_for(bid, texts, True)
+        return mat, {"model": _state["name"], "modelId": bid, "device": _state["device"], "encoded": encoded}
+
+
 RECALL = 50        # 向量 / 关键词各取前 N 条进入融合
 RRF_K = 60         # 倒数排名融合的平滑常数（常用默认值）
 RERANK_TOP = 30    # 融合后送重排模型的条数

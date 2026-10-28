@@ -45,26 +45,40 @@
     <!-- 已选（含预选、其他检索里选的） -->
     <div v-if="selectedList.length" class="chosen">
       <span class="muted">已选 {{ selectedList.length }} 条：</span>
-      <el-tag v-for="m in selectedList" :key="m.id" size="small" closable @close="selected[m.id] = null">{{ m.title }}</el-tag>
+      <el-tag v-for="m in selectedList" :key="m.id" size="small" closable @close="selected[m.id] = null">
+        {{ m.title }}<template v-if="isMultiVersion(m)"> · {{ variantText(m) }}</template>
+      </el-tag>
       <el-button link size="small" type="danger" @click="clearSelected">清空</el-button>
     </div>
 
     <div v-loading="loading" class="list">
       <el-empty v-if="!rows.length" :description="emptyText" :image-size="70" />
-      <div v-for="r in rows" :key="r.material.id" class="pick-item" :class="{ 'is-checked': selected[r.material.id] }" @click="toggle(r.material)">
-        <el-checkbox :model-value="!!selected[r.material.id]" @click.stop @change="toggle(r.material)" />
+      <div v-for="r in rows" :key="r.material.id" class="pick-item" :class="{ 'is-checked': selected[r.material.id] }" @click="toggle(r)">
+        <el-checkbox :model-value="!!selected[r.material.id]" @click.stop @change="toggle(r)" />
         <div class="pick-body">
           <div class="pick-head">
             <el-tag size="small" effect="plain">{{ categoryOf(r.material.category)?.label }}</el-tag>
             <b>{{ r.material.title }}</b>
             <span class="muted">{{ r.material.subtype }}</span>
             <el-tag v-if="r.material.pinned" size="small" type="warning" effect="plain">保留</el-tag>
+            <el-tag v-if="isMultiVersion(r.material)" size="small" type="success">{{ r.material.source.variants.length }} 种写法</el-tag>
+            <el-tag v-if="r.matchedLabel" size="small" type="warning" title="检索命中的是这个版本">命中：{{ r.matchedLabel }}</el-tag>
             <span class="muted source">{{ r.material.sourceBook ? `《${r.material.sourceBook}》` : '手动添加' }}</span>
             <span v-if="r.score != null" class="score" :class="{ weak: vector?.reranked && r.score < RERANK_MIN }" :title="rankTip(r)">{{ r.score }}</span>
           </div>
           <div class="pick-summary">{{ r.material.summary }}</div>
           <div class="pick-tags">
             <el-tag v-for="t in (r.material.tags || []).slice(0, 6)" :key="t" size="small" type="info">{{ t }}</el-tag>
+          </div>
+          <div v-if="selected[r.material.id] && isMultiVersion(r.material)" class="versions" @click.stop>
+            <span class="muted">用法：</span>
+            <el-radio-group v-model="selected[r.material.id].variant" size="small">
+              <el-radio-button value="auto" title="把各版本都给 AI，让它选一个最贴合设定的">让 AI 选</el-radio-button>
+              <el-radio-button v-for="(v, i) in r.material.source.variants" :key="v.id" :value="String(v.id)" :title="v.note || v.title">
+                只用{{ MARKS[i] }}{{ v.label || v.title }}
+              </el-radio-button>
+              <el-radio-button value="blend" title="把几种写法组合成一个新设定">融合</el-radio-button>
+            </el-radio-group>
           </div>
           <div v-if="selected[r.material.id] && !pickOnly" class="target">将应用到：{{ describeTarget(r.material, categories) }}</div>
         </div>
@@ -91,7 +105,7 @@
 import { computed, nextTick, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-import { MATERIAL_CATEGORIES, categoryOf, getMaterialTags, searchMaterials, vectorFeedback, vectorSearch } from '@/api/material'
+import { MATERIAL_CATEGORIES, categoryOf, getMaterialTags, isMultiVersion, searchMaterials, vectorFeedback, vectorSearch } from '@/api/material'
 import BlockedBooksSelect from '@/components/material/BlockedBooksSelect.vue'
 import { describeTarget } from '@/novel-options/materialApply'
 import { errorMessage } from '@/api/request'
@@ -119,6 +133,20 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'update:excludeBooks', 'apply', 'cancel'])
 
 const AUTO_PICK = 5
+const MARKS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫'
+
+/** 选中的素材对象：多版本素材带 variant（auto = 让 AI 选；检索命中某个版本时默认只用那一版） */
+function pick(r) {
+  const m = r.material || r
+  return isMultiVersion(m) ? { ...m, variant: m.variant || (r.matchedVariant ? String(r.matchedVariant) : 'auto') } : m
+}
+function variantText(m) {
+  if (!m.variant || m.variant === 'auto') return '让 AI 选'
+  if (m.variant === 'blend') return '融合'
+  const i = m.source.variants.findIndex((v) => String(v.id) === m.variant)
+  const v = m.source.variants[i]
+  return v ? `${MARKS[i] || ''}${v.label || v.title}` : '让 AI 选'
+}
 /** 重排后的相关度达到这个分才算相关（与 Java MaterialService.RERANK_MIN_SCORE 一致） */
 const RERANK_MIN = 30
 const rankTip = (r) => `相似度 ${r.similarity}` + (r.vecRank ? ` · 向量第 ${r.vecRank}` : '') + (r.lexRank ? ` · 关键词第 ${r.lexRank}` : '')
@@ -159,7 +187,7 @@ async function onOpen() {
   vector.value = null
   vq.value = props.vectorQuery || ''
   Object.keys(selected).forEach((k) => delete selected[k])
-  props.initialSelected.forEach((m) => (selected[m.id] = m))
+  props.initialSelected.forEach((m) => (selected[m.id] = pick(m)))
   loadTags()
   if (props.autoVector && vq.value.trim()) {
     mode.value = 'vector'
@@ -168,7 +196,7 @@ async function onOpen() {
     ;(vector.value?.results || [])
       .filter((r) => !vector.value.reranked || r.score >= RERANK_MIN)
       .slice(0, AUTO_PICK)
-      .forEach((r) => (selected[r.material.id] = r.material))
+      .forEach((r) => (selected[r.material.id] = pick(r)))
   } else {
     mode.value = 'keyword'
     search()
@@ -235,8 +263,9 @@ async function onBlocked(books) {
   research()
 }
 
-function toggle(m) {
-  selected[m.id] = selected[m.id] ? null : m
+function toggle(r) {
+  const m = r.material
+  selected[m.id] = selected[m.id] ? null : pick(r)
 }
 
 function clearSelected() {
@@ -330,6 +359,9 @@ function apply(none) {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  margin-top: 6px;
+}
+.versions {
   margin-top: 6px;
 }
 .target {
