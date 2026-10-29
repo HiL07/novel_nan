@@ -33,6 +33,12 @@ const routes = [
     meta: { title: '素材库', icon: 'Collection' }
   },
   {
+    path: '/inspire',
+    name: 'inspire',
+    component: () => import('@/views/inspire/index.vue'),
+    meta: { title: '灵感墙', icon: 'Opportunity' }
+  },
+  {
     // 侧边栏「小说抓取」：带子菜单，点父项进入第一个子页面
     path: '/novel/crawl',
     redirect: '/novel/crawl/config',

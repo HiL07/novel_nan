@@ -364,6 +364,7 @@ import {
 import { isGenerationModel, listAdapters, listModels, runningLlama } from '@/api/localModel'
 import { listModels as listAiModels } from '@/api/aiModel'
 import { errorMessage } from '@/api/request'
+import { APPLY_KEY as INSPIRE_KEY } from '@/api/inspire'
 
 const CH_STATUS = {
   generating: { label: '生成中', type: 'warning' },
@@ -932,8 +933,43 @@ function schedule() {
   }, 2000)
 }
 
-watch(() => route.params.id, (id) => id && route.name === 'novelWorkspace' && loadNovel().then(schedule))
-onActivated(() => loadNovel().then(schedule))
+/** 灵感墙「写进工作区」：设定元素 → 设定页按素材应用；构思方向 → AI 构思页的构思方向框（sessionStorage 交接，读完即删） */
+async function applyInspire() {
+  let payload = null
+  try {
+    payload = JSON.parse(sessionStorage.getItem(INSPIRE_KEY) || 'null')
+  } catch {
+    return
+  }
+  if (!payload || payload.novelId !== novel.value?.id) return
+  try {
+    sessionStorage.removeItem(INSPIRE_KEY)
+  } catch {
+    // 删不掉也只是下次再提示一次
+  }
+  if (Date.now() - (payload.at || 0) > 10 * 60 * 1000) return
+  tab.value = payload.to === 'hint' ? 'ideas' : 'settings'
+  // AI 构思页是懒加载的：等它渲染出来再填
+  for (let i = 0; i < 20 && !(payload.to === 'hint' ? ideaRef.value : editorRef.value); i++) {
+    await nextTick()
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  if (payload.to === 'hint') {
+    ideaRef.value?.setHint(payload.hint)
+    ElMessage.success('已把灵感墙的思路填进「构思方向」')
+  } else if (editorRef.value) {
+    const list = (payload.elements || []).map((e) => ({
+      id: null, category: e.category, subtype: '', title: e.name, attributes: {}, tags: [], detail: '',
+      summary: [e.desc, e.change ? `（相对原素材的改动：${e.change}）` : ''].filter(Boolean).join('')
+    }))
+    await editorRef.value.applyExternal(list)
+    settingsDirty.value = true
+    ElMessage.info('元素已加进设定，确认后记得「保存设定」')
+  }
+}
+
+watch(() => route.params.id, (id) => id && route.name === 'novelWorkspace' && loadNovel().then(applyInspire).then(schedule))
+onActivated(() => loadNovel().then(applyInspire).then(schedule))
 onDeactivated(() => clearTimeout(timer))
 </script>
 

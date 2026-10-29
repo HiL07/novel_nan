@@ -150,16 +150,7 @@ public class NovelGenService {
             used.put(m.getId(), usedEntry(m, null, "", false));
         }
         // 多版本素材（合并而来的主条目）怎么用：auto = 让 AI 选一个版本（默认）、blend = 融合、成员 id = 只用这个版本
-        Map<Long, String> variantChoice = new HashMap<>();
-        if (req.get("materialVariants") instanceof Map<?, ?> mv) {
-            mv.forEach((k, v) -> {
-                try {
-                    variantChoice.put(Long.parseLong(String.valueOf(k)), String.valueOf(v));
-                } catch (NumberFormatException ignored) {
-                    // 不是素材 id：忽略
-                }
-            });
-        }
+        Map<Long, String> variantChoice = parseVariants(req.get("materialVariants"));
         if (Boolean.TRUE.equals(req.get("autoMaterials"))) {
             String query = Objects.toString(req.get("query"), "").trim();
             if (query.isEmpty()) {
@@ -192,24 +183,7 @@ public class NovelGenService {
                 }
             }
         }
-        List<Map<String, Object>> materials = new ArrayList<>();
-        for (Material m : materialService.listByIds(new ArrayList<>(used.keySet()))) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id", m.getId());
-            item.put("category", m.getCategory());
-            item.put("subtype", Objects.requireNonNullElse(m.getSubtype(), ""));
-            item.put("title", m.getTitle());
-            String summary = Objects.requireNonNullElse(m.getSummary(), "");
-            String detail = Objects.requireNonNullElse(m.getDetail(), "");
-            item.put("summary", detail.isBlank() ? summary
-                    : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
-            item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
-            item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
-            if (MaterialService.isMergeMaster(m)) {
-                addVariants(item, m, variantChoice.getOrDefault(m.getId(), "auto"));
-            }
-            materials.add(item);
-        }
+        List<Map<String, Object>> materials = materialItems(new ArrayList<>(used.keySet()), variantChoice);
 
         Map<String, Object> body = new HashMap<>();
         body.put("kind", kind);
@@ -270,6 +244,54 @@ public class NovelGenService {
         out.put("usedMaterials", new ArrayList<>(used.values()));
         out.put("blockedMaterials", picked.size() - allowed.size());
         return out;
+    }
+
+    /** 请求里的 materialVariants {素材 id: auto | blend | 成员 id} → Map（不是数字的键忽略） */
+    public static Map<Long, String> parseVariants(Object raw) {
+        Map<Long, String> out = new HashMap<>();
+        if (raw instanceof Map<?, ?> mv) {
+            mv.forEach((k, v) -> {
+                try {
+                    out.put(Long.parseLong(String.valueOf(k)), String.valueOf(v));
+                } catch (NumberFormatException ignored) {
+                    // 不是素材 id：忽略
+                }
+            });
+        }
+        return out;
+    }
+
+    /**
+     * 素材 → 交给 Python 的条目 {id, category, subtype, title, summary（含截断的详细）, attributes, tags}，按 ids 的顺序；
+     * 多版本主条目按 variantChoice 附上 variants / variantMode。AI 构思、AI 填写、灵感墙共用。
+     */
+    public List<Map<String, Object>> materialItems(List<Long> ids, Map<Long, String> variantChoice) {
+        Map<Long, Material> byId = new HashMap<>();
+        materialService.listByIds(ids).forEach(m -> byId.put(m.getId(), m));
+        List<Map<String, Object>> materials = new ArrayList<>();
+        for (Long id : ids) {
+            Material m = byId.get(id);
+            if (m == null) {
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", m.getId());
+            item.put("category", m.getCategory());
+            item.put("subtype", Objects.requireNonNullElse(m.getSubtype(), ""));
+            item.put("title", m.getTitle());
+            String summary = Objects.requireNonNullElse(m.getSummary(), "");
+            String detail = Objects.requireNonNullElse(m.getDetail(), "");
+            item.put("summary", detail.isBlank() ? summary
+                    : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
+            item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
+            item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
+            item.put("book", Objects.requireNonNullElse(m.getSourceBook(), ""));
+            if (MaterialService.isMergeMaster(m)) {
+                addVariants(item, m, variantChoice.getOrDefault(m.getId(), "auto"));
+            }
+            materials.add(item);
+        }
+        return materials;
     }
 
     /**

@@ -189,8 +189,8 @@ def start_chapter(novel_id: str, req: ChapterReq):
 
 
 class IdeasReq(BaseModel):
-    kind: Literal["title", "outline", "chapter", "fill", "direction", "chat"]
-    hint: str = Field(default="", max_length=500)
+    kind: Literal["title", "outline", "chapter", "fill", "direction", "hint_polish", "chat"]
+    hint: str = Field(default="", max_length=3000)  # 构思方向最长 3000 字（ideas.HINT_CHARS）
     purpose: str = Field(default="", max_length=60)   # kind=direction：方向用在哪里（构思书名 / 补全角色…）
     chat: Optional[dict] = None   # kind=chat：{character: {name, card}, messages, scene?, userRole?}（见 ideas._chat）
     count: Optional[int] = Field(default=None, ge=1, le=40)
@@ -299,3 +299,58 @@ def get_job(job_id: str):
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str):
     return ok(_guard(chapter.cancel, job_id))
+
+
+# ---------------------------------------------------------------- 灵感墙（经 Java 转发，见 inspire.py）
+
+from . import inspire  # noqa: E402  放在这里：这一段整体追加在文件末尾
+
+
+class InspireReq(BaseModel):
+    request: str = Field(default="", max_length=2000)
+    target: str = Field(default="free", max_length=20)
+    conditions: str = Field(default="", max_length=2000)
+    novelId: Optional[str] = Field(default=None, max_length=64)   # 墙关联的工作区：带上它的设定 / 大纲 / 章节
+    count: int = Field(default=3, ge=1, le=5)
+    materials: list[dict] = Field(default_factory=list, max_length=60)  # Java 检索 / 用户勾选后的素材条目
+    wallIdeas: list[dict] = Field(default_factory=list, max_length=50)  # 墙上已收藏的思路 {title, pitch}
+    idea: Optional[dict] = None          # refine / revise：要处理的思路
+    instruction: str = Field(default="", max_length=1000)
+    history: list[str] = Field(default_factory=list, max_length=20)
+    api: Optional[llm_client.ModelConfig] = None
+    local: Optional[PolishReq] = None
+    gguf: bool = False
+
+
+def _inspire(fn, req: InspireReq):
+    data = req.model_dump()
+    if data.pop("gguf"):
+        data["api"], data["local"] = _guard(llama.api_config), None
+    try:
+        return ok(_guard(fn, data))
+    except inspire.InspireError as e:
+        raise LocalError(400, str(e)) from e
+
+
+@router.post("/inspire/plan")
+def inspire_plan(req: InspireReq):
+    """灵感墙 ①：需求 → 检索需求（分类 + 检索词 + 数量）"""
+    return _inspire(inspire.plan, req)
+
+
+@router.post("/inspire/ideas")
+def inspire_ideas(req: InspireReq):
+    """灵感墙 ③：素材 → 若干思路（引用编号已换成素材 id）"""
+    return _inspire(inspire.generate, req)
+
+
+@router.post("/inspire/refine")
+def inspire_refine(req: InspireReq):
+    """灵感墙：把一个思路细化成分段的详细内容"""
+    return _inspire(inspire.refine, req)
+
+
+@router.post("/inspire/revise")
+def inspire_revise(req: InspireReq):
+    """灵感墙：按作者的指令修改思路"""
+    return _inspire(inspire.revise, req)

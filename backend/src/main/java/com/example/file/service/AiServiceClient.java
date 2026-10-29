@@ -302,4 +302,22 @@ public class AiServiceClient {
                 "model", cfg.getModel(),
                 "concurrency", cfg.getConcurrency() == null ? 1 : cfg.getConcurrency());
     }
+
+    // ------------------------------------------------------------------ 灵感墙
+
+    /**
+     * POST /api/gen/inspire/{action}（plan / ideas / refine / revise）：灵感墙的模型调用，一次较长的输出，用慢客户端。
+     * 模型三选一：cfg = 大模型配置；local = {source: gguf} → gguf: true；local = {baseId, …} → 应用内本地模型。
+     */
+    public JsonNode genInspire(String action, Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
+        Map<String, Object> req = new HashMap<>(body);
+        if (local != null && "gguf".equals(local.get("source"))) {
+            req.put("gguf", true);
+        } else if (local != null) {
+            req.put("local", Map.of("baseId", local.get("baseId")));
+        } else if (cfg != null) {
+            req.put("api", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/gen/inspire/{action}", action).body(req).retrieve().body(JsonNode.class);
+    }
 }

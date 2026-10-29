@@ -13,6 +13,9 @@
 
     <!-- 右上角：使用说明（每个 AI 功能用到哪些内容） -->
     <div class="panel-head">
+      <el-button size="small" link type="primary" title="从素材库主动找素材、组合成几个具体思路（可以关联这个工作区）" @click="router.push('/inspire')">
+        去灵感墙构思
+      </el-button>
       <el-popover placement="bottom-end" :width="760" trigger="click">
         <template #reference>
           <el-button size="small" :icon="QuestionFilled">使用说明</el-button>
@@ -380,7 +383,11 @@ function refreshSettings() {
   }
 }
 onMounted(refreshSettings)
-defineExpose({ refreshSettings })
+// 灵感墙「写进工作区 → 填进构思方向」
+function setHint(text) {
+  hint.value = String(text || '').slice(0, 3000)
+}
+defineExpose({ refreshSettings, setHint })
 
 /** 发请求时现取设定，只保留勾选且有内容的分类；都没选时发 []（不提供设定） */
 function selectedSpec() {
@@ -684,7 +691,9 @@ async function clearOutline() {
 }
 .panel-head {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
 }
 .hint-box {
   position: relative;

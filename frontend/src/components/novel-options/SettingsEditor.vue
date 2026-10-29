@@ -248,7 +248,9 @@ watch([categories, values], () => ready && emit('change'), { deep: true })
 
 defineExpose({
   getConfig: () => clone({ schemaVersion: schemaVersion.value, categories: categories.value, values }),
-  getSpec: () => clone(spec.value)
+  getSpec: () => clone(spec.value),
+  // 灵感墙「写进工作区 → 加进设定」：思路里的元素当作素材应用（id 为空：不标「来自素材库」、不计使用次数）
+  applyExternal: (list) => onApplyMaterials(list)
 })
 
 async function resetAll() {
@@ -685,7 +687,8 @@ async function onApplyMaterials(list) {
   if (lastKey) activeKey.value = lastKey
   if (done.length) {
     ElMessage.success(`已应用 ${done.length} 条素材（可在对应分类中继续修改）`)
-    recordMaterialUse(done).catch(() => {})
+    const used = done.filter((id) => Number.isInteger(id))
+    if (used.length) recordMaterialUse(used).catch(() => {})
   }
   if (failed.length) ElMessage.error({ message: failed.join('；'), duration: 6000 })
 }
