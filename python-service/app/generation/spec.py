@@ -34,6 +34,7 @@ class Constraints:
     cards: list[Card]
     open: list[str]           # 未设定的内置分类名
     roster: list[str]         # 角色名单（名字 + 定位）
+    personas: list[dict] = field(default_factory=list)   # 人物内核快照（apply_personas）
 
 
 def _render(items: list[dict], depth: int = 0) -> list[str]:
@@ -119,3 +120,29 @@ def default_target_chars(spec: list[dict] | None) -> int | None:
                 if it.get("key") == "wordsPerChapter" and isinstance(it.get("value"), (int, float)):
                     return int(it["value"])
     return None
+
+
+# ---------------------------------------------------------------- 跨世界观角色卡（novel.personas，见 app/persona.py）
+
+PERSONA_ROLE_WORDS = ("主角",)
+
+
+def apply_personas(cons: Constraints, personas: list[dict] | None) -> Constraints:
+    """把写进工作区的人物内核加进约束：主角的进核心设定（不会被裁掉），其他人按名字 / 别名检索成卡片（id 以 persona. 开头，
+    context.build 里排在普通卡片前面）。原始快照留在 cons.personas，供规划 / 一致性检查用。"""
+    from .. import persona as persona_mod
+
+    cons.personas = [p for p in personas or [] if isinstance(p, dict) and p.get("name")]
+    for p in cons.personas:
+        text = p.get("brief") or persona_mod.render_brief(p)
+        if any(w in (p.get("role") or "") for w in PERSONA_ROLE_WORDS):
+            cons.core.append(text)
+        else:
+            cons.cards.append(Card(id=f"persona.{p['name']}", title=f"人物内核：{p['name']}", text=text,
+                                   keywords={p["name"], *[a for a in p.get("aliases") or [] if a]}))
+    return cons
+
+
+def build_for(novel: dict, spec: list[dict] | None = None) -> Constraints:
+    """工作区的约束 = 设定（spec 为空时用已保存的）+ 人物内核。"""
+    return apply_personas(build(spec if spec is not None else novel["settings"].get("spec")), novel.get("personas"))

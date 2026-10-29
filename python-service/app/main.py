@@ -128,7 +128,9 @@ def _run(job: Job, file_ext: str, req: "ExtractRequest | CompileRequest") -> Non
         return
     job.status = "running"
     try:
-        if isinstance(req, CompileRequest):
+        if isinstance(req, PersonaJobRequest):
+            job.result = _persona_job(req, on_progress, stop)
+        elif isinstance(req, CompileRequest):
             job.result = extractor.compile_job(req.entities, [c.model_dump() for c in req.chapters], req.model, on_progress,
                                                local=req.local.model_dump() if req.local else None, plot=req.plot,
                                                stop_event=stop, resume_key=req.resumeKey)
@@ -361,3 +363,183 @@ def cancel_job(job_id: str) -> Job:
         _stops[job_id].set()
         job.message = "正在取消…"
     return job
+
+
+# ---------------------------------------------------------------- 跨世界观角色卡（app/persona.py）
+
+class PersonaFile(BaseModel):
+    id: int = Field(gt=0)
+    ext: str = Field(default="txt", max_length=10)
+
+
+class PersonaJobRequest(BaseModel):
+    """角色卡后台任务：extract = 资料 → 原型卡；test = 辨识度测试。和提取任务同一个单线程队列。"""
+    kind: Literal["extract", "test"]
+    fileId: int = 0
+    name: str = Field(default="", max_length=60)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    whole: bool = False                       # 资料整篇都关于他（传记 / 资料）
+    text: str = Field(default="", max_length=600000)
+    files: list[PersonaFile] = Field(default_factory=list, max_length=10)
+    seedFacts: list[dict] = Field(default_factory=list, max_length=500)   # 实体档案里已核实的事实
+    maxBlocks: int = Field(default=60, ge=5, le=200)
+    chunkChars: int = Field(default=3000, ge=1500, le=6000)
+    prototype: Optional[dict] = None          # test
+    adaptation: Optional[dict] = None         # test
+    judgeModel: Optional[ModelConfig] = None  # test：评委改用的模型（空 = 同一个）
+    model: Optional[ModelConfig] = None
+    local: Optional[LocalExtract] = None
+    gguf: bool = False
+    resumeKey: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _persona_job(req: PersonaJobRequest, on_progress, stop: threading.Event) -> dict:
+    from . import persona, text_loader
+
+    def run(call, local: bool) -> dict:
+        if req.kind == "extract":
+            texts = [req.text] if req.text.strip() else []
+            for f in req.files:
+                texts.append(text_loader.to_plain_text(text_loader.fetch_file(f.id), f.ext.lower()))
+            fp = {"kind": "extract", "name": req.name, "aliases": req.aliases, "whole": req.whole,
+                  "chars": sum(len(t) for t in texts), "files": [f.id for f in req.files], "blocks": req.maxBlocks,
+                  "chunk": req.chunkChars}
+            ckpt = extract_checkpoint.Checkpoint(req.resumeKey, fp)
+            try:
+                return persona.extract("\n\n".join(texts), req.name, req.aliases, req.whole, req.seedFacts, call, ckpt,
+                                       on_progress, stop, max_blocks=req.maxBlocks, chunk=req.chunkChars, local=local)
+            finally:
+                ckpt.close()
+        judge = persona.call_for(cfg=req.judgeModel) if req.judgeModel else call
+        return persona.identity_test(req.prototype or {}, req.adaptation or {}, call, judge, on_progress, stop)
+
+    try:
+        if req.local:
+            with local_extract.LocalSession(req.local.baseId, stop) as session:
+                return run(persona.call_for(session=session), True)
+        usage = llm_client.new_usage(req.model)
+        out = run(persona.call_for(cfg=req.model, usage=usage), False)
+        out["usage"] = usage
+        return out
+    except persona.Cancelled as e:
+        raise extractor.Cancelled(str(e)) from e
+
+
+@app.post("/api/persona/jobs")
+def submit_persona_job(req: PersonaJobRequest) -> Job:
+    """提取原型 / 辨识度测试（后台任务，进度 / 取消走 /api/extract/jobs/{jobId}）。"""
+    if req.kind == "extract" and not (req.text.strip() or req.files or req.seedFacts):
+        raise HTTPException(400, "没有资料：请粘贴文本、选择文件，或从实体档案选择人物")
+    if req.kind == "extract" and not req.name.strip():
+        raise HTTPException(400, "请填写人物名字")
+    if req.kind == "test" and not (req.prototype and req.adaptation):
+        raise HTTPException(400, "辨识度测试需要原型卡和适配版本")
+    return _queue(req)
+
+
+class PersonaSyncRequest(BaseModel):
+    model: Optional[ModelConfig] = None
+    local: Optional[LocalExtract] = None
+    gguf: bool = False
+
+
+class PersonaAdaptRequest(PersonaSyncRequest):
+    prototype: dict
+    world: str = Field(default="", max_length=8000)
+    wish: str = Field(default="", max_length=500)
+    novelId: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,64}$")   # 目标世界观 = 这个工作区的设定
+
+
+class PersonaCheckRequest(BaseModel):
+    prototype: dict
+    adaptation: dict
+
+
+@app.post("/api/persona/adaptation/check")
+def persona_check(req: PersonaCheckRequest) -> dict:
+    """作者编辑适配版本后重新检查（核心特征都有体现、锁定未改、泄漏）并重新拼写作用 brief；不调模型。"""
+    from . import persona
+
+    return {"adaptation": persona.recheck(req.adaptation, req.prototype)}
+
+
+def _novel_world(novel_id: str) -> str:
+    """工作区的世界观：核心设定 + 设定卡片（世界观、自定义元素等），给适配 / 试聊用。"""
+    from .generation import spec as spec_mod, store as gen_store
+
+    try:
+        novel = gen_store.get_novel(novel_id)
+    except gen_store.StoreError as e:
+        raise HTTPException(404, str(e)) from e
+    cons = spec_mod.build(novel["settings"].get("spec"))
+    return "\n\n".join([f"【书名】{novel['title']}"] + cons.core + [c.text for c in cons.cards])[:6000]
+
+
+class PersonaChatRequest(PersonaSyncRequest):
+    character: dict = Field(default_factory=dict)      # {name, card{字段: 值}, userRole?}
+    persona: Optional[dict] = None                     # 适配版本（或写进工作区的快照）
+    world: str = Field(default="", max_length=8000)
+    mode: Literal["free", "scene", "interview"] = "free"
+    scene: dict = Field(default_factory=dict)          # {description, others[{name, motive}], narrator}
+    inner: bool = True
+    messages: list[dict] = Field(default_factory=list, max_length=400)
+    summary: str = Field(default="", max_length=2000)
+    boost: bool = False
+    novelId: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,64}$")   # 工作区角色：按名字找人物内核、取世界设定
+
+
+def _persona_sync(req: PersonaSyncRequest, fn):
+    from . import persona
+
+    if req.gguf:
+        try:
+            req.model = ModelConfig(**local_llama.api_config())
+        except local_llama.LlamaError as e:
+            raise HTTPException(400, str(e)) from e
+    try:
+        if req.local:
+            local_extract.check_available()
+            with local_extract.LocalSession(req.local.baseId) as session:
+                return fn(persona.call_for(session=session))
+        if req.model is None:
+            raise HTTPException(400, "请指定大模型配置、GGUF 或本地模型")
+        usage = llm_client.new_usage(req.model)
+        out = fn(persona.call_for(cfg=req.model, usage=usage))
+        out["usage"] = usage
+        return out
+    except llm_client.LLMError as e:
+        raise HTTPException(400, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/persona/adapt")
+def persona_adapt(req: PersonaAdaptRequest) -> dict:
+    """原型卡 + 目标世界观 → 适配版本（含代码检查 checks 和写作用 brief）。"""
+    from . import persona
+
+    world = req.world or (_novel_world(req.novelId) if req.novelId else "")
+    return _persona_sync(req, lambda call: {"adaptation": persona.adapt(req.prototype, world, req.wish, call)})
+
+
+@app.post("/api/persona/chat")
+def persona_chat(req: PersonaChatRequest) -> dict:
+    """试聊一轮 → {reply, inner, summary?, summarizedUpTo?, drift?, usage}。会话由 Java 保存。
+    带 novelId 时：没给 persona 就按角色名在工作区的人物内核里找；没给 world 就用工作区的核心设定。"""
+    from . import persona
+    from .generation import store as gen_store
+
+    if req.novelId:
+        try:
+            novel = gen_store.get_novel(req.novelId)
+        except gen_store.StoreError as e:
+            raise HTTPException(404, str(e)) from e
+        name = str(req.character.get("name") or "")
+        if req.persona is None:
+            req.persona = next((p for p in novel.get("personas") or [] if name and name in [p.get("name"), *(p.get("aliases") or [])]),
+                               None)
+        if not req.world:
+            req.world = _novel_world(req.novelId)[:3000]
+    return _persona_sync(req, lambda call: persona.chat(
+        character=req.character, persona=req.persona, world=req.world, mode=req.mode, scene=req.scene, inner=req.inner,
+        messages=req.messages, summary=req.summary, boost=req.boost, call=call))

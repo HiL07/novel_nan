@@ -39,6 +39,13 @@ const routes = [
     meta: { title: '灵感墙', icon: 'Opportunity' }
   },
   {
+    // 跨世界观角色卡：原型卡 / 版本 / 适配版本 / 辨识度测试 / 试聊
+    path: '/persona',
+    name: 'persona',
+    component: () => import('@/views/persona/index.vue'),
+    meta: { title: '角色卡', icon: 'Avatar' }
+  },
+  {
     // 侧边栏「小说抓取」：带子菜单，点父项进入第一个子页面
     path: '/novel/crawl',
     redirect: '/novel/crawl/config',

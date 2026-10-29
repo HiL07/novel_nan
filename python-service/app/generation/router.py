@@ -354,3 +354,24 @@ def inspire_refine(req: InspireReq):
 def inspire_revise(req: InspireReq):
     """灵感墙：按作者的指令修改思路"""
     return _inspire(inspire.revise, req)
+
+
+# ---------------------------------------------------------------- 跨世界观角色卡：写进工作区的人物内核快照
+
+class PersonasReq(BaseModel):
+    personas: list[dict] = Field(default_factory=list, max_length=50)
+
+
+@router.get("/novels/{novel_id}/personas")
+def get_personas(novel_id: str):
+    return ok(_guard(store.get_novel, novel_id).get("personas") or [])
+
+
+@router.post("/novels/{novel_id}/personas")
+def set_personas(novel_id: str, req: PersonasReq):
+    """整体替换工作区的人物内核快照（Java 从角色卡库的适配版本生成）；写作时进入核心设定 / 卡片、规划和一致性检查。"""
+    if chapter.active_job() and chapter.active_job()["novelId"] == novel_id:
+        raise LocalError(400, "本工作区正在生成章节，完成后再修改")
+    personas = [p for p in req.personas if isinstance(p, dict) and str(p.get("name") or "").strip()]
+    _guard(store.update_novel, novel_id, personas=personas)
+    return ok(personas)

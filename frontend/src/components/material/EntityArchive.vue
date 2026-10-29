@@ -26,6 +26,9 @@
         <span class="name">{{ e.name }}</span>
         <span v-if="e.aliases?.length" class="muted">又称 {{ e.aliases.join('、') }}</span>
         <span class="muted">{{ e.facts.length }} 条事实 · {{ chapterSpan(e) }}</span>
+        <el-button v-if="extractId && e.category === 'character'" link size="small" type="primary" class="to-persona"
+                   title="到「角色卡」页，以这本书为资料、这些事实为种子提取人物原型（跨世界观角色卡）"
+                   @click="toPersona(e)">提取为原型</el-button>
         <el-button link type="danger" :icon="Delete" class="del" @click="remove([e.key])" />
       </div>
       <div class="facts-preview">{{ e.facts.slice(0, 3).map((f) => f.fact).join('；') }}{{ e.facts.length > 3 ? '…' : '' }}</div>
@@ -45,6 +48,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Check, Delete, MagicStick } from '@element-plus/icons-vue'
 import FactList from './FactList.vue'
 import { MATERIAL_CATEGORIES, categoryOf } from '@/api/material'
@@ -54,9 +58,15 @@ const PAGE = 20
 
 const props = defineProps({
   entities: { type: Array, default: () => [] },
-  saving: { type: Boolean, default: false }
+  saving: { type: Boolean, default: false },
+  extractId: { type: Number, default: null } // 有值时角色实体可「提取为原型」
 })
 const emit = defineEmits(['save', 'compile'])
+const router = useRouter()
+
+function toPersona(e) {
+  router.push({ path: '/persona', query: { extractId: props.extractId, entityKey: e.key, name: e.name } })
+}
 
 const list = ref([])
 const dirty = ref(false)
