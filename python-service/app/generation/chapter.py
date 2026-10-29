@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from .. import persona as persona_mod
 from ..local import inference, jobs as local_jobs, registry
 from . import context, facts as facts_mod, prompts, spec as spec_mod, store
 from .backends import GenerationError, GenParams, LocalHFGenerator, TextGenerator, get_generator
@@ -229,6 +230,8 @@ def _plan(gen: TextGenerator, novel: dict, cons: spec_mod.Constraints, chapter: 
     ledger = facts_mod.context_text(facts, " ".join([chapter["title"], chapter["goal"], prev_summary]))
     pieces = {"core": _core_text(cons), "facts": ledger, "prev_summary": prev_summary,
               "next_outline": _next_outline(novel, index)}
+    pieces["personas"] = _persona_rules(cons, " ".join([chapter["title"], chapter["goal"], prev_summary,
+                                                         pieces["next_outline"]]))
     max_tokens = 700
     budget = _input_budget(gen, novel, max_tokens)
 
@@ -238,7 +241,7 @@ def _plan(gen: TextGenerator, novel: dict, cons: spec_mod.Constraints, chapter: 
                                                               goal=chapter["goal"],
                                                               target_chars=chapter["targetChars"], **pieces)}]
     msgs = build()
-    for drop in ("facts", "prev_summary", "core"):  # 放不下时依次去掉
+    for drop in ("facts", "prev_summary", "personas", "core"):  # 放不下时依次去掉
         if gen.count_messages(msgs) <= budget:
             break
         pieces[drop] = ""
@@ -299,7 +302,7 @@ def _review(gen: TextGenerator, novel: dict, cons: spec_mod.Constraints, chapter
             [f"第{c['index']}章：{c['summary']}" for c in sums[-3:]]
     plan = "；".join((chapter.get("plan") or {}).get("beats") or [])
     pieces = {"core": _core_text(cons), "facts": facts_mod.context_text(before, text), "story": "\n".join(story),
-              "plan": plan}
+              "plan": plan, "personas": _persona_rules(cons, text)}
     max_tokens = 1500
 
     def build(body: str) -> list[dict]:
@@ -328,7 +331,17 @@ def _review(gen: TextGenerator, novel: dict, cons: spec_mod.Constraints, chapter
         issues.append({"type": it.get("type") if it.get("type") in prompts.REVIEW_TYPES else "logic",
                        "quote": quote, "found": bool(quote) and quote in text,
                        "detail": str(it["detail"]).strip()[:400], "fix": str(it.get("fix") or "").strip()[:400]})
+    # 人物内核：代码再扫一遍正文里出场人物「不该知道」的原世界术语（模型漏报时也能抓到）
+    seen = {i["detail"] for i in issues}
+    issues += [i for i in persona_mod.scan_unknowns(cons.personas, text) if i["detail"] not in seen]
     chapter["review"] = {"issues": issues, "at": store.now(), "model": gen.name, "ignored": False}
+
+
+def _persona_rules(cons: spec_mod.Constraints, text: str) -> str:
+    """本章涉及的人物内核（核心设定里已有的主角除外）的决策规则，供规划 / 一致性检查。"""
+    core = "\n".join(cons.core)
+    return persona_mod.rules_text([p for p in persona_mod.mentioned(cons.personas, text)
+                                   if (p.get("brief") or "") not in core])
 
 
 def _run(job: dict, req: dict) -> None:
@@ -360,7 +373,7 @@ def _write_chapter(job: dict, req: dict) -> None:
     novel = store.get_novel(job["novelId"])
     p = novel["params"]
     gen = get_generator(novel["model"], req.get("api"))
-    cons = spec_mod.build(novel["settings"].get("spec"))
+    cons = spec_mod.build_for(novel)
     index, target = job["chapterIndex"], req["targetChars"]
     seg_tokens = min(p["segmentTokens"], novel["contextWindow"] // 4)
     seg_chars = int(seg_tokens * CHARS_PER_TOKEN * 0.85)
@@ -544,7 +557,7 @@ def _recheck(job: dict, req: dict) -> None:
         store.save_chapter(novel["id"], chapter)
     if req.get("review") and not stop.is_set():
         job["phase"] = "review"
-        _review(gen, novel, spec_mod.build(novel["settings"].get("spec")), chapter, stop)
+        _review(gen, novel, spec_mod.build_for(novel), chapter, stop)
         store.save_chapter(novel["id"], chapter)
     job["status"] = "cancelled" if stop.is_set() else "succeeded"
 
@@ -689,7 +702,7 @@ def preview(novel_id: str, req: dict) -> dict:
     """不生成，只组装下一章第一段的上下文，返回分层 token 用量与完整提示词。"""
     novel = store.get_novel(novel_id)
     gen = get_generator(novel["model"])  # 大模型工作区：不带配置，只按字符估算 token
-    cons = spec_mod.build(novel["settings"].get("spec"))
+    cons = spec_mod.build_for(novel)
     chapters = store.list_chapters(novel_id)
     index = (chapters[-1]["index"] + 1) if chapters else 1
     p = novel["params"]

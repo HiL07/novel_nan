@@ -102,7 +102,9 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
     source_text = ch.written or ch.prev_chapter_tail
     beats = (ch.plan or {}).get("beats") or []
     haystack = " ".join([ch.title, ch.goal, source_text[-3000:]] + beats + [s["summary"] for s in summaries[-2:]])
-    scored = sorted(((score_card(c, haystack), c) for c in cons.cards), key=lambda x: -x[0])
+    # 人物内核卡（id 以 persona. 开头）在相关卡片里排最前：预算紧张时比普通设定卡后裁
+    scored = sorted(((score_card(c, haystack), c) for c in cons.cards),
+                    key=lambda x: (-(x[0] > 0 and x[1].id.startswith("persona.")), -x[0]))
     relevant = [c for s, c in scored if s > 0]
     irrelevant = [c for s, c in scored if s <= 0]
     recent_sums = sorted(summaries, key=lambda s: -s["index"])

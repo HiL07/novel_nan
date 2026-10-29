@@ -302,4 +302,50 @@ public class AiServiceClient {
                 "model", cfg.getModel(),
                 "concurrency", cfg.getConcurrency() == null ? 1 : cfg.getConcurrency());
     }
+
+    // ------------------------------------------------------------------ 跨世界观角色卡（Python app/persona.py）
+
+    /**
+     * POST /api/persona/jobs：提取原型（kind=extract）/ 辨识度测试（kind=test）后台任务，进度 / 取消走 extract jobs 接口。
+     * judgeCfg：测试的评委改用的大模型（null = 同一个）。
+     */
+    public JsonNode submitPersonaJob(Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local,
+                                     AiModelConfig judgeCfg) {
+        Map<String, Object> req = new HashMap<>(body);
+        putModel(req, cfg, local);
+        if (judgeCfg != null) {
+            req.put("judgeModel", modelBody(judgeCfg));
+        }
+        return slowClient.post().uri("/api/persona/jobs").body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/persona/adapt：原型 + 目标世界观 → 适配版本（一次长输出，慢客户端） */
+    public JsonNode personaAdapt(Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
+        Map<String, Object> req = new HashMap<>(body);
+        putModel(req, cfg, local);
+        return slowClient.post().uri("/api/persona/adapt").body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/persona/adaptation/check：编辑后重新检查 + 重新拼 brief（不调模型） */
+    public JsonNode personaCheck(Map<String, Object> prototype, Map<String, Object> adaptation) {
+        return client.post().uri("/api/persona/adaptation/check")
+                .body(Map.of("prototype", prototype, "adaptation", adaptation)).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/persona/chat：试聊一轮 */
+    public JsonNode personaChat(Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
+        Map<String, Object> req = new HashMap<>(body);
+        putModel(req, cfg, local);
+        return slowClient.post().uri("/api/persona/chat").body(req).retrieve().body(JsonNode.class);
+    }
+
+    /** GET / POST /api/gen/novels/{id}/personas：工作区的人物内核快照 */
+    public JsonNode getNovelPersonas(String novelId) {
+        return client.get().uri("/api/gen/novels/{id}/personas", novelId).retrieve().body(JsonNode.class);
+    }
+
+    public JsonNode setNovelPersonas(String novelId, List<Map<String, Object>> personas) {
+        return client.post().uri("/api/gen/novels/{id}/personas", novelId).body(Map.of("personas", personas))
+                .retrieve().body(JsonNode.class);
+    }
 }

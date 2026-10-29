@@ -136,7 +136,7 @@ def _material_lines(materials: list[dict]) -> list[str]:
 def _context(novel: dict, spec: list | None = None, current: bool = True, past: bool = True) -> tuple[str, list[dict]]:
     """工作区已有内容：书名、设定（核心 + 卡片；spec 为编辑器中尚未保存的当前设定时优先用它）、大纲，
     以及已写章节：past = 前情概要 + 更早章节的摘要，current = 最近写完的一章（摘要 + 结尾）。"""
-    cons = spec_mod.build(spec if spec is not None else novel["settings"].get("spec"))
+    cons = spec_mod.build_for(novel, spec)
     parts = [f"【当前书名】{novel['title']}"]
     settings = cons.core + [c.text for c in cons.cards]
     parts.append("【已确定的设定】\n" + ("\n\n".join(settings) if settings else "（尚未设定，可自由构思）"))
@@ -339,7 +339,7 @@ def _chat(novel: dict, req: dict, local: dict | None) -> dict:
         text = "、".join(map(str, v)) if isinstance(v, list) else str(v)
         card_lines.append(f"- {k}：{text[:600]}")
     spec = req.get("spec") if isinstance(req.get("spec"), list) else None
-    cons = spec_mod.build(spec if spec is not None else novel["settings"].get("spec"))
+    cons = spec_mod.build_for(novel, spec)
     world = "\n".join(cons.core)[:CHAT_SETTING_CHARS]
     system = CHAT_SYSTEM.format(name=name) + "\n\n【角色卡】\n" + ("\n".join(card_lines) or f"- 姓名：{name}")
     if world:

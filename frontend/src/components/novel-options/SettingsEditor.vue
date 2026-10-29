@@ -598,7 +598,8 @@ provide(EDITOR_KEY, {
   ai: {
     enabled: aiEnabled, loading: aiLoading, locked: aiLocked, busyKeyOf, fillField: aiFillField, customOption: aiCustomOption,
     excludeBooks: blockedBooks, genItems: aiGenItems, fillItem: aiFillItem,
-    chat: aiChat, cfg: aiCfg, apiModel: computed(() => props.ai?.apiModel)
+    chat: aiChat, cfg: aiCfg, apiModel: computed(() => props.ai?.apiModel),
+    novelId: computed(() => props.novelId)
   }
 })
 

@@ -56,10 +56,12 @@ PLAN_SYSTEM = "你是连载小说的策划编辑，负责在动笔前把一章�
 
 
 def plan_user(*, chapter_index: int, title: str, goal: str, target_chars: int, core: str, facts: str,
-              prev_summary: str, next_outline: str) -> str:
+              prev_summary: str, next_outline: str, personas: str = "") -> str:
     parts = []
     if core:
         parts.append("【核心设定】\n" + core)
+    if personas:
+        parts.append(personas)
     if facts:
         parts.append("【故事账本】\n" + facts)
     if prev_summary:
@@ -74,6 +76,7 @@ def plan_user(*, chapter_index: int, title: str, goal: str, target_chars: int, c
         "推进或回收【故事账本】里已有的伏笔时写它的编号（如「F1 推进：…」，只能用账本里出现过的编号，不要编造），"
         "打算新埋的写「新埋：…」；没有就留空数组。"
         "最后给出一个章末钩子（为下一章留悬念；有下一章预告时向它铺垫）。\n"
+        + (PERSONA_PLAN_RULE if "【人物内核·" in core + personas else "") +
         '输出格式：{"beats": ["…", "…"], "foreshadow": ["F1 推进：…", "新埋：…"], "hook": "…"}')
     return "\n\n".join(parts)
 
@@ -103,14 +106,20 @@ def digest_user(chapter_index: int, title: str, text: str, known: str) -> str:
 REVIEW_SYSTEM = ("你是严格的连载小说责任编辑，负责检查新写的一章与已有设定、前文是否矛盾。只输出 JSON，不要任何解释。"
                  "只报告确实存在的问题，不要吹毛求疵，不要评价文笔。")
 REVIEW_TYPES = {"setting": "设定冲突", "character": "人物不符", "timeline": "时间线", "foreshadow": "伏笔",
-                "logic": "逻辑漏洞"}
+                "logic": "逻辑漏洞", "persona": "人物内核不符"}
+PERSONA_PLAN_RULE = ("有【人物内核】的人物：节拍里他们的选择必须符合其决策规则；如果本章需要他违背内核，"
+                     "节拍里要写出原因（成长、被迫、内心矛盾），不能无故改变。\n")
+PERSONA_REVIEW_RULE = ("persona（有【人物内核】的人物：言行违背其不可改变的内核或决策规则，且正文没有交代原因；"
+                       "或者用到了他「不知道」的原世界知识 / 术语）。\n")
 
 
 def review_user(*, chapter_index: int, title: str, goal: str, text: str, core: str, facts: str, story: str,
-                plan: str) -> str:
+                plan: str, personas: str = "") -> str:
     parts = []
     if core:
         parts.append("【核心设定】\n" + core)
+    if personas:
+        parts.append(personas)
     if facts:
         parts.append("【故事账本（本章之前）】\n" + facts)
     if story:
@@ -123,6 +132,7 @@ def review_user(*, chapter_index: int, title: str, goal: str, text: str, core: s
         "character（人物言行、能力、关系与设定或前文不符，或角色状态如伤势、生死被忽略）、"
         "timeline（时间顺序、时长、季节等前后矛盾）、foreshadow（与已埋伏笔矛盾，或回收方式与伏笔不符）、"
         "logic（情节因果不通、前后自相矛盾）。\n"
+        + (PERSONA_REVIEW_RULE if "【人物内核·" in core + personas else "") +
         "每个问题：quote 摘录正文中出问题的原句（必须是正文里原样存在的连续文字，≤60 字），detail 说明与什么冲突，"
         "fix 给出具体修改建议。只报告读者会察觉的真正矛盾；用词、细节描写、可以合理脑补的小处不算问题。"
         "没有问题就输出空数组。最多 5 个问题，按严重程度排序。\n"

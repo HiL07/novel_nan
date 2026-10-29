@@ -307,6 +307,7 @@
           <EntityArchive
             :entities="result.entities"
             :saving="saving"
+            :extract-id="detailRow?.id"
             @save="saveEntities"
             @compile="(keys) => openCompile(detailRow, keys)"
           />
