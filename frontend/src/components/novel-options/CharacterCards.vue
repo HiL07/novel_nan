@@ -46,6 +46,7 @@
           <div class="cc-tagline">{{ item.tagline || '（还没有一句话人设）' }}</div>
         </div>
         <div class="cc-ops" @click.stop>
+          <AppearEditor :item="item" />
           <el-button
             v-if="ai?.enabled.value"
             size="small"
@@ -114,6 +115,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, ChatDotRound, CopyDocument, Delete, MagicStick, Plus } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import CharacterChat from './CharacterChat.vue'
+import AppearEditor from './AppearEditor.vue'
 import { clone, isFilled, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
 import { NEW_ITEMS } from '@/novel-options/aiFill'

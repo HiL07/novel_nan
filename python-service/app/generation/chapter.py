@@ -267,7 +267,7 @@ def _digest(gen: TextGenerator, novel: dict, chapter: dict, stop: threading.Even
         return
     index = chapter["index"]
     known = facts_mod.known_lines(facts_mod.view_before(store.get_facts(novel["id"]), index))
-    max_tokens = 900
+    max_tokens = 1300   # 摘要 + 伏笔 / 角色（含目标、关系、已知信息）/ 时间线 / 定时事件
 
     def build(text: str) -> list[dict]:
         return [{"role": "system", "content": prompts.DIGEST_SYSTEM},
@@ -334,6 +334,7 @@ def _review(gen: TextGenerator, novel: dict, cons: spec_mod.Constraints, chapter
     # 人物内核：代码再扫一遍正文里出场人物「不该知道」的原世界术语（模型漏报时也能抓到）
     seen = {i["detail"] for i in issues}
     issues += [i for i in persona_mod.scan_unknowns(cons.personas, text) if i["detail"] not in seen]
+    issues += spec_mod.scan_early(cons, text)  # 出场条件：还没到登场章节的设定提前出现
     chapter["review"] = {"issues": issues, "at": store.now(), "model": gen.name, "ignored": False}
 
 
@@ -373,8 +374,8 @@ def _write_chapter(job: dict, req: dict) -> None:
     novel = store.get_novel(job["novelId"])
     p = novel["params"]
     gen = get_generator(novel["model"], req.get("api"))
-    cons = spec_mod.build_for(novel)
     index, target = job["chapterIndex"], req["targetChars"]
+    cons = spec_mod.build_for(novel, chapter=index)
     seg_tokens = min(p["segmentTokens"], novel["contextWindow"] // 4)
     seg_chars = int(seg_tokens * CHARS_PER_TOKEN * 0.85)
     prev = store.list_chapters(novel["id"])
@@ -557,7 +558,7 @@ def _recheck(job: dict, req: dict) -> None:
         store.save_chapter(novel["id"], chapter)
     if req.get("review") and not stop.is_set():
         job["phase"] = "review"
-        _review(gen, novel, spec_mod.build_for(novel), chapter, stop)
+        _review(gen, novel, spec_mod.build_for(novel, chapter=chapter["index"]), chapter, stop)
         store.save_chapter(novel["id"], chapter)
     job["status"] = "cancelled" if stop.is_set() else "succeeded"
 
@@ -702,9 +703,9 @@ def preview(novel_id: str, req: dict) -> dict:
     """不生成，只组装下一章第一段的上下文，返回分层 token 用量与完整提示词。"""
     novel = store.get_novel(novel_id)
     gen = get_generator(novel["model"])  # 大模型工作区：不带配置，只按字符估算 token
-    cons = spec_mod.build_for(novel)
     chapters = store.list_chapters(novel_id)
     index = (chapters[-1]["index"] + 1) if chapters else 1
+    cons = spec_mod.build_for(novel, chapter=index)
     p = novel["params"]
     seg_tokens = min(p["segmentTokens"], novel["contextWindow"] // 4)
     seg_chars = int(seg_tokens * CHARS_PER_TOKEN * 0.85)

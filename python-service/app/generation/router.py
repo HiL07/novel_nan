@@ -81,8 +81,10 @@ def create_novel(req: CreateNovelReq):
 @router.get("/novels/{novel_id}")
 def get_novel(novel_id: str):
     novel = _guard(store.get_novel, novel_id)
-    return ok(novel | {"chapters": store.list_chapters(novel_id),
-                       "defaultTargetChars": spec_mod.default_target_chars(novel["settings"].get("spec"))})
+    # 每章字数：设定里明确设过的优先，其次写作参数的单章字数
+    target = (spec_mod.default_target_chars(novel["settings"].get("spec"))
+              or spec_mod.word_count((novel.get("bookConfig") or {}).get("chapterWords")) or None)
+    return ok(novel | {"chapters": store.list_chapters(novel_id), "defaultTargetChars": target})
 
 
 class UpdateNovelReq(BaseModel):
@@ -96,6 +98,8 @@ class UpdateNovelReq(BaseModel):
     outline: Optional[dict] = None
     clearOutline: bool = False
     arcSummary: Optional[str] = Field(default=None, max_length=5000)  # 前情概要（AI 合并生成，可手动修改）
+    bookConfig: Optional[dict] = None    # 写作参数（平台 / 题材 / 读者 / 卖点 / 人称 / 文风 / 字数），写正文进【作品定位】
+    book: Optional[dict] = None          # 全书骨架（自动规划「故事优先」），{} = 清除
 
 
 @router.post("/novels/{novel_id}/update")
@@ -115,8 +119,16 @@ def update_novel(novel_id: str, req: UpdateNovelReq):
         fields["params"] = cur | {k: v for k, v in req.params.items() if k in store.DEFAULT_PARAMS}
     if req.arcSummary is not None:
         fields["arcSummary"] = req.arcSummary.strip()
+    if req.bookConfig is not None:
+        fields["bookConfig"] = spec_mod.clean_book_config(req.bookConfig)
+    if req.book is not None:
+        fields["book"] = planner.clean_book(req.book)
     if req.outline is not None or req.clearOutline:
         fields["outline"] = None if req.clearOutline else ideas.validate_outline(req.outline)
+        if fields["outline"]:   # 大纲里改了伏笔的计划章节 = 改账本里「计划中」伏笔的 plannedIn / payoffIn
+            f = _guard(store.get_facts, novel_id)
+            facts_mod.sync_outline(f, fields["outline"])
+            _guard(store.save_facts, novel_id, f)
     if req.settings is not None:
         fields["settings"] = {"config": req.settings.get("config"), "spec": req.settings.get("spec"),
                               "savedAt": store.now()}
@@ -189,9 +201,15 @@ def start_chapter(novel_id: str, req: ChapterReq):
 
 
 class IdeasReq(BaseModel):
-    kind: Literal["title", "outline", "chapter", "fill", "direction", "hint_polish", "chat"]
+    # story_direction = 走向引擎（directions.generate）；situation = 按已写章节整理人物局面（directions.refresh_situation）
+    kind: Literal["title", "outline", "chapter", "fill", "direction", "hint_polish", "chat", "story_direction", "situation"]
     hint: str = Field(default="", max_length=3000)  # 构思方向最长 3000 字（ideas.HINT_CHARS）
     purpose: str = Field(default="", max_length=60)   # kind=direction：方向用在哪里（构思书名 / 补全角色…）
+    # 下面四个以前没声明，Pydantic 默认丢弃 → 基调 / 拒绝 / 选定走向 / 章节勾选从没传到过 ideas.generate
+    tone: str = Field(default="", max_length=200)
+    rejected: list[str] = Field(default_factory=list, max_length=30)
+    chosenDirections: list[str] = Field(default_factory=list, max_length=10)
+    chapterContext: Optional[dict] = None   # {current, past}；None = 都带（AI 填写设定等）
     chat: Optional[dict] = None   # kind=chat：{character: {name, card}, messages, scene?, userRole?}（见 ideas._chat）
     count: Optional[int] = Field(default=None, ge=1, le=40)
     materials: list[dict] = Field(default_factory=list, max_length=40)  # Java 从素材库取出的素材
@@ -262,6 +280,14 @@ def get_facts(novel_id: str):
     return ok(_guard(store.get_facts, novel_id))
 
 
+@router.get("/novels/{novel_id}/worldbook")
+def get_worldbook(novel_id: str):
+    """世界书（只读编译视图）：设定 + 人物内核 + 账本局面 + 伏笔 / 定时事件 + 阶段 + 大纲接下来 + 前情，另附局面快照文本。"""
+    from . import worldbook
+    wb = _guard(worldbook.compile, novel_id)
+    return ok({**wb, "snapshot": worldbook.snapshot(wb)})
+
+
 class FactsReq(BaseModel):
     facts: dict
 
@@ -314,6 +340,7 @@ class InspireReq(BaseModel):
     count: int = Field(default=3, ge=1, le=5)
     materials: list[dict] = Field(default_factory=list, max_length=60)  # Java 检索 / 用户勾选后的素材条目
     wallIdeas: list[dict] = Field(default_factory=list, max_length=50)  # 墙上已收藏的思路 {title, pitch}
+    stage: Optional[dict] = None         # 作者定的故事阶段 {phase, tierMax, protagonist, source: user}；空 = 按工作区算
     idea: Optional[dict] = None          # refine / revise：要处理的思路
     instruction: str = Field(default="", max_length=1000)
     history: list[str] = Field(default_factory=list, max_length=20)
@@ -330,6 +357,13 @@ def _inspire(fn, req: InspireReq):
         return ok(_guard(fn, data))
     except inspire.InspireError as e:
         raise LocalError(400, str(e)) from e
+
+
+@router.get("/novels/{novel_id}/stage")
+def get_stage(novel_id: str):
+    """故事阶段 {phase, tierMax, protagonist, source, chapter}（阶段表 / 已写章数推算），Java 的素材检索按它过滤量级。"""
+    _guard(store.get_novel, novel_id)
+    return ok(inspire.stage_of({"novelId": novel_id}))
 
 
 @router.post("/inspire/plan")
@@ -375,3 +409,119 @@ def set_personas(novel_id: str, req: PersonasReq):
     personas = [p for p in req.personas if isinstance(p, dict) and str(p.get("name") or "").strip()]
     _guard(store.update_novel, novel_id, personas=personas)
     return ok(personas)
+
+
+# ---------------------------------------------------------------- 自动规划（planner.py：只产出设定 / 大纲 / 计划伏笔，不写正文）
+
+from . import planner  # noqa: E402
+
+
+class PlanReq(BaseModel):
+    novelId: str = Field(max_length=64)
+    premise: str = Field(default="", max_length=500)       # 一句构思，如「法师喜欢冒险」
+    tone: str = Field(default="", max_length=200)
+    conditions: str = Field(default="", max_length=500)
+    stage: Optional[dict] = None                            # 作者定的阶段；空 = 开篇（0 章）或按工作区算
+    materials: list[dict] = Field(default_factory=list, max_length=40)   # Java 按选中的素材组装
+    settings: Optional[dict] = None                         # outline / review：设定草案
+    outline: Optional[dict] = None                          # review：大纲草案
+    count: int = Field(default=10, ge=1, le=10)             # outline：章数；idea：灵感个数（1~5）
+    # 故事优先（不依赖素材库）：mode = story；写作参数、选定的灵感、全书骨架；点睛时素材和检索对象的对应
+    mode: str = Field(default="material", max_length=20)
+    bookConfig: Optional[dict] = None
+    directions: list[str] = Field(default_factory=list, max_length=12)
+    idea: Optional[dict] = None
+    book: Optional[dict] = None
+    links: Optional[dict] = None
+    api: Optional[llm_client.ModelConfig] = None
+    local: Optional[PolishReq] = None
+    gguf: bool = False
+
+
+def _plan(fn, req: PlanReq):
+    data = req.model_dump()
+    if data.pop("gguf"):
+        data["api"], data["local"] = _guard(llama.api_config), None
+    _guard(store.get_novel, data["novelId"])
+    try:
+        return ok(_guard(fn, data))
+    except inspire.InspireError as e:
+        raise LocalError(400, str(e)) from e
+
+
+@router.post("/plan/needs")
+def plan_needs(req: PlanReq):
+    """① 构思 → 检索需求（复用灵感墙的拆需求；开篇 = 阶段开篇、对手上限 2），经 Java"""
+    return _plan(planner.needs, req)
+
+
+@router.post("/plan/idea")
+def plan_idea(req: PlanReq):
+    """故事优先 ①：一句话（可空）+ 创作方向 + 写作参数 → 几个完整的故事灵感，经 Java"""
+    return _plan(planner.idea, req)
+
+
+@router.post("/plan/book")
+def plan_book(req: PlanReq):
+    """故事优先 ②：灵感 → 全书骨架（卷 / 阶段：目标、起止状态、必须发生、不能发生、对手上限）；带 book = 往后追加卷，经 Java"""
+    return _plan(planner.book, req)
+
+
+@router.post("/plan/enrich")
+def plan_enrich(req: PlanReq):
+    """故事优先 ④（可选）：设定草案 + Java 检索到的素材 → 逐条「点睛」建议（只补细节，不改名），经 Java"""
+    return _plan(planner.enrich, req)
+
+
+@router.post("/plan/settings")
+def plan_settings(req: PlanReq):
+    """② 选中的素材 → 改编后的设定草案 + 代码检查（原书名词泄漏、超量级、主角缺欲望 / 缺陷），经 Java"""
+    return _plan(planner.settings, req)
+
+
+@router.post("/plan/outline")
+def plan_outline(req: PlanReq):
+    """③ 设定草案 → 10 章大纲 + 伏笔计划 + 定时事件 + 代码检查（开篇新人物 / 新名词、钩子、提前登场、伏笔），经 Java"""
+    return _plan(planner.outline, req)
+
+
+@router.post("/plan/review")
+def plan_review(req: PlanReq):
+    """④ 审稿：逐章问题 + 修正版（作者逐章决定用不用），经 Java"""
+    return _plan(planner.review, req)
+
+
+class PlanApplyReq(BaseModel):
+    outline: dict
+    setTitle: bool = False
+    book: Optional[dict] = None          # 全书骨架 → novel.book
+    bookConfig: Optional[dict] = None    # 写作参数 → novel.bookConfig
+
+
+@router.post("/novels/{novel_id}/plan/apply")
+def plan_apply(novel_id: str, req: PlanApplyReq):
+    """⑤ 大纲 + 计划伏笔 / 定时事件写进工作区（设定由前端写进设定编辑器并保存）；前端直接调用，不用模型"""
+    if chapter.active_job() and chapter.active_job()["novelId"] == novel_id:
+        raise LocalError(400, "本工作区正在生成章节，完成后再应用")
+    try:
+        return ok(_guard(planner.apply, novel_id, req.model_dump()))
+    except inspire.InspireError as e:
+        raise LocalError(400, str(e)) from e
+
+
+@router.get("/novels/{novel_id}/plan/draft")
+def get_plan_draft(novel_id: str):
+    """自动规划的草稿（每一步的结果，刷新页面不丢）"""
+    _guard(store.get_novel, novel_id)
+    return ok(store.get_plan_draft(novel_id))
+
+
+class PlanDraftReq(BaseModel):
+    draft: Optional[dict] = None   # None = 清空
+
+
+@router.post("/novels/{novel_id}/plan/draft")
+def save_plan_draft(novel_id: str, req: PlanDraftReq):
+    _guard(store.get_novel, novel_id)
+    _guard(store.save_plan_draft, novel_id, req.draft)
+    return ok()

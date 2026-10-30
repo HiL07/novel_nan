@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS material (
     source_book TEXT,                              -- 来源书名（文件名去扩展名；手动添加可自填），按书筛选 / 屏蔽 / 删除
     pinned      INTEGER NOT NULL DEFAULT 0,        -- 1 = 保留：按书删除、屏蔽来源书都不影响它
     merged_into INTEGER,                           -- 已并入哪个主条目（精炼 / 合并）；非空的素材不出现在列表 / 检索 / AI 里，拆分时清空
+    profile     TEXT,                              -- JSON：{tier 1–5 量级, tierReason, tierBy ai|user, bookPos 原书位置 0–1}
     use_count   INTEGER NOT NULL DEFAULT 0,
     create_time TEXT    NOT NULL,
     update_time TEXT    NOT NULL

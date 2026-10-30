@@ -38,6 +38,7 @@ public class SchemaMigrations {
         // 精炼 / 合并：成员指向主条目
         addColumn("material", "merged_into", "INTEGER");
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_material_merged_into ON material (merged_into)");
+        addColumn("material", "profile", "TEXT");
         if (addedBook) {
             backfillSourceBook();
         }

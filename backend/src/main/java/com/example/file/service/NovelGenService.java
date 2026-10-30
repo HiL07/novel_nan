@@ -34,7 +34,9 @@ public class NovelGenService {
     private static final Pattern NOVEL_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
     private static final List<String> CHAPTER_FIELDS = List.of("goal", "title", "targetChars");
     private static final List<String> POLISH_FIELDS = List.of("enabled", "baseId", "adapterId");
-    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat");
+    /** story_direction = 走向引擎（基于世界书）；situation = 按已写章节整理人物局面（写进故事账本） */
+    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat",
+            "story_direction", "situation");
     private static final int MAX_MATERIALS = 20;
     private static final int AUTO_MATERIALS = 8;
     /** 没有重排模型时，自动匹配只取最相关的几条（余弦相似度没有可比的阈值） */
@@ -96,7 +98,7 @@ public class NovelGenService {
 
     /**
      * AI 构思 / AI 填写设定 / 构思方向建议 / 角色试聊。
-     * req: {kind: title|outline|chapter|fill|direction|hint_polish|chat, source?: api|local, baseId?, adapterId?, hint?, tone?,
+     * req: {kind: title|outline|chapter|fill|direction|hint_polish|chat|story_direction|situation, source?: api|local, baseId?, adapterId?, hint?, tone?,
      *       rejected?[], chosenDirections?[], chapterContext?{current, past}, count?, purpose?,
      *       materialIds?[], autoMaterials?, query?, excludeBooks?[], fill?{mode, path, fields, current, itemLabel, count, existing},
      *       chat?{character:{name, card}, messages[], scene?, userRole?}, spec?}
@@ -164,7 +166,10 @@ public class NovelGenService {
             }
             // 本地检索（向量 + 关键词融合 + 重排），不用大模型。重排过：相关度 ≥ RERANK_MIN_SCORE 的才用；
             // 没有重排模型时分数没有可比的阈值，只取最相关的 AUTO_UNRANKED 条
-            Map<String, Object> found = materialService.vectorSearch(query, null, null, excludeBooks, null, AUTO_MATERIALS);
+            // 按工作区的故事阶段先过滤：超出主角量级上限两级以上的（开篇的神明之类）不自动带上，作者可以手动选
+            StageFit.Stage stage = materialService.novelStage(novelId);
+            Map<String, Object> found = materialService.vectorSearch(query, null, null, excludeBooks, null, AUTO_MATERIALS,
+                    "hybrid", true, stage.limited() ? m -> !StageFit.FAR.equals(StageFit.fit(m, stage)) : null);
             boolean reranked = Boolean.TRUE.equals(found.get("reranked"));
             String how = reranked ? "本地检索 · 重排相关度 " : "本地检索 · 未重排，按排名取前 " + AUTO_UNRANKED + " 条，相似度 ";
             int taken = 0;
@@ -336,7 +341,7 @@ public class NovelGenService {
         return e;
     }
 
-    private static void checkNovelId(String novelId) {
+    static void checkNovelId(String novelId) {
         if (novelId == null || !NOVEL_ID.matcher(novelId).matches()) {
             throw new BizException(400, "非法的工作区 id");
         }

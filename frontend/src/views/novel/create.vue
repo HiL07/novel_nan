@@ -59,6 +59,10 @@
     <el-dialog v-model="createDlg.visible" title="新建工作区" width="560px">
       <el-form label-width="96px">
         <el-form-item label="小说标题"><el-input v-model="createDlg.title" maxlength="100" placeholder="可稍后修改" /></el-form-item>
+        <el-form-item label="一句构思">
+          <el-input v-model="createDlg.premise" maxlength="500" placeholder="可选，如：法师喜欢冒险" />
+          <div class="muted hint">填了就直接进入「自动规划」：AI 按素材库选配角色 / 世界观 / 设定，规划前 10 章大纲和伏笔（不写正文，每一步你都能改）</div>
+        </el-form-item>
         <el-form-item label="模型">
           <div class="api-info">
             <el-tag :type="defaultModel.source === 'api' ? 'success' : 'info'" size="small">{{ defaultModel.source === 'api' ? '大模型' : '本地模型' }}</el-tag>
@@ -77,7 +81,7 @@
       </el-form>
       <template #footer>
         <el-button @click="createDlg.visible = false">取消</el-button>
-        <el-button type="primary" @click="onCreate">创建并开始写作</el-button>
+        <el-button type="primary" @click="onCreate">{{ createDlg.premise.trim() ? '创建并开始规划' : '创建并开始写作' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -173,10 +177,10 @@ async function detectApi() {
   }
 }
 
-const createDlg = reactive({ visible: false, title: '', contextWindow: 8192 })
+const createDlg = reactive({ visible: false, title: '', premise: '', contextWindow: 8192 })
 async function openCreate() {
   await detectApi()
-  Object.assign(createDlg, { visible: true, title: '', contextWindow: 8192 })
+  Object.assign(createDlg, { visible: true, title: '', premise: '', contextWindow: 8192 })
 }
 
 async function onCreate() {
@@ -187,7 +191,9 @@ async function onCreate() {
       contextWindow: createDlg.contextWindow
     }), '创建失败')
     createDlg.visible = false
-    open(n.id)
+    const premise = createDlg.premise.trim()
+    if (premise) router.push({ path: `/novel/workspace/${n.id}`, query: { plan: premise } })
+    else open(n.id)
   } catch (e) {
     ElMessage.error(e.message)
   }

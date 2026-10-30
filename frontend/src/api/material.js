@@ -111,3 +111,22 @@ export function materialVariants(list) {
   }
   return out
 }
+
+/** 素材量级（profile.tier，影响范围，跨书通用）：灵感墙 / AI 构思按故事阶段挡掉超出主角量级的素材 */
+export const TIERS = [
+  { value: 1, label: '1 级 · 个人 / 街头', short: '个人', desc: '一个人、一伙山匪、一头野兽、一件随身物品' },
+  { value: 2, label: '2 级 · 地方', short: '地方', desc: '村镇、小门派、一片山林的妖王' },
+  { value: 3, label: '3 级 · 一国 / 大宗门', short: '一国', desc: '王朝、大宗门、一方霸主' },
+  { value: 4, label: '4 级 · 大陆 / 天下', short: '大陆', desc: '魔族大军、天下第一宗、灭世级灾兽' },
+  { value: 5, label: '5 级 · 神明 / 世界之外', short: '神明', desc: '神、天道、上古存在、世界规则本身' }
+]
+export const tierOf = (m) => {
+  const t = Number(m?.profile?.tier)
+  return t >= 1 && t <= 5 ? t : null
+}
+export const tierLabel = (t) => TIERS.find((x) => x.value === Number(t))?.label || '未标量级'
+/** 补全量级（AI 批量标注，作者手改过的不动）{total, labeled, missing, byUser, running, batchTotal, done, failed, positions, lastError} */
+export const profileStatus = () => get('/api/material/profile/status')
+/** {model: {source: api, configId?} | {source: gguf}, onlyMissing?} */
+export const startProfile = (body) => post('/api/material/profile/start', body)
+export const stopProfile = () => post('/api/material/profile/stop')

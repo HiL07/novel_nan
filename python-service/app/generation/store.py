@@ -183,3 +183,18 @@ def save_facts(novel_id: str, facts: dict) -> None:
     facts["updatedAt"] = now()
     with _lock:
         _write(_dir(novel_id) / "facts.json", facts)
+
+
+# ---------------------------------------------------------------- 自动规划草稿（planner.py；刷新页面不丢，应用后保留作记录）
+
+def get_plan_draft(novel_id: str) -> dict | None:
+    return _read(_dir(novel_id) / "plan-draft.json")
+
+
+def save_plan_draft(novel_id: str, draft: dict | None) -> None:
+    path = _dir(novel_id) / "plan-draft.json"
+    with _lock:
+        if draft is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write(path, {**draft, "savedAt": now()})

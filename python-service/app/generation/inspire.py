@@ -9,7 +9,7 @@
 """
 import re
 
-from . import ideas, store
+from . import ideas, spec as spec_mod, store
 from ..materials import CATEGORIES
 
 TARGETS = {
@@ -33,6 +33,14 @@ MAX_COUNT = 5
 CONTEXT_CHARS = 4000      # 关联工作区时带的设定 / 大纲 / 章节上限
 REQUEST_CHARS = 1000
 WALL_IDEAS = 12           # 墙上已有思路最多带几条（只带标题和卖点）
+
+# 故事阶段：主角现在能面对的对手量级上限（素材量级 1 个人 / 街头 … 5 神明 / 世界之外，见 material_profile）
+PHASES = {"opening": "开篇", "early": "前期", "mid": "中期", "late": "后期", "any": "不限"}
+DEFAULT_TIER = {"opening": 2, "early": 2, "mid": 3, "late": 5}
+DEFAULT_PLANNED = 300     # 没设预计章节数、也没有大纲时，按 300 章算进度
+ROLES = {"opponent": "对手 / 遭遇", "scene": "场景", "prop": "道具 / 资源", "lore": "背景传说"}
+# 引用了远景素材的段落里出现这些词 = 可能让主角和它正面对抗（只提示作者，不删）
+CONFLICT_WORDS = ("交手", "击败", "打败", "击杀", "斩杀", "对决", "大战", "战胜", "镇压", "对抗", "围剿", "决战")
 
 SYSTEM = """你是网络小说的创意策划，擅长把现成的素材组合成新的构思。只输出 JSON，不要任何多余文字。
 原则：
@@ -80,6 +88,77 @@ def _wall_text(req: dict) -> str:
     return f"【灵感墙上已收藏的思路】（新的思路不要和它们重复；可以基于它们延展）\n{lines}"
 
 
+def _phase(written: int, planned: int) -> str:
+    if written <= 0:
+        return "opening"
+    ratio = written / max(1, planned)
+    return "early" if ratio < 0.15 else "mid" if ratio < 0.6 else "late"
+
+
+def _planned_chapters(novel: dict) -> int:
+    for cat in (novel.get("settings") or {}).get("spec") or []:
+        if cat.get("key") == "plot":
+            for it in cat.get("items", []):
+                if it.get("key") == "chapters" and str(it.get("value") or "").isdigit():
+                    return int(it["value"])
+    outline = (novel.get("outline") or {}).get("chapters") or []
+    return max(len(outline), max((c.get("index") or 0 for c in outline), default=0)) or DEFAULT_PLANNED
+
+
+def _protagonist_state(novel: dict, cons) -> str:
+    """故事账本里主角的当前状态（角色名单里定位含「主角」的那个人）"""
+    names = [r.split("（")[0] for r in cons.roster if "主角" in r]
+    chars = (store.get_facts(novel["id"]) or {}).get("characters") or {}
+    for n in names:
+        if chars.get(n, {}).get("state"):
+            return f"{n}：{chars[n]['state']}"
+    return ""
+
+
+def stage_of(req: dict) -> dict:
+    """故事阶段 {phase, tierMax, protagonist, source, chapter?}。
+    作者在界面上定过的（source = user）照用；关联了工作区 = 代码算：阶段表里第 n 章那一行（source = table），
+    没有阶段表就按 已写章数 ÷ 计划章数（source = workspace）；都没有 = 不限（source = none）。"""
+    given = req.get("stage") if isinstance(req.get("stage"), dict) else None
+    if given and given.get("source") == "user" and given.get("phase") in PHASES:
+        phase = given["phase"]
+        try:
+            tier = int(given.get("tierMax") or 0)
+        except (TypeError, ValueError):
+            tier = 0
+        tier = tier if 1 <= tier <= 5 else DEFAULT_TIER.get(phase)
+        return {"phase": phase, "tierMax": tier, "protagonist": _clip(given.get("protagonist"), 200), "source": "user"}
+    novel = None
+    if req.get("novelId"):
+        try:
+            novel = store.get_novel(req["novelId"])
+        except store.StoreError:
+            novel = None
+    if not novel:
+        return {"phase": "any", "tierMax": None, "protagonist": "", "source": "none"}
+    chapters = store.list_chapters(novel["id"])
+    n = (chapters[-1]["index"] + 1) if chapters else 1
+    cons = spec_mod.build_for(novel, chapter=n)
+    phase = _phase(len(chapters), _planned_chapters(novel))
+    row = cons.stage
+    tier = (row or {}).get("tierMax") or DEFAULT_TIER[phase]
+    who = (row or {}).get("power") or _protagonist_state(novel, cons)
+    return {"phase": phase, "tierMax": tier, "protagonist": _clip(who, 200), "source": "table" if row else "workspace",
+            "chapter": n}
+
+
+def _stage_text(stage: dict) -> str:
+    if not stage or stage.get("phase") == "any" or not stage.get("tierMax"):
+        return ""
+    tier = stage["tierMax"]
+    lines = [f"【故事阶段】{PHASES[stage['phase']]}" + (f"（下一章是第 {stage['chapter']} 章）" if stage.get("chapter") else "")]
+    if stage.get("protagonist"):
+        lines.append(f"主角现在：{stage['protagonist']}")
+    lines.append(f"本阶段主角能正面面对的对手不超过量级 {tier}（{spec_mod.TIER_NAMES[tier]}）。"
+                 "更高量级的东西只能作为传说、背景或伏笔，不能和主角正面交手，也不能在这个阶段被解决。")
+    return "\n".join(lines)
+
+
 def _run(req: dict, messages: list[dict], max_tokens: int, temperature: float = 0.9) -> tuple[dict, str]:
     local = req.get("local")
     if local and local.get("baseId"):
@@ -121,13 +200,19 @@ def plan(req: dict) -> dict:
         parts.append(f"【关联的小说】\n{context}")
     if _wall_text(req):
         parts.append(_wall_text(req))
+    stage = stage_of(req)
+    if _stage_text(stage):
+        parts.append(_stage_text(stage) + "\n检索词要符合这个阶段：对手 / 遭遇找主角现在打得过、或者需要智取的"
+                     "（比如开篇找「山匪 恶霸 低阶妖兽」，不要找「古神 天道」）。")
     parts.append(f"【本次构思】\n{_request_text(req)}")
+    roles = "；".join(f"{k}={v}" for k, v in ROLES.items())
     parts.append(
         f"【任务】{guide}\n把需要的素材拆成 2~{MAX_NEEDS} 条检索需求，每条只对应一个分类（分类代码：{cats}）。"
         "query 写 3~10 个用空格隔开的检索词（具体名词、场景、特征，比如「冰原 雪山 极寒 暴风雪」），"
-        "补充条件里的地理环境 / 限制要体现在相关需求的检索词里。count 是这条需要几条素材（1~6）。\n"
+        "补充条件里的地理环境 / 限制要体现在相关需求的检索词里。count 是这条需要几条素材（1~6）。"
+        f"role 是这条素材在构思里的用途（{roles}）：会和主角正面冲突的写 opponent，只作传说 / 历史 / 远方威胁的写 lore。\n"
         '输出：{"summary":"一句话说明你理解的需求","needs":[{"category":"分类代码","query":"检索词","count":4,'
-        '"why":"这条素材在构思里用来干什么，20 字内"}]}')
+        '"role":"opponent","why":"这条素材在构思里用来干什么，20 字内"}]}')
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
     r, model = _run(req, messages, 900, temperature=0.6)
     data = _parse(r["text"], req)
@@ -140,11 +225,11 @@ def plan(req: dict) -> dict:
         except (TypeError, ValueError):
             count = 3
         needs.append({"category": n["category"], "query": _clip(n.get("query"), 200), "count": count,
-                      "why": _clip(n.get("why"), 60)})
+                      "role": n.get("role") if n.get("role") in ROLES else "", "why": _clip(n.get("why"), 60)})
     if not needs:
         raise InspireError("模型没有给出可用的检索需求，请重试或换个说法")
     return {"summary": _clip(data.get("summary"), 200), "needs": needs[:MAX_NEEDS], "explore": empty and not context,
-            "usage": _usage(r), "model": model}
+            "stage": stage, "usage": _usage(r), "model": model}
 
 
 # ---------------------------------------------------------------- ③ 生成思路
@@ -155,7 +240,9 @@ def _material_block(materials: list[dict]) -> tuple[str, dict[str, int]]:
     for i, m in enumerate(materials[:ideas.MAX_MATERIALS * 2], 1):
         line = ideas._material_lines([m])[0]
         book = f"（来自《{m['book']}》）" if m.get("book") else ""
-        lines.append(f"[S{i}]{book} " + re.sub(r"^- ", "", line, count=1))
+        tier = f"（量级 {m['tier']}）" if m.get("tier") else ""
+        far = "【远景：只能作为传说 / 背景 / 伏笔，不能和主角正面交手，本阶段不能被解决】" if m.get("fit") == "far" else ""
+        lines.append(f"[S{i}]{book}{tier}{far} " + re.sub(r"^- ", "", line, count=1))
         refs[f"S{i}"] = m["id"]
     return "\n".join(lines), refs
 
@@ -208,9 +295,25 @@ def _base_parts(req: dict, block: str) -> list[str]:
         parts.append(f"【关联的小说】（构思要和它的设定、已写内容相容）\n{context}")
     if _wall_text(req):
         parts.append(_wall_text(req))
+    stage_text = _stage_text(stage_of(req))
+    if stage_text:
+        parts.append(stage_text)
     parts.append(f"【本次构思】\n{_request_text(req)}")
     parts.append(f"【可用的素材】（方括号里是编号）\n{block}" if block else "【可用的素材】（没有）")
     return parts
+
+
+def _far_conflict(idea: dict, materials: list[dict]) -> list[str]:
+    """引用了远景素材、又写了交手 / 击败之类的段落（小标题 / 元素名；粗查，只提示）"""
+    far = {m["id"] for m in materials if m.get("fit") == "far"}
+    if not far:
+        return []
+    out = []
+    for x in idea.get("sections", []) + idea.get("elements", []):
+        text = str(x.get("text") or x.get("desc") or "")
+        if far & set(x.get("sources") or []) and any(w in text for w in CONFLICT_WORDS):
+            out.append(x.get("heading") or x.get("name") or "")
+    return out
 
 
 def generate(req: dict) -> dict:
@@ -237,6 +340,8 @@ def generate(req: dict) -> dict:
     out = [i for i in (_clean_idea(d, refs) for d in raw) if i]
     if not out:
         raise InspireError("模型没有给出可用的思路，请重试")
+    for i in out:
+        i["farConflict"] = _far_conflict(i, materials)
     return {"ideas": out[:count], "usage": _usage(r), "model": model}
 
 
@@ -315,4 +420,5 @@ def revise(req: dict) -> dict:
     out = _clean_idea(data.get("idea") if isinstance(data.get("idea"), dict) else data, refs)
     if not out:
         raise InspireError("模型没有给出修改后的思路，请重试")
+    out["farConflict"] = _far_conflict(out, materials)
     return {"idea": out, "usage": _usage(r), "model": model}

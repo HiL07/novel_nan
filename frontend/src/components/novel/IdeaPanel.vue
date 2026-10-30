@@ -155,7 +155,8 @@
           <el-button size="small" :icon="MagicStick" :loading="loading === 'direction'" :disabled="!!loading || !ready" @click="openDirectionPicker">
             {{ directionLabel }}
           </el-button>
-          <span class="muted">先在右侧选素材（可不选），再围绕构思方向框内的内容展开（基调只定风格，勾选的设定 / 章节作背景）；可重复生成，每次给出不同的走向</span>
+          <span class="muted">基于「世界书」（全部设定 + 人物局面 + 未回收伏笔 + 前情）：按 欲望碰撞 / 伏笔回收 / 信息差 / 素材注入 / 反转 发散，再对照世界书审稿、修掉矛盾、按精彩度排序（约半分钟）。
+            先在右侧选素材（可不选），构思方向框里有内容就在它之内展开，基调只定风格；可重复生成，每次给出不同的走向</span>
         </div>
         <div v-if="picked.length" class="chips">
           <span class="muted">已选素材（也用于书名 / 大纲 / 章节题目）：</span>
@@ -181,7 +182,16 @@
           <div v-for="d in directions" :key="d.id" class="direction-card" :class="{ chosen: chosenIds.includes(d.id) }">
             <div class="direction-text">
               <el-tag v-if="chosenIds.includes(d.id)" size="small" type="success" effect="dark">已选</el-tag>
+              <el-tag v-if="d.driverLabel" size="small" effect="plain">{{ d.driverLabel }}</el-tag>
               <b v-if="d.label">{{ d.label }}：</b>{{ d.direction }}
+              <div v-if="d.scores || d.uses?.length" class="muted small">
+                <template v-if="d.scores">合理 {{ d.scores.reasonable }} · 精彩 {{ d.scores.exciting }}（AI 审稿，5 分制）</template>
+                <template v-if="d.uses?.length"> · 用到：{{ d.uses.join('、') }}</template>
+              </div>
+              <div v-if="d.revised" class="muted small" :title="d.original">
+                已按审稿修正：{{ (d.problems || []).join('；') }}（悬停看修正前）
+              </div>
+              <div v-else-if="d.problems?.length" class="warn small">注意：{{ d.problems.join('；') }}</div>
             </div>
             <div class="direction-ops">
               <template v-if="chosenIds.includes(d.id)">
@@ -258,8 +268,9 @@
         <el-button v-if="draft.title && draft.title !== novel.title" size="small" @click="useTitle(draft.title)">采用书名《{{ draft.title }}》</el-button>
         <el-button size="small" type="primary" :loading="saving" @click="saveOutline(draft)">采用大纲</el-button>
         <el-button size="small" @click="draft = null">丢弃</el-button>
+        <el-checkbox v-model="showLedger" size="small">故事账本</el-checkbox>
       </div>
-      <OutlineEditor :outline="draft" />
+      <OutlineEditor :outline="draft" :ledger="showLedger ? ledger : null" />
     </div>
 
     <!-- 已采用的大纲 -->
@@ -269,8 +280,9 @@
         <span class="muted">保存于 {{ novel.outline.savedAt }}</span>
         <el-button size="small" @click="editSaved">编辑</el-button>
         <el-button size="small" type="danger" plain @click="clearOutline">清除</el-button>
+        <el-checkbox v-model="showLedger" size="small">故事账本</el-checkbox>
       </div>
-      <OutlineEditor :outline="novel.outline" readonly :next-index="nextIndex" />
+      <OutlineEditor :outline="novel.outline" readonly :next-index="nextIndex" :ledger="showLedger ? ledger : null" />
     </div>
 
     <!-- 「AI 构思后续走向」前的素材选择（右侧抽屉，可不选；屏蔽来源书也在这里改） -->
@@ -285,6 +297,7 @@
       :vector-query="pickerQuery"
       :auto-vector="!!pickerQuery && !picked.length"
       feedback-context="AI 构思 › 后续走向"
+      :novel-id="novel.id"
       @apply="onPick"
     />
   </div>
@@ -293,12 +306,12 @@
 <script setup>
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElInput, ElMessage, ElMessageBox, ElTag } from 'element-plus'
+import { ElInput, ElMessage, ElMessageBox, ElOption, ElSelect, ElTag } from 'element-plus'
 import { EditPen, MagicStick, QuestionFilled } from '@element-plus/icons-vue'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
 import { categoryOf, materialVariants } from '@/api/material'
-import { generateIdeas, updateNovel } from '@/api/novelGen'
+import { generateIdeas, getFacts, updateNovel } from '@/api/novelGen'
 import { errorMessage } from '@/api/request'
 
 /** AI 构思：书名 / 大纲 / 下一章题目，结合设定与素材库。经 Java（取素材），模型可选大模型或本地模型（+ 适配器） */
@@ -470,12 +483,16 @@ async function suggestDirections() {
   const avoid = [...rejected.value, ...directions.value.map(directionText)].slice(-30)
   loading.value = 'direction'
   try {
+    // 走向引擎：上下文 = 世界书（全部已保存的设定 + 账本 + 前情），不受上面「设定 / 章节」勾选影响
     const data = await call(generateIdeas(props.novel.id, {
-      ...base, kind: 'direction', hint: hint.value.trim(), tone: tone.value.trim(), rejected: avoid,
-      count: 5, purpose: '作为后续走向，用于生成书名、大纲与章节', autoMaterials: false
+      ...base, kind: 'story_direction', hint: hint.value.trim(), tone: tone.value.trim(), rejected: avoid,
+      count: 5, autoMaterials: false
     }), 'AI 生成走向失败')
     const list = (data.result.directions || []).map((d) => ({ ...d, id: ++directionSeq }))
     if (!list.length) ElMessage.warning('模型没有给出走向，请重试')
+    const sit = data.situation
+    if (sit?.error) ElMessage.warning(`整理人物局面失败（走向照常给出）：${sit.error}`)
+    else if (sit?.applied) ElMessage.success(`已按已写章节整理了 ${sit.applied.characters.length} 个人物的局面，记进故事账本（可在「世界书」查看）`)
     directions.value = [...directions.value, ...list]
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 8000 })
@@ -508,7 +525,7 @@ function clearUnchosen() {
 const MANUAL_COLS = ['设定（勾选）', '章节（勾选）', '基调', '构思方向', '已选走向', '已采用大纲', '素材']
 const MANUAL_ROWS = [
   { name: 'AI 润色', uses: ['—', '—', '—', '只用框内文字', '—', '—', '—'] },
-  { name: 'AI 构思后续走向', uses: ['背景', '背景', '只定风格', '围绕它展开', '避开已给出 / 已拒绝的', '✓', '右侧抽屉里选的'] },
+  { name: 'AI 构思后续走向', uses: ['不看勾选，用世界书（全部设定 + 账本）', '不看勾选，用世界书的前情', '只定风格', '围绕它展开', '避开已给出 / 已拒绝的', '✓', '右侧抽屉里选的'] },
   { name: '生成书名', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
   { name: '生成大纲', uses: ['✓', '✓', '✓', '✓', '✓', '✓', '已选素材'] },
   { name: '生成章节题目', uses: ['✓', '总是带全部已写章节', '✓', '✓', '✓', '✓', '已选素材'] },
@@ -516,8 +533,74 @@ const MANUAL_ROWS = [
 ]
 
 /** 大纲：一句话 + 梗概 + 分章表（readonly 时高亮下一章） */
+/* ---- 大纲的「故事账本」选项：每章计划埋 / 推 / 收哪些伏笔、定下哪些定时事件（自动规划写进来的；编辑时可增删，
+   保存大纲时 Python 同步账本里「计划中」伏笔的计划章节，见 facts.sync_outline） ---- */
+const showLedger = ref((() => {
+  try {
+    return localStorage.getItem('nan_novel.outlineLedger') === '1'
+  } catch {
+    return false
+  }
+})())
+const ledger = ref(null)
+async function loadLedger() {
+  if (!showLedger.value) return
+  try {
+    const res = await getFacts(props.novel.id)
+    ledger.value = res.code === 0 ? res.data : null
+  } catch {
+    ledger.value = null
+  }
+}
+watch(showLedger, (v) => {
+  try {
+    localStorage.setItem('nan_novel.outlineLedger', v ? '1' : '0')
+  } catch {
+    // 不记住
+  }
+  loadLedger()
+}, { immediate: true })
+watch(() => props.novel.outline?.savedAt, loadLedger)
+
+const LEDGER_ACTION = { plant: '埋', advance: '推', resolve: '收' }
+const FS_STATUS = { planned: '计划中', open: '已埋', resolved: '已收' }
+
+/** 一章的账本行：伏笔引用（带账本里的文字和状态）+ 定时事件 + 规划的节拍 / 钩子 */
+function ledgerRow(c, facts, editable) {
+  const byId = Object.fromEntries((facts.foreshadows || []).map((f) => [f.id.toUpperCase(), f]))
+  const refs = c.foreshadow || []
+  const tags = refs.map((r, i) => {
+    const f = byId[String(r.id).toUpperCase()]
+    return h(ElTag, {
+      size: 'small', effect: 'plain', closable: editable,
+      type: !f ? 'danger' : r.action === 'resolve' ? 'success' : r.action === 'plant' ? 'warning' : 'info',
+      title: f ? `${f.text}（${FS_STATUS[f.status] || f.status}）` : '账本里没有这条伏笔',
+      onClose: () => c.foreshadow.splice(i, 1)
+    }, () => `${LEDGER_ACTION[r.action] || r.action} ${r.id}` + (f ? `：${f.text.slice(0, 16)}${f.status !== 'planned' ? '（' + FS_STATUS[f.status] + '）' : ''}` : '（不存在）'))
+  })
+  const clocks = (c.clocks || []).map((k) => h(ElTag, { size: 'small', type: 'danger', effect: 'plain' }, () => `⏳ ${k.slice(0, 20)}`))
+  const add = editable
+    ? h(ElSelect, {
+      size: 'small', placeholder: '+ 伏笔', style: 'width: 150px', modelValue: '', filterable: true,
+      'onUpdate:modelValue': (v) => {
+        const [action, id] = v.split(':')
+        c.foreshadow = [...refs, { id, action }]
+      }
+    }, () => (facts.foreshadows || []).flatMap((f) => ['plant', 'advance', 'resolve'].map((a) =>
+      h(ElOption, { key: `${a}:${f.id}`, value: `${a}:${f.id}`, label: `${LEDGER_ACTION[a]} ${f.id}：${f.text.slice(0, 18)}` }))))
+    : null
+  const extra = [c.beats?.length ? `节拍：${c.beats.join('；')}` : '', c.hook ? `钩子：${c.hook}` : '', c.openingNote ? `开篇要点：${c.openingNote}` : '']
+    .filter(Boolean).join('｜')
+  return h('div', { class: 'ol-ledger' }, [
+    h('span', { class: 'muted' }, '故事账本：'),
+    ...(tags.length || clocks.length ? [...tags, ...clocks] : [h('span', { class: 'muted' }, '无')]),
+    add,
+    extra ? h('div', { class: 'muted ol-extra' }, extra) : null
+  ])
+}
+
 const OutlineEditor = defineComponent({
-  props: { outline: Object, readonly: Boolean, nextIndex: Number },
+  props: { outline: Object, readonly: Boolean, nextIndex: Number, ledger: Object },
   setup(p) {
     const field = (obj, key, rows) => (p.readonly
       ? h('div', { class: 'ro' }, obj[key] || '-')
@@ -532,8 +615,10 @@ const OutlineEditor = defineComponent({
           p.readonly && c.index === p.nextIndex ? h(ElTag, { size: 'small', type: 'success' }, () => '下一章') : null,
           c.materials?.length ? h('span', { class: 'muted' }, `素材：${c.materials.join('、')}`) : null
         ]),
-        field(c, 'goal', 5)
-      ]))
+        field(c, 'goal', 5),
+        p.ledger ? ledgerRow(c, p.ledger, !p.readonly) : null
+      ])),
+      p.ledger ? h('div', { class: 'muted' }, '提示：在这里增删伏笔引用后点「采用大纲」，账本里「计划中」伏笔的计划章节会跟着改；伏笔本身的文字在「故事账本」页改') : null
     ])
   }
 })
@@ -770,6 +855,23 @@ async function clearOutline() {
 .muted {
   font-size: 12px;
   color: #909399;
+}
+.ol-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+.ol-extra {
+  width: 100%;
+}
+.small {
+  font-size: 12px;
+  margin-top: 2px;
+}
+.warn {
+  color: #e6a23c;
 }
 .used {
   margin: 4px 0 10px;

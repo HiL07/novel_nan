@@ -3,6 +3,15 @@
     <div class="idea-head">
       <b class="idea-title">{{ idea.title }}</b>
       <el-tag v-if="idea.uncited" size="small" type="warning" title="这个思路没有引用任何提供的素材">未引用素材</el-tag>
+      <el-tag
+        v-if="idea.farConflict?.length"
+        size="small"
+        type="danger"
+        effect="plain"
+        :title="`这几段引用了「远景」素材（远超主角现在的量级）又写了交手 / 击败：${idea.farConflict.join('、')}。远景只适合当传说 / 背景 / 伏笔`"
+      >
+        远景素材被写成了对手
+      </el-tag>
       <el-tag v-if="saved" size="small" type="success">已收藏</el-tag>
       <span v-if="idea.history?.length" class="muted">已修改 {{ idea.history.length }} 次</span>
     </div>

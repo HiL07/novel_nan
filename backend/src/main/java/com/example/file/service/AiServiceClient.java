@@ -156,6 +156,17 @@ public class AiServiceClient {
         return slowClient.post().uri("/api/materials/merge/draft").body(body).retrieve().body(JsonNode.class);
     }
 
+    /** POST /api/materials/profile：一批素材（≤20）→ 量级 {ok, tiers: {id: {tier, reason}}, skipped, usage}；cfg 为 null 时用 GGUF */
+    public JsonNode materialProfile(List<Map<String, Object>> items, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>(Map.of("items", items));
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/materials/profile").body(body).retrieve().body(JsonNode.class);
+    }
+
     /** POST /api/materials/vector-feedback：向量检索后勾选 / 没勾选的素材（留作 embedding 微调数据） */
     public JsonNode vectorFeedback(Map<String, Object> body) {
         return client.post().uri("/api/materials/vector-feedback").body(body).retrieve().body(JsonNode.class);
@@ -310,6 +321,11 @@ public class AiServiceClient {
      * 模型三选一：cfg = 大模型配置；local = {source: gguf} → gguf: true；local = {baseId, …} → 应用内本地模型。
      */
     public JsonNode genInspire(String action, Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
+        return genModelCall("/api/gen/inspire/" + action, body, cfg, local);
+    }
+
+    /** 同上，任意 /api/gen/** 路径（灵感墙 /api/gen/inspire/*、自动规划 /api/gen/plan/*） */
+    public JsonNode genModelCall(String path, Map<String, Object> body, AiModelConfig cfg, Map<String, Object> local) {
         Map<String, Object> req = new HashMap<>(body);
         if (local != null && "gguf".equals(local.get("source"))) {
             req.put("gguf", true);
@@ -318,7 +334,7 @@ public class AiServiceClient {
         } else if (cfg != null) {
             req.put("api", modelBody(cfg));
         }
-        return slowClient.post().uri("/api/gen/inspire/{action}", action).body(req).retrieve().body(JsonNode.class);
+        return slowClient.post().uri(path).body(req).retrieve().body(JsonNode.class);
     }
 
     // ------------------------------------------------------------------ 跨世界观角色卡（Python app/persona.py）
@@ -358,6 +374,11 @@ public class AiServiceClient {
     }
 
     /** GET / POST /api/gen/novels/{id}/personas：工作区的人物内核快照 */
+    /** GET /api/gen/novels/{id}/stage：工作区的故事阶段 {phase, tierMax, protagonist, source, chapter} */
+    public JsonNode getNovelStage(String novelId) {
+        return client.get().uri("/api/gen/novels/{id}/stage", novelId).retrieve().body(JsonNode.class);
+    }
+
     public JsonNode getNovelPersonas(String novelId) {
         return client.get().uri("/api/gen/novels/{id}/personas", novelId).retrieve().body(JsonNode.class);
     }

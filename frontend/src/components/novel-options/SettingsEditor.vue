@@ -146,6 +146,7 @@
       :initial-selected="aiPicker.initial"
       :exclude-books="blockedBooks"
       :feedback-context="aiPicker.context"
+      :novel-id="novelId"
       @apply="onAiPicked"
       @cancel="onAiPickCancel"
     />
@@ -180,7 +181,7 @@ import { errorMessage } from '@/api/request'
 import { NEW_ITEMS, aiFillable, applyValue, currentValues, fieldSchema, isTextField, scopesOverlap } from '@/novel-options/aiFill'
 import { getOptionSchema } from '@/api/novelOptions'
 import { EDITOR_KEY } from '@/novel-options/editor'
-import { applyMaterial, resolveVersions } from '@/novel-options/materialApply'
+import { applyMaterial, applyPlanItem, resolveVersions } from '@/novel-options/materialApply'
 import { useBlockedBooks } from '@/components/material/blockedBooks'
 import { getMaterial, isMultiVersion, materialVariants, recordMaterialUse } from '@/api/material'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
@@ -250,8 +251,34 @@ defineExpose({
   getConfig: () => clone({ schemaVersion: schemaVersion.value, categories: categories.value, values }),
   getSpec: () => clone(spec.value),
   // 灵感墙「写进工作区 → 加进设定」：思路里的元素当作素材应用（id 为空：不标「来自素材库」、不计使用次数）
-  applyExternal: (list) => onApplyMaterials(list)
+  applyExternal: (list) => onApplyMaterials(list),
+  // 自动规划「写进工作区」：按设定字段直接写（角色卡 / 元素 / 世界规则 / 阶段表 + 出场条件），返回 {done, failed}
+  applyPlan: (list) => onApplyPlan(list)
 })
+
+function onApplyPlan(list) {
+  const ctx = {
+    categories: categories.value,
+    values,
+    createFromTemplate: (key) => {
+      const t = templates.value.find((x) => x.key === key)
+      return addCustomCategory({ label: t?.label || key, icon: t?.icon || 'Collection', desc: t?.desc || '', templateKey: key })
+    }
+  }
+  const failed = []
+  let done = 0
+  for (const p of list) {
+    try {
+      applyPlanItem(p, ctx)
+      done++
+    } catch (e) {
+      failed.push(`${p.fields?.name || p.kind}：${e.message}`)
+    }
+  }
+  const used = [...new Set(list.flatMap((p) => p.sources || []).filter(Number.isInteger))]
+  if (used.length) recordMaterialUse(used).catch(() => {})
+  return { done, failed }
+}
 
 async function resetAll() {
   try {

@@ -102,8 +102,19 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
     source_text = ch.written or ch.prev_chapter_tail
     beats = (ch.plan or {}).get("beats") or []
     haystack = " ".join([ch.title, ch.goal, source_text[-3000:]] + beats + [s["summary"] for s in summaries[-2:]])
+    # 出场条件（世界书的「持续 / 排除词」）：登场后 span 章内即使本章没提到也带上；检索文本里有排除词的不带
+    def card_score(c: Card) -> int:
+        if any(w in haystack for w in c.appear.get("exclude", [])):
+            return 0
+        s = score_card(c, haystack)
+        span = c.appear.get("span", 0)
+        if not s and span and any(k and k in x["summary"] for x in summaries if x["index"] >= ch.index - span
+                                  for k in c.keywords):
+            s = 1
+        return s
+
     # 人物内核卡（id 以 persona. 开头）在相关卡片里排最前：预算紧张时比普通设定卡后裁
-    scored = sorted(((score_card(c, haystack), c) for c in cons.cards),
+    scored = sorted(((card_score(c), c) for c in cons.cards),
                     key=lambda x: (-(x[0] > 0 and x[1].id.startswith("persona.")), -x[0]))
     relevant = [c for s, c in scored if s > 0]
     irrelevant = [c for s, c in scored if s <= 0]
@@ -192,5 +203,6 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
                   "arcSummary": use_arc, "recentChars": len(recent), "facts": bool(ledger),
                   "nextPreview": bool(preview)},
         dropped={"cards": dropped_cards, "summaries": sorted(dropped_sums),
-                 "facts": has_ledger and not ledger, "nextPreview": has_preview and not preview},
+                 "facts": has_ledger and not ledger, "nextPreview": has_preview and not preview,
+                 "notYet": [c.title for c in cons.not_yet]},
     )

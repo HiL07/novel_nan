@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import config, extract_checkpoint, extractor, llm_client, local_extract, material_merge
+from . import config, extract_checkpoint, extractor, llm_client, local_extract, material_merge, material_profile
 from . import materials as material_mod
 from .llm_client import ModelConfig
 from .crawler.router import router as crawl_router
@@ -261,6 +261,26 @@ def materials_merge_draft(req: MergeDraftRequest) -> dict:
         if cfg is None:
             return {"ok": False, "message": "请指定大模型配置或 GGUF"}
         return {"ok": True, **material_merge.draft(req.category, req.members, cfg)}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
+class ProfileRequest(BaseModel):
+    items: list[dict] = Field(min_length=1, max_length=material_profile.BATCH)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/materials/profile")
+def materials_profile(req: ProfileRequest) -> dict:
+    """素材量级标注（1–5，影响范围）：一批素材 → {ok, tiers: {id: {tier, reason}}, skipped, usage}。模型 = 大模型或 GGUF。"""
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        return {"ok": True, **material_profile.label(req.items, cfg)}
     except local_llama.LlamaError as e:
         return {"ok": False, "message": str(e)}
     except llm_client.LLMError as e:

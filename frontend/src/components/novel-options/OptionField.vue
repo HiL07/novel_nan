@@ -80,6 +80,7 @@
             <el-tag v-if="item._fromMaterial" size="small" type="success" effect="plain" class="from-material">来自素材库</el-tag>
           </span>
           <div>
+            <AppearEditor v-if="field.key !== 'stages'" :item="item" />
             <el-button link size="small" :icon="CopyDocument" @click="duplicateItem(i)">复制</el-button>
             <el-button link type="danger" size="small" :icon="Delete" @click="value.splice(i, 1)">删除</el-button>
           </div>
@@ -133,6 +134,7 @@ import { CopyDocument, Delete, EditPen, Loading, MagicStick, Plus } from '@eleme
 import ChoiceWidget from './ChoiceWidget.vue'
 import InputWidget from './InputWidget.vue'
 import CharacterCards from './CharacterCards.vue'
+import AppearEditor from './AppearEditor.vue'
 import { FIELD_TYPES, isChoice } from '@/novel-options/fieldTypes'
 import { clone, ensureValue, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'

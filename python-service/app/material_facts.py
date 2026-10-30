@@ -234,10 +234,11 @@ class Book:
 CARD_FIELDS = ('"useful":true,"title":"名称","subtype":"细分类型","summary":"一句话说清它是什么，不超过60字",'
                '"detail":"完整描述，100~300字，保留具体细节","attributes":{"属性名":"值"},'
                '"usage":"原作者怎么用它制造冲突或推动剧情，不超过80字","borrowTip":"借到别的小说时哪些可直接用、哪些要改，不超过60字",'
-               '"tags":["3~6个标签"]')
+               '"tags":["3~6个标签"],"tier":量级1到5的整数')
 
 CARD_RULES = """要求：只依据给出的事实，不编造、不补充原因或来历；没有依据的属性直接省略（不要写「无」「未提及」）。
-useful：有没有具体、可借鉴的信息（外形 / 能力 / 规则 / 代价 / 习性等）；只有空泛情绪或一次性动作的写 false。"""
+useful：有没有具体、可借鉴的信息（外形 / 能力 / 规则 / 代价 / 习性等）；只有空泛情绪或一次性动作的写 false。
+tier：它在原书里的影响范围，1 个人 / 街头，2 地方（村镇、小门派），3 一国 / 大宗门，4 大陆 / 天下，5 神明 / 世界之外；拿不准取低的。"""
 
 
 def _facts_text(ent: dict) -> str:
@@ -299,7 +300,18 @@ def to_candidate(data: dict, ent: dict, chapters: list[dict]) -> dict | None:
         "facts": [{"fact": f["fact"], "quote": f["quote"], "chapter": chapters[f["chapter"]]["title"]}
                   for f in ent["facts"][:MAX_FACTS]],
         "aliases": ent["aliases"],
+        "tier": _tier(data.get("tier")),
+        # 首次出现在原书的位置（0–1，代码算）：灵感墙判断故事阶段的弱信号
+        "bookPos": round(chap_ids[0] / max(1, len(chapters) - 1), 3) if chap_ids and len(chapters) > 1 else None,
     }
+
+
+def _tier(v) -> int | None:
+    try:
+        t = int(v)
+    except (TypeError, ValueError):
+        return None
+    return t if 1 <= t <= 5 else None
 
 
 # ---------------------------------------------------------------- 剧情段

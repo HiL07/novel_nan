@@ -101,9 +101,9 @@ public class MaterialController {
      */
     @PostMapping("/vector-search")
     public ResponseEntity<Result<Map<String, Object>>> vector(@RequestBody SemanticReq req) {
-        return ResultResponses.handle(() -> materialService.vectorSearch(req.getQuery(), req.getCategory(), req.getTags(),
-                req.getExcludeBooks(), req.getModelId(), req.getLimit() == null ? 20 : req.getLimit(),
-                req.getMode(), !Boolean.FALSE.equals(req.getRerank())), log, "向量检索失败");
+        return ResultResponses.handle(() -> materialService.withStageFit(materialService.vectorSearch(req.getQuery(),
+                req.getCategory(), req.getTags(), req.getExcludeBooks(), req.getModelId(), req.getLimit() == null ? 20 : req.getLimit(),
+                req.getMode(), !Boolean.FALSE.equals(req.getRerank())), req.getNovelId()), log, "向量检索失败");
     }
 
     /** POST /api/material/vector-index {modelId?, encode}：全部素材的向量化情况 / 一键全部向量化 → {total, cached, encoded, pending, …} */
@@ -189,6 +189,8 @@ public class MaterialController {
         private String mode;
         /** 向量检索：是否用重排模型（默认 true） */
         private Boolean rerank;
+        /** 向量检索：给哪个工作区用（结果带 tier / fit = 和它当前故事阶段合不合适，选择弹窗预选时跳过远景） */
+        private String novelId;
     }
 
     @Data

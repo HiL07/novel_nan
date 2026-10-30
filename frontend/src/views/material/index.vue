@@ -15,6 +15,7 @@
                 <span>{{ c.label }}</span><span class="count">{{ c.count }}</span>
               </div>
               <el-button class="new-btn" type="primary" plain :icon="Plus" @click="openEditor(null)">新建素材</el-button>
+              <ProfilePanel @changed="refreshAll" />
 
               <!-- 来源书：按书筛选 / 按书删除 -->
               <div class="side-title">来源书</div>
@@ -157,6 +158,9 @@
                         {{ r.material.source.variants?.length || 0 }} 种写法
                       </el-tag>
                       <el-tag v-if="r.matchedLabel" size="small" type="warning" title="检索命中的是这个版本">命中：{{ r.matchedLabel }}</el-tag>
+                      <el-tag v-if="tierOf(r.material)" size="small" type="info" effect="plain" :title="tierLabel(tierOf(r.material))">
+                        量级 {{ tierOf(r.material) }}
+                      </el-tag>
                       <span v-if="r.score != null" class="score" :title="r.reason || rankTip(r)">{{ r.score }}</span>
                       <el-icon
                         class="pin"
@@ -243,10 +247,11 @@ import { Collection, Delete, MagicStick, Notebook, Plus, Reading, Search, Star, 
 import CandidateReview from '@/components/material/CandidateReview.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
 import MergePanel from '@/components/material/MergePanel.vue'
+import ProfilePanel from '@/components/material/ProfilePanel.vue'
 import {
   MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterial, getMaterialCategories, getMaterialSources, getMaterialTags,
-  getVectorModelId, pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, vectorFeedback,
-  vectorIndex, vectorSearch
+  getVectorModelId, pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, tierLabel, tierOf,
+  vectorFeedback, vectorIndex, vectorSearch
 } from '@/api/material'
 import { isEmbeddingModel, listModels } from '@/api/localModel'
 import { errorMessage } from '@/api/request'

@@ -58,6 +58,13 @@ public class Material {
     /** 已并入的主条目 id（精炼 / 合并）；非空 = 不出现在列表 / 检索 / AI 里，拆分时清空 */
     private Long mergedInto;
 
+    /**
+     * 量级等画像：{tier 1–5（1 个人 / 街头，2 地方，3 一国 / 大宗门，4 大陆 / 天下，5 神明 / 世界之外）, tierReason,
+     * tierBy ai|user（user = 作者手改过，AI 重新标注不覆盖）, bookPos 0–1（首次出现在原书的位置，代码算）}
+     */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private Map<String, Object> profile;
+
     /** 主条目（source.type = merge）的成员素材：详情接口填充（不是数据库列） */
     @TableField(exist = false)
     private List<Material> members;

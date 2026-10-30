@@ -317,6 +317,16 @@ public class MaterialService {
      */
     public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
                                             String modelId, int limit, String mode, boolean rerank) {
+        return vectorSearch(query, category, tags, excludeBooks, modelId, limit, mode, rerank, null);
+    }
+
+    /**
+     * 同上，另外：keep = 先过滤再检索（灵感墙按故事阶段挡掉超量级的素材；先检索后过滤会把结果筛光），
+     * 被挡掉的条数记在 filtered。
+     */
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
+                                            String modelId, int limit, String mode, boolean rerank,
+                                            java.util.function.Predicate<Material> keep) {
         if (query == null || query.isBlank()) {
             throw new BizException(400, "请输入要查找的内容");
         }
@@ -334,9 +344,16 @@ public class MaterialService {
                 pool = materialMapper.selectList(lq);
             }
         }
+        int filtered = 0;
+        if (keep != null && !pool.isEmpty()) {
+            List<Material> kept = pool.stream().filter(keep).toList();
+            filtered = pool.size() - kept.size();
+            pool = kept;
+        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("total", total);
         out.put("considered", pool.size());
+        out.put("filtered", filtered);
         List<Map<String, Object>> results = new ArrayList<>();
         out.put("results", results);
         if (pool.isEmpty()) {
@@ -416,6 +433,44 @@ public class MaterialService {
     static String variantLabel(Material master, Material member) {
         String label = Objects.toString(variantOf(master, member.getId()).get("label"), "").trim();
         return label.isEmpty() ? member.getTitle() : label;
+    }
+
+    /**
+     * 工作区的故事阶段（Python 按阶段表 / 已写章数推算）；没有工作区 / Python 不可达 = 不限
+     */
+    public StageFit.Stage novelStage(String novelId) {
+        if (novelId == null || novelId.isBlank()) {
+            return StageFit.of(null);
+        }
+        try {
+            return StageFit.of(objectMapper.convertValue(aiClient.getNovelStage(novelId.trim()).path("data"), Map.class));
+        } catch (Exception e) {
+            log.debug("读取工作区 {} 的故事阶段失败：{}", novelId, e.getMessage());
+            return StageFit.of(null);
+        }
+    }
+
+    /** 检索结果每条加上 tier / fit（和工作区当前阶段合不合适），结果里另附 stage */
+    public Map<String, Object> withStageFit(Map<String, Object> found, String novelId) {
+        if (novelId == null || novelId.isBlank()) {
+            return found;
+        }
+        StageFit.Stage stage = novelStage(novelId);
+        if (found.get("results") instanceof List<?> rs) {
+            for (Object o : rs) {
+                if (o instanceof Map<?, ?> r && r.get("material") instanceof Material m) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> row = (Map<String, Object>) r;
+                    row.put("tier", tierOf(m));
+                    row.put("fit", StageFit.fit(m, stage));
+                }
+            }
+        }
+        Map<String, Object> st = new LinkedHashMap<>();
+        st.put("phase", stage.phase());
+        st.put("tierMax", stage.tierMax());
+        found.put("stage", st);
+        return found;
     }
 
     /** 重排后的相关度达到这个分（0–100）才算「相关」：用于 AI 构思的自动匹配、选择弹窗的预勾选 */
@@ -570,6 +625,9 @@ public class MaterialService {
         if (req.getPinned() != null) {
             m.setPinned(req.getPinned());
         }
+        if (req.getProfile() != null) {
+            m.setProfile(mergeProfile(req.getId() == null ? null : m.getProfile(), req.getProfile(), req.getId() != null));
+        }
         if (req.getId() == null) {
             m.setSource(req.getSource() == null ? Map.of("type", "manual") : req.getSource());
             if (m.getSourceBook() == null && m.getSource().get("fileName") != null) {
@@ -593,6 +651,63 @@ public class MaterialService {
         }
         syncTags(m.getId(), m.getTags());
         return m;
+    }
+
+    /**
+     * 量级画像的合并：新建时照收（整理卡片给的 tier / bookPos，tierBy = ai）；修改时只看 tier —— 和原来不同 = 作者手改，
+     * 记 tierBy = user（之后 AI 批量标注不再覆盖），bookPos 等代码算的字段保留原值。
+     */
+    static Map<String, Object> mergeProfile(Map<String, Object> old, Map<String, Object> req, boolean edit) {
+        Map<String, Object> out = new LinkedHashMap<>(old == null ? Map.of() : old);
+        Integer tier = tierValue(req.get("tier"));
+        if (!edit) {
+            if (tier != null) {
+                out.put("tier", tier);
+                out.put("tierBy", "user".equals(req.get("tierBy")) ? "user" : "ai");
+                if (req.get("tierReason") != null) {
+                    out.put("tierReason", trimTo(String.valueOf(req.get("tierReason")), 60));
+                }
+            }
+            if (req.get("bookPos") instanceof Number n) {
+                out.put("bookPos", Math.max(0, Math.min(1, n.doubleValue())));
+            }
+        } else if (req.containsKey("tier") && !Objects.equals(tier, tierValue(out.get("tier")))) {
+            if (tier == null) {
+                out.remove("tier");
+                out.remove("tierReason");
+                out.remove("tierBy");
+            } else {
+                out.put("tier", tier);
+                out.put("tierBy", "user");
+                out.put("tierReason", "作者手改");
+            }
+        }
+        return out;
+    }
+
+    /** 1–5 的量级，其他值 = null */
+    public static Integer tierValue(Object v) {
+        int t;
+        if (v instanceof Number n) {
+            t = n.intValue();
+        } else {
+            try {
+                t = Integer.parseInt(Objects.toString(v, "").trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return t >= 1 && t <= 5 ? t : null;
+    }
+
+    /** 素材的量级（没标 = null） */
+    public static Integer tierOf(Material m) {
+        return m.getProfile() == null ? null : tierValue(m.getProfile().get("tier"));
+    }
+
+    /** 素材首次出现在原书的位置 0–1（没有 = null） */
+    public static Double bookPosOf(Material m) {
+        return m.getProfile() != null && m.getProfile().get("bookPos") instanceof Number n ? n.doubleValue() : null;
     }
 
     /** 保留 / 取消保留 */
@@ -858,6 +973,17 @@ public class MaterialService {
                 source.put("facts", facts); // 新版提取：每条事实 + 原文依据 + 章节
             }
             m.setSource(source);
+            Map<String, Object> profile = new LinkedHashMap<>();
+            if (tierValue(p.get("tier")) != null) {
+                profile.put("tier", tierValue(p.get("tier")));
+                profile.put("tierReason", "整理卡片时标注");
+            }
+            if (p.get("bookPos") instanceof Number pos) {
+                profile.put("bookPos", pos.doubleValue());
+            }
+            if (!profile.isEmpty()) {
+                m.setProfile(profile);
+            }
             Material created = save(m);
             candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>().eq(MaterialCandidate::getId, id)
                     .set(MaterialCandidate::getStatus, MaterialCandidate.SAVED)

@@ -63,6 +63,8 @@
             <el-tag v-if="r.material.pinned" size="small" type="warning" effect="plain">保留</el-tag>
             <el-tag v-if="isMultiVersion(r.material)" size="small" type="success">{{ r.material.source.variants.length }} 种写法</el-tag>
             <el-tag v-if="r.matchedLabel" size="small" type="warning" title="检索命中的是这个版本">命中：{{ r.matchedLabel }}</el-tag>
+            <el-tag v-if="r.fit === 'far'" size="small" type="danger" effect="plain" title="远超主角现在的量级：不自动预选，选了也只适合当传说 / 背景 / 伏笔">远景</el-tag>
+            <el-tag v-else-if="tierOf(r.material)" size="small" type="info" effect="plain" :title="tierLabel(tierOf(r.material))">量级 {{ tierOf(r.material) }}</el-tag>
             <span class="muted source">{{ r.material.sourceBook ? `《${r.material.sourceBook}》` : '手动添加' }}</span>
             <span v-if="r.score != null" class="score" :class="{ weak: vector?.reranked && r.score < RERANK_MIN }" :title="rankTip(r)">{{ r.score }}</span>
           </div>
@@ -105,7 +107,7 @@
 import { computed, nextTick, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-import { MATERIAL_CATEGORIES, categoryOf, getMaterialTags, isMultiVersion, searchMaterials, vectorFeedback, vectorSearch } from '@/api/material'
+import { MATERIAL_CATEGORIES, categoryOf, getMaterialTags, isMultiVersion, searchMaterials, tierLabel, tierOf, vectorFeedback, vectorSearch } from '@/api/material'
 import BlockedBooksSelect from '@/components/material/BlockedBooksSelect.vue'
 import { describeTarget } from '@/novel-options/materialApply'
 import { errorMessage } from '@/api/request'
@@ -115,7 +117,8 @@ import { errorMessage } from '@/api/request'
  *  initialSelected：打开时预先勾选的素材；vectorQuery：向量检索框预填的内容；autoVector：打开即向量检索并预勾选前 AUTO_PICK 条；
  *  actionLabel：AI 动作（如「生成」「润色」）——有它时可以什么都不选直接确认（apply 传空数组），关闭 / 取消发 cancel；
  *  feedbackContext：记录检索反馈时说明用在哪（如「设定 › 世界观 › 力量体系」）；
- *  editBlocked：在抽屉里直接修改屏蔽的来源书（v-model:exclude-books） */
+ *  editBlocked：在抽屉里直接修改屏蔽的来源书（v-model:exclude-books）；
+ *  novelId：给哪个工作区用 —— 向量检索结果按它的故事阶段标出「远景」（远超主角量级），自动预选时跳过 */
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   pickOnly: { type: Boolean, default: false },
@@ -128,7 +131,8 @@ const props = defineProps({
   actionLabel: { type: String, default: '' },
   title: { type: String, default: '' },
   feedbackContext: { type: String, default: '' },
-  editBlocked: { type: Boolean, default: false }
+  editBlocked: { type: Boolean, default: false },
+  novelId: { type: String, default: '' }
 })
 const emit = defineEmits(['update:modelValue', 'update:excludeBooks', 'apply', 'cancel'])
 
@@ -194,7 +198,7 @@ async function onOpen() {
     await runVector()
     // 重排过：只预勾相关度够的；没重排：分数不可比，取最前面几条
     ;(vector.value?.results || [])
-      .filter((r) => !vector.value.reranked || r.score >= RERANK_MIN)
+      .filter((r) => (!vector.value.reranked || r.score >= RERANK_MIN) && r.fit !== 'far')
       .slice(0, AUTO_PICK)
       .forEach((r) => (selected[r.material.id] = pick(r)))
   } else {
@@ -245,7 +249,8 @@ async function runVector() {
   loading.value = true
   try {
     const res = await vectorSearch({
-      query, category: category.value || undefined, tags: tags.value, excludeBooks: props.excludeBooks, limit: 30
+      query, category: category.value || undefined, tags: tags.value, excludeBooks: props.excludeBooks, limit: 30,
+      novelId: props.novelId || undefined
     })
     if (res.code !== 0) throw new Error(res.message)
     vector.value = { ...res.data, query }

@@ -62,6 +62,22 @@
             <el-form-item label="补充条件">
               <el-input v-model="form.conditions" maxlength="1000" placeholder="可以空着。如：北方冰原；不要修仙元素；主角是法师" />
             </el-form-item>
+            <el-form-item label="故事阶段">
+              <el-select v-model="stage.phase" size="small" style="width: 150px" @change="onPhase">
+                <el-option v-if="wall?.novelId" label="自动（按工作区）" value="auto" />
+                <el-option v-for="p in PHASES" :key="p.value" :label="p.label" :value="p.value" />
+              </el-select>
+              <template v-if="stage.phase !== 'auto' && stage.phase !== 'any'">
+                <span class="label">对手上限</span>
+                <el-select v-model="stage.tierMax" size="small" style="width: 190px">
+                  <el-option v-for="t in TIERS" :key="t.value" :label="t.label" :value="t.value" :title="t.desc" />
+                </el-select>
+                <el-input v-model="stage.protagonist" size="small" maxlength="100" placeholder="主角现在的实力 / 处境（可空）" style="width: 240px; margin-left: 8px" />
+              </template>
+              <span class="muted tip-inline">
+                {{ stage.phase === 'auto' ? '按工作区的阶段表 / 已写章数定量级上限' : stage.phase === 'any' ? '不按阶段过滤素材' : '和主角正面冲突的素材不超过这个量级，更强的最多带 2 条当背景' }}
+              </span>
+            </el-form-item>
             <el-form-item label="怎么跑">
               <el-radio-group v-model="form.mode" size="small">
                 <el-radio-button value="auto" title="AI 自己拆需求、检索素材、出思路">一键出思路</el-radio-button>
@@ -98,12 +114,22 @@
               <el-button size="small" link type="primary" :disabled="!!busy" @click="addNeed">+ 加一条</el-button>
               <el-button size="small" :disabled="!!busy || !plan.needs.length" @click="retrieve(true)">按这些需求检索</el-button>
             </div>
+            <div v-if="plan.stage && plan.stage.phase !== 'any'" class="stage-line">
+              <el-tag size="small" type="warning" effect="plain">{{ phaseLabel(plan.stage.phase) }}</el-tag>
+              <span>对手上限 {{ tierLabel(plan.stage.tierMax) }}</span>
+              <span v-if="plan.stage.protagonist" class="muted">· 主角：{{ plan.stage.protagonist }}</span>
+              <span class="muted">（{{ STAGE_SOURCES[plan.stage.source] || '' }}<template v-if="plan.stage.chapter">，下一章第 {{ plan.stage.chapter }} 章</template>）</span>
+              <el-button link size="small" type="primary" @click="editStage">修改</el-button>
+            </div>
             <div v-for="(n, i) in plan.needs" :key="i" class="need">
               <el-select v-model="n.category" size="small" style="width: 110px">
                 <el-option v-for="c in MATERIAL_CATEGORIES" :key="c.code" :label="c.label" :value="c.code" />
               </el-select>
               <el-input v-model="n.query" size="small" placeholder="检索词，空格隔开" class="need-query" />
               <el-input-number v-model="n.count" :min="1" :max="6" size="small" style="width: 90px" />
+              <el-select v-model="n.role" size="small" placeholder="用途" style="width: 116px" title="只有对手 / 场景 / 道具受量级上限约束；背景传说可以用更强的">
+                <el-option v-for="r in ROLES" :key="r.value" :label="r.label" :value="r.value" />
+              </el-select>
               <span class="muted need-why">{{ n.why }}</span>
               <el-button link type="danger" :icon="Delete" @click="plan.needs.splice(i, 1)" />
             </div>
@@ -122,6 +148,11 @@
                 <template v-if="g.need.category">{{ categoryOf(g.need.category)?.label }} · {{ g.need.query }}</template>
                 {{ g.need.why }}
                 <template v-if="!g.items.length">（没找到合适的）</template>
+                <template v-if="g.hidden">
+                  · 已按阶段挡掉 {{ g.hidden }} 条超量级的
+                  <el-button link size="small" type="primary" :disabled="!!busy" @click="lookAnyway(g)">也看看</el-button>
+                </template>
+                <template v-if="g.relaxed"> · 合适的不够，带了超一级的</template>
               </div>
               <div class="cands">
                 <div v-for="c in g.items" :key="c.material.id" class="cand" :class="{ off: !c.checked }">
@@ -133,6 +164,8 @@
                       <el-tag v-if="c.from === 'wall'" size="small" type="warning">灵感墙</el-tag>
                       <el-tag v-else-if="c.from === 'explore'" size="small" type="success">随机</el-tag>
                       <span v-if="c.score != null" class="muted">相关度 {{ c.score }}</span>
+                      <el-tag v-if="c.fit && FITS[c.fit]" size="small" :type="FITS[c.fit].type" effect="plain" :title="FITS[c.fit].tip">{{ FITS[c.fit].label }}</el-tag>
+                      <el-tag v-else-if="c.tier" size="small" type="info" effect="plain" :title="tierLabel(c.tier)">量级 {{ c.tier }}</el-tag>
                     </div>
                     <div class="cand-summary">{{ c.material.summary }}</div>
                   </div>
@@ -296,8 +329,12 @@ import ApplyDialog from '@/components/inspire/ApplyDialog.vue'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
 import BlockedBooksSelect from '@/components/material/BlockedBooksSelect.vue'
-import { MATERIAL_CATEGORIES, categoryOf, getMaterial, isMultiVersion } from '@/api/material'
+import { MATERIAL_CATEGORIES, TIERS, categoryOf, getMaterial, isMultiVersion, tierLabel } from '@/api/material'
 import {
+  FITS,
+  PHASES,
+  ROLES,
+  STAGE_SOURCES,
   TARGETS,
   browseMaterials,
   deleteItem,
@@ -313,6 +350,7 @@ import {
   reviseIdea,
   saveItem,
   saveWall,
+  phaseLabel,
   targetLabel,
   updateRun
 } from '@/api/inspire'
@@ -338,6 +376,8 @@ const items = ref([])
 const tab = ref('compose')
 
 const form = reactive({ request: '', target: 'adventure', conditions: '', mode: 'auto', count: 3 })
+// 故事阶段：auto = 关联了工作区时由后端按阶段表 / 已写章数算；其他 = 作者指定（source = user）
+const stage = reactive({ phase: 'any', tierMax: null, protagonist: '' })
 const modelKey = ref(readLocal(MODEL_KEY) || '')
 const configs = ref([])
 const localModels = ref([])
@@ -414,6 +454,12 @@ function selectWall(id) {
   run.value = null
 }
 
+// 关联了工作区：阶段默认按工作区自动算；没关联：默认不限
+watch(() => wall.value?.novelId, (nid) => {
+  if (nid && stage.phase === 'any') stage.phase = 'auto'
+  if (!nid && stage.phase === 'auto') stage.phase = 'any'
+}, { immediate: true })
+
 watch(wallId, (id) => {
   if (!id) return
   writeLocal(WALL_KEY, String(id))
@@ -478,7 +524,36 @@ async function removeWall() {
 
 // ------------------------------------------------------------------ 构思三步
 
-const reqBody = () => ({ request: form.request.trim(), target: form.target, conditions: form.conditions.trim(), model: modelBody() })
+/** 本次用的阶段：作者指定的优先，否则用拆需求时后端算出来的 */
+function effectiveStage() {
+  if (stage.phase !== 'auto') {
+    return { phase: stage.phase, tierMax: stage.phase === 'any' ? null : stage.tierMax, protagonist: stage.protagonist.trim(), source: 'user' }
+  }
+  return plan.value?.stage || null
+}
+const reqBody = () => ({ request: form.request.trim(), target: form.target, conditions: form.conditions.trim(), model: modelBody(),
+  stage: effectiveStage() || undefined })
+
+function onPhase(v) {
+  const p = PHASES.find((x) => x.value === v)
+  if (p?.tierMax) stage.tierMax = p.tierMax
+}
+
+/** 把后端算出的阶段改成作者指定 */
+function editStage() {
+  const s = plan.value?.stage
+  if (!s) return
+  Object.assign(stage, { phase: s.phase, tierMax: s.tierMax, protagonist: s.protagonist || '' })
+  ElMessage.info('已把阶段放到上面的「故事阶段」里，改好后点「按这些需求检索」')
+}
+
+/** 「也看看」：这一组不按阶段过滤，重新检索 */
+async function lookAnyway(g) {
+  const need = plan.value?.needs.find((n) => n.category === g.need.category && n.query === g.need.query)
+  if (!need) return
+  need.ignoreStage = true
+  await retrieve(false)
+}
 
 async function start() {
   writeLocal(MODEL_KEY, modelKey.value)
@@ -488,7 +563,7 @@ async function start() {
   busy.value = 'plan'
   try {
     const p = await call(planInspiration(wallId.value, reqBody()), '拆需求失败')
-    plan.value = { summary: p.summary, needs: p.needs, explore: p.explore, usage: p.usage }
+    plan.value = { summary: p.summary, needs: p.needs, explore: p.explore, stage: p.stage, usage: p.usage }
   } catch (e) {
     ElMessage.error(errorMessage(e, '拆需求失败'))
     busy.value = ''
@@ -503,8 +578,9 @@ async function retrieve(auto) {
   busy.value = 'retrieve'
   run.value = null
   try {
-    const r = await call(retrieveMaterials(wallId.value, { needs: plan.value.needs, explore: plan.value.explore }), '检索素材失败')
-    groups.value = r.groups.map((g) => ({ need: g.need, items: g.items.map((c) => ({ ...c, checked: true })) }))
+    const r = await call(retrieveMaterials(wallId.value, { needs: plan.value.needs, explore: plan.value.explore,
+      stage: effectiveStage() || undefined }), '检索素材失败')
+    groups.value = r.groups.map((g) => ({ ...g, items: g.items.map((c) => ({ ...c, checked: true })) }))
   } catch (e) {
     ElMessage.error(errorMessage(e, '检索素材失败'))
     busy.value = ''
@@ -543,7 +619,7 @@ async function generate() {
 }
 
 function addNeed() {
-  plan.value.needs.push({ category: 'location', query: '', count: 3, why: '手动添加' })
+  plan.value.needs.push({ category: 'location', query: '', count: 3, role: 'scene', why: '手动添加' })
 }
 
 function pickExtra() {
@@ -811,6 +887,8 @@ onActivated(loadWalls)
 </script>
 
 <style scoped>
+.stage-line { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 13px; }
+.tip-inline { margin-left: 8px; font-size: 12px; }
 .inspire-page {
   display: grid;
   grid-template-columns: 240px 1fr;

@@ -96,11 +96,18 @@ def digest_user(chapter_index: int, title: str, text: str, known: str) -> str:
         "未解的谜团）；本章内就解决的困境、普通冲突、人物恩怨本身都不算。本章新埋的（action=plant，不填 id）最多 2 个，"
         "宁缺毋滥；【已有账本】里的伏笔本章有新进展填 advance，谜底揭开 / 困境已解除 / 约定已兑现填 resolve（都要填编号）。\n"
         "   - characters：状态有变化的角色（受伤、突破、身份暴露、立场或关系改变、获得 / 失去重要物品、死亡等），"
-        "change 写本章的变化，state 写变化后的完整当前状态（≤60 字）；没变化的角色不要列。\n"
+        "change 写本章的变化，state 写变化后的完整当前状态（≤60 字）；没变化的角色不要列。"
+        "本章让这个角色的处境变清楚时再填（没有就省略这些键）：goal 他现在想要什么（≤30 字）、obstacle 什么挡着他（≤30 字）、"
+        "relations 本章变化的关系 [{to: 对方名字, rel: 关系（≤15 字，如「暗中提防」「欠一条命」）}]、"
+        "knows 本章新得知的关键信息或秘密（别人不知道、会影响剧情的，每条 ≤30 字）。\n"
         "   - timeline：本章 1~3 个推动主线的关键事件（when 写故事内的时间，如「入门第三天」，不确定就留空）；"
         "琐碎动作不要列。\n"
+        "   - clocks：本章定下期限的事（「三天后宗门大比」「月圆之夜毒发」，action=set，due 写期限）或已到期 / 兑现的"
+        "（action=done，text 照抄已有账本里那条）；没有就空数组。\n"
         '输出格式：{"summary": "…", "foreshadow": [{"id": "", "text": "…", "action": "plant", "note": "…"}], '
-        '"characters": [{"name": "…", "change": "…", "state": "…"}], "timeline": [{"when": "…", "event": "…"}]}')
+        '"characters": [{"name": "…", "change": "…", "state": "…", "goal": "…", "obstacle": "…", '
+        '"relations": [{"to": "…", "rel": "…"}], "knows": ["…"]}], "timeline": [{"when": "…", "event": "…"}], '
+        '"clocks": [{"text": "…", "due": "…", "action": "set"}]}')
 
 
 REVIEW_SYSTEM = ("你是严格的连载小说责任编辑，负责检查新写的一章与已有设定、前文是否矛盾。只输出 JSON，不要任何解释。"

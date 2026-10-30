@@ -14,7 +14,7 @@ from ..local import inference, jobs as local_jobs, registry
 from . import chapter as chapter_mod, spec as spec_mod, store
 from .backends import GenerationError, GenParams, LocalHFGenerator
 
-KINDS = ("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat")
+KINDS = ("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat", "story_direction", "situation")
 CHAT_TURNS = 20             # 角色试聊带上最近多少条消息
 CHAT_MESSAGE_CHARS = 1000
 CHAT_SETTING_CHARS = 1500   # 试聊时附带的世界观 / 核心设定上限
@@ -136,17 +136,21 @@ def _material_lines(materials: list[dict]) -> list[str]:
 def _context(novel: dict, spec: list | None = None, current: bool = True, past: bool = True) -> tuple[str, list[dict]]:
     """工作区已有内容：书名、设定（核心 + 卡片；spec 为编辑器中尚未保存的当前设定时优先用它）、大纲，
     以及已写章节：past = 前情概要 + 更早章节的摘要，current = 最近写完的一章（摘要 + 结尾）。"""
-    cons = spec_mod.build_for(novel, spec)
+    chapters = store.list_chapters(novel["id"])
+    # 为下一章构思：按出场条件 / 阶段表放行（还没到登场章节的设定只列名字，只能埋伏笔）
+    cons = spec_mod.build_for(novel, spec, chapter=(chapters[-1]["index"] + 1) if chapters else 1)
     parts = [f"【当前书名】{novel['title']}"]
     settings = cons.core + [c.text for c in cons.cards]
     parts.append("【已确定的设定】\n" + ("\n\n".join(settings) if settings else "（尚未设定，可自由构思）"))
+    if cons.not_yet:
+        parts.append("【后期才登场的设定】（现在只能作为传闻 / 伏笔，不能正面出场）\n" + "\n".join(
+            f"- {c.title}（第 {c.appear['from']} 章起）" for c in cons.not_yet))
     if cons.open:
         parts.append("【尚未设定】" + "、".join(cons.open))
     outline = novel.get("outline") or {}
     if outline.get("chapters"):
         plan = "\n".join(f"第{c['index']}章《{c.get('title', '')}》：{c.get('goal', '')}" for c in outline["chapters"])
         parts.append(f"【已采用的大纲】\n一句话：{outline.get('logline', '')}\n{outline.get('synopsis', '')}\n{plan}")
-    chapters = store.list_chapters(novel["id"])
     last = chapters[-1] if chapters else None
     if past:
         if novel.get("arcSummary"):
@@ -209,6 +213,14 @@ def generate(novel_id: str, req: dict) -> dict:
     local = req.get("local")
     if not req.get("api") and not (local and local.get("baseId")):
         raise IdeaError("AI 构思需要通过 Java 后端发起，并选择大模型或本地模型")
+    if kind in ("story_direction", "situation"):   # 走向引擎（基于世界书，见 directions.py）
+        from . import directions
+        try:
+            if kind == "situation":
+                return {"kind": kind, "result": directions.refresh_situation(novel_id, req)}
+            return directions.generate(novel_id, req)
+        except directions.DirectionError as e:
+            raise IdeaError(str(e)) from e
     novel = store.get_novel(novel_id)
     if kind == "fill":
         return _fill(novel, req, local)
@@ -628,12 +640,35 @@ def _normalize(kind: str, data: dict, next_index: int) -> dict:
             "materials": _strs(data.get("materials"))}
 
 
+def _plan_fields(c: dict) -> dict:
+    """自动规划写进大纲的扩展字段（planner.py）：节拍、出场人物、伏笔引用（账本编号 + 埋 / 推 / 收）、定时事件、章末钩子、
+    开篇要点。没有就不写，旧大纲不受影响。"""
+    out = {}
+    beats = _strs(c.get("beats"))[:8]
+    if beats:
+        out["beats"] = [b[:200] for b in beats]
+    cast = _strs(c.get("cast"))[:12]
+    if cast:
+        out["cast"] = [x[:40] for x in cast]
+    refs = [{"id": str(r.get("id"))[:20], "action": r.get("action") if r.get("action") in ("plant", "advance", "resolve") else "advance"}
+            for r in c.get("foreshadow") or [] if isinstance(r, dict) and r.get("id")][:10]
+    if refs:
+        out["foreshadow"] = refs
+    clocks = [str(x)[:120] for x in c.get("clocks") or [] if str(x).strip()][:5]
+    if clocks:
+        out["clocks"] = clocks
+    for k, n in (("hook", 300), ("openingNote", 300)):
+        if str(c.get(k) or "").strip():
+            out[k] = str(c[k]).strip()[:n]
+    return out
+
+
 def validate_outline(outline: dict | None) -> dict | None:
     """保存用户确认 / 编辑后的大纲：{logline, synopsis, chapters:[{index, title, goal, materials?}], materials?}"""
     if outline is None:
         return None
     chapters = [{"index": int(c["index"]), "title": str(c.get("title", ""))[:60], "goal": str(c.get("goal", ""))[:2000],
-                 "materials": _strs(c.get("materials"))[:20]}
+                 "materials": _strs(c.get("materials"))[:20], **_plan_fields(c)}
                 for c in outline.get("chapters", []) if isinstance(c, dict) and c.get("index") and c.get("goal")]
     return {"logline": str(outline.get("logline", ""))[:200], "synopsis": str(outline.get("synopsis", ""))[:3000],
             "chapters": sorted(chapters, key=lambda c: c["index"])[:200],

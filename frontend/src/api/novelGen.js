@@ -59,5 +59,11 @@ export const getFacts = (id) => get(`/api/gen/novels/${id}/facts`)
 /** 保存整个账本（作者改过的条目带 manual: true） */
 export const updateFacts = (id, facts) => post(`/api/gen/novels/${id}/facts/update`, { facts })
 
+/* ---------- 世界书（只读编译视图，见 docs/世界书.md） ---------- */
+/** {chapter, entries[{id, kind, category, name, aliases, role, text, pinned, protagonist?, since, notYet, source{type, ref?},
+ *   state{state, updatedIn, goal, obstacle, relations[{to, rel}], knows[], manual}|null}], threads[], clocks[], timeline[],
+ *   stage, outlineNext[], story{arcSummary, arcUpTo, recent[]}, open[], snapshot（走向引擎看到的局面文本）} */
+export const getWorldbook = (id) => get(`/api/gen/novels/${id}/worldbook`)
+
 export const getGenJob = (jobId) => get(`/api/gen/jobs/${jobId}`)
 export const cancelGenJob = (jobId) => post(`/api/gen/jobs/${jobId}/cancel`)

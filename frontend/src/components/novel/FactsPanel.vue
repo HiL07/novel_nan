@@ -14,6 +14,7 @@
       <el-radio-group v-model="fsFilter" size="small">
         <el-radio-button value="open">未回收</el-radio-button>
         <el-radio-button value="resolved">已回收</el-radio-button>
+        <el-radio-button value="planned">计划中</el-radio-button>
         <el-radio-button value="all">全部</el-radio-button>
       </el-radio-group>
       <el-button size="small" :icon="Plus" :disabled="locked" @click="editForeshadow(null)">新增伏笔</el-button>
@@ -28,11 +29,16 @@
       </el-table-column>
       <el-table-column label="状态" width="86">
         <template #default="{ row }">
-          <el-tag size="small" :type="row.status === 'open' ? 'warning' : 'success'">{{ row.status === 'open' ? '未回收' : '已回收' }}</el-tag>
+          <el-tag size="small" :type="row.status === 'open' ? 'warning' : row.status === 'planned' ? 'info' : 'success'">
+            {{ row.status === 'open' ? '未回收' : row.status === 'planned' ? '计划中' : '已回收' }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="埋下" width="80">
-        <template #default="{ row }">{{ row.plantedIn ? `第${row.plantedIn}章` : '-' }}</template>
+        <template #default="{ row }">
+          {{ row.plantedIn ? `第${row.plantedIn}章` : row.status === 'planned' && row.plannedIn ? `计划第${row.plannedIn}章` : '-' }}
+          <div v-if="row.planned && row.payoffIn" class="muted">计划第{{ row.payoffIn }}章收</div>
+        </template>
       </el-table-column>
       <el-table-column label="经过" min-width="240">
         <template #default="{ row }">
@@ -44,7 +50,7 @@
       <el-table-column label="操作" width="190">
         <template #default="{ row }">
           <el-button link type="primary" size="small" :disabled="locked" @click="editForeshadow(row)">编辑</el-button>
-          <el-button link size="small" :disabled="locked" @click="toggleResolved(row)">{{ row.status === 'open' ? '标为已回收' : '重新打开' }}</el-button>
+          <el-button v-if="row.status !== 'planned'" link size="small" :disabled="locked" @click="toggleResolved(row)">{{ row.status === 'open' ? '标为已回收' : '重新打开' }}</el-button>
           <el-button link type="danger" size="small" :disabled="locked" @click="remove('foreshadows', row)">删除</el-button>
         </template>
       </el-table-column>

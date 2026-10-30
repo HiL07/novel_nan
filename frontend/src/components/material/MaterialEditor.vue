@@ -11,6 +11,16 @@
       <el-form-item label="概括"><el-input v-model="form.summary" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" maxlength="300" show-word-limit /></el-form-item>
       <el-form-item label="属性"><AttributeEditor v-model="form.attributes" :category="form.category" style="width: 100%" /></el-form-item>
       <el-form-item label="标签"><el-input-tag v-model="form.tags" placeholder="回车添加" :max="12" /></el-form-item>
+      <el-form-item label="量级">
+        <el-select v-model="tier" clearable placeholder="未标（可在素材库「补全量级」）" style="width: 240px">
+          <el-option v-for="t in TIERS" :key="t.value" :label="t.label" :value="t.value" :title="t.desc" />
+        </el-select>
+        <span class="tier-note">
+          <template v-if="form.profile?.tierBy === 'user'">作者手改，AI 不会覆盖</template>
+          <template v-else-if="form.profile?.tierReason">AI：{{ form.profile.tierReason }}</template>
+          <template v-if="form.profile?.bookPos != null"> · 原书 {{ Math.round(form.profile.bookPos * 100) }}% 处首次出现</template>
+        </span>
+      </el-form-item>
       <el-form-item label="来源书">
         <el-input v-model="form.sourceBook" placeholder="空 = 手动添加；填书名可按书筛选 / 屏蔽 / 删除" maxlength="100" style="width: 280px" />
         <el-checkbox v-model="form.pinned" class="pin-check">保留</el-checkbox>
@@ -65,12 +75,12 @@
 </template>
 
 <script setup>
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
 import AttributeEditor from './AttributeEditor.vue'
 import FactList from './FactList.vue'
-import { MATERIAL_CATEGORIES, deleteMaterial, saveMaterial, unmergeMaterial } from '@/api/material'
+import { MATERIAL_CATEGORIES, TIERS, deleteMaterial, saveMaterial, unmergeMaterial } from '@/api/material'
 import { errorMessage } from '@/api/request'
 
 /** material 为空则新建（可通过 defaultCategory 指定分类） */
@@ -83,13 +93,20 @@ const emit = defineEmits(['update:modelValue', 'saved', 'deleted'])
 
 const blank = () => ({
   id: null, category: props.defaultCategory || 'world', subtype: '', title: '', summary: '', attributes: {}, tags: [], detail: '',
-  source: null, sourceBook: '', pinned: false, members: []
+  source: null, sourceBook: '', pinned: false, members: [], profile: null
 })
 const form = reactive(blank())
 const MARKS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫'
 const openVariant = reactive({})
 const memberOf = (id) => (form.members || []).find((m) => m.id === id)
 const saving = ref(false)
+// 量级：改了就记作者手改（tierBy = user，Java 端再按「和原来不同」判断一次）
+const tier = computed({
+  get: () => form.profile?.tier ?? null,
+  set: (v) => {
+    form.profile = { ...(form.profile || {}), tier: v || null, tierBy: 'user' }
+  }
+})
 
 watch(() => props.modelValue, (open) => {
   if (open) Object.assign(form, blank(), props.material ? JSON.parse(JSON.stringify(props.material)) : {})
@@ -156,6 +173,7 @@ async function onDelete() {
 </script>
 
 <style scoped>
+.tier-note { margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
 .variants {
   font-size: 13px;
   line-height: 1.7;

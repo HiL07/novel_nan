@@ -72,6 +72,18 @@
         <!-- ===================== 设定 ===================== -->
         <el-tab-pane name="settings">
           <template #label>设定<el-badge v-if="settingsDirty" is-dot class="dirty-dot" /></template>
+          <div class="positioning">
+            <span class="muted">作品定位：</span>
+            <span>{{ positioningText || '未填（平台 / 题材 / 读者 / 卖点…，写正文时会带上）' }}</span>
+            <el-button link type="primary" @click="openBookConfig">修改</el-button>
+          </div>
+          <el-dialog v-model="bookConfigDialog.visible" title="作品定位 / 写作参数" width="720px" append-to-body>
+            <BookConfigForm v-if="bookConfigDialog.cfg" v-model="bookConfigDialog.cfg" />
+            <template #footer>
+              <el-button @click="bookConfigDialog.visible = false">取消</el-button>
+              <el-button type="primary" :loading="bookConfigDialog.saving" @click="saveBookConfig">保存</el-button>
+            </template>
+          </el-dialog>
           <SettingsEditor
             :key="novel.id"
             ref="editorRef"
@@ -84,6 +96,20 @@
               <el-button type="primary" :icon="Check" :loading="savingSettings" @click="saveSettings()">保存设定</el-button>
             </template>
           </SettingsEditor>
+        </el-tab-pane>
+
+        <!-- ===================== 自动规划 ===================== -->
+        <el-tab-pane label="自动规划" name="plan" lazy>
+          <PlanWizard
+            :novel-id="novel.id"
+            :chapter-count="novel.chapters.length ? Math.max(...novel.chapters.map((c) => c.index)) : 0"
+            :initial-premise="String(route.query.plan || '')"
+            :apply-settings="applyPlanSettings"
+            :book="novel.book || null"
+            :book-config="novel.bookConfig || null"
+            :continue-signal="planContinue"
+            @applied="onPlanApplied"
+          />
         </el-tab-pane>
 
         <!-- ===================== 构思 ===================== -->
@@ -155,6 +181,12 @@
                       <el-tag size="small" type="success">大纲</el-tag>
                       <span>第{{ outlineNext.index }}章 {{ outlineNext.title }}</span>
                       <el-button link type="primary" :disabled="busy" @click="fillFromOutline">按大纲填入</el-button>
+                    </template>
+                    <template v-else-if="novel.book && novel.outline?.chapters?.length">
+                      <el-tag size="small" type="warning">大纲已写完</el-tag>
+                      <el-button link type="primary" :disabled="busy" @click="continuePlan">
+                        按全书骨架规划接下来 10 章
+                      </el-button>
                     </template>
                     <el-button link type="primary" :icon="MagicStick" :disabled="busy" @click="tab = 'ideas'">AI 构思本章（可结合素材库）</el-button>
                   </div>
@@ -317,6 +349,11 @@
           </template>
           <FactsPanel :novel-id="novel.id" :locked="!!busy" :reload-key="factsKey" @open-count="(n) => (openForeshadows = n)" />
         </el-tab-pane>
+
+        <!-- ===================== 世界书 ===================== -->
+        <el-tab-pane label="世界书" name="worldbook" lazy>
+          <WorldBook :novel-id="novel.id" :reload-key="factsKey" />
+        </el-tab-pane>
       </el-tabs>
     </el-card>
 
@@ -356,6 +393,10 @@ import { Back, Check, CopyDocument, Delete, EditPen, MagicStick, VideoPause, Vid
 import SettingsEditor from '@/components/novel-options/SettingsEditor.vue'
 import IdeaPanel from '@/components/novel/IdeaPanel.vue'
 import FactsPanel from '@/components/novel/FactsPanel.vue'
+import WorldBook from '@/components/novel/WorldBook.vue'
+import PlanWizard from '@/components/novel/PlanWizard.vue'
+import BookConfigForm from '@/components/novel/BookConfigForm.vue'
+import { blankBookConfig } from '@/api/novelPlan'
 import ChapterInsight from '@/components/novel/ChapterInsight.vue'
 import {
   CONTEXT_WINDOWS, cancelGenJob, deleteChapter, editChapter, getChapter, getGenJob, getGenStatus, getNovel, ignoreReview,
@@ -661,6 +702,36 @@ async function refreshStatus() {
   }
 }
 
+/* ---- 作品定位（写作参数 novel.bookConfig）：写正文进【作品定位】；全书骨架写完 10 章后一键续规划 ---- */
+const POSITION_KEYS = ['platform', 'genre', 'audience', 'sellingPoint', 'pov', 'style']
+const positioningText = computed(() => {
+  const c = novel.value?.bookConfig
+  if (!c) return ''
+  return [...POSITION_KEYS.slice(0, 3).map((k) => c[k]), c.tags?.join('、'), ...POSITION_KEYS.slice(3).map((k) => c[k])]
+    .filter(Boolean).join(' · ')
+})
+const bookConfigDialog = reactive({ visible: false, saving: false, cfg: null })
+function openBookConfig() {
+  bookConfigDialog.cfg = { ...blankBookConfig(), ...(novel.value.bookConfig || {}) }
+  bookConfigDialog.visible = true
+}
+async function saveBookConfig() {
+  bookConfigDialog.saving = true
+  try {
+    novel.value = { ...novel.value, ...(await call(updateNovel(novel.value.id, { bookConfig: bookConfigDialog.cfg }), '保存失败')) }
+    bookConfigDialog.visible = false
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    bookConfigDialog.saving = false
+  }
+}
+const planContinue = ref(0)
+function continuePlan() {
+  planContinue.value++
+  tab.value = 'plan'
+}
+
 async function saveTitle() {
   try {
     novel.value = { ...novel.value, ...(await call(updateNovel(novel.value.id, { title: titleDraft.value }), '保存失败')) }
@@ -933,6 +1004,21 @@ function schedule() {
   }, 2000)
 }
 
+/** 自动规划「写进工作区」的设定部分：写进设定编辑器（设定页不是懒加载，编辑器总在）并保存 */
+async function applyPlanSettings(items) {
+  if (!editorRef.value) throw new Error('设定编辑器还没加载好，稍后再试')
+  const r = editorRef.value.applyPlan(items)
+  settingsDirty.value = true
+  await saveSettings(true)
+  return r
+}
+
+/** 写入后：大纲 / 书名 / 账本都变了 */
+async function onPlanApplied() {
+  await loadNovel()
+  factsKey.value++
+}
+
 /** 灵感墙「写进工作区」：设定元素 → 设定页按素材应用；构思方向 → AI 构思页的构思方向框（sessionStorage 交接，读完即删） */
 async function applyInspire() {
   let payload = null
@@ -969,6 +1055,8 @@ async function applyInspire() {
 }
 
 watch(() => route.params.id, (id) => id && route.name === 'novelWorkspace' && loadNovel().then(applyInspire).then(schedule))
+// 新建工作区时填了一句构思（?plan=…）：直接打开自动规划
+watch(() => route.query.plan, (p) => { if (p) tab.value = 'plan' }, { immediate: true })
 onActivated(() => loadNovel().then(applyInspire).then(schedule))
 onDeactivated(() => clearTimeout(timer))
 </script>
@@ -1009,6 +1097,7 @@ onDeactivated(() => clearTimeout(timer))
 .chapter-edit {
   margin-top: 10px;
 }
+.positioning { display: flex; gap: 6px; align-items: center; font-size: 13px; margin-bottom: 10px; }
 .outline-hint {
   display: flex;
   align-items: center;

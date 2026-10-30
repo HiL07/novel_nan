@@ -49,6 +49,8 @@ public class InspirationService {
     static final int PER_BOOK = 2;
     /** 没有重排模型时，每条需求按排名取前几条 */
     static final int UNRANKED_TAKE = 3;
+    /** relaxEmpty：一条需求没有素材过相关度阈值时，退一步给几条 */
+    static final int WEAK_TAKE = 2;
     /** 随机探索：每个分类抽几条 */
     static final int EXPLORE_PER_CATEGORY = 2;
     /** 逛素材 / 随机探索优先「内容充实」的素材：概括 + 详细的字数至少这么多 */
@@ -263,64 +265,129 @@ public class InspirationService {
     // ------------------------------------------------------------------ ② 检索素材（本地）
 
     /**
-     * {needs[{category, query, count, why}], explore?} → {groups[{need, items[{material, score, variant, matchedLabel, from}]}],
-     * total, reranked}。墙上钉的素材总在最前（from = wall）；每条需求本地检索（向量 + BM25 + 重排），
-     * 重排过取相关度 ≥ 30 的、没重排取前几条，每本书最多 2 条；explore = 每个分类再随机抽几条（from = explore）。
+     * {needs[{category, query, count, why, role?, ignoreStage?}], explore?, stage?{phase, tierMax}} →
+     * {groups[{need, items[{material, score, variant, matchedLabel, from, tier, fit}], hidden, relaxed}], total, reranked, stage}。
+     * <ul>
+     *   <li>墙上钉的素材总在最前（from = wall），不受阶段限制；</li>
+     *   <li>每条需求本地检索（向量 + BM25 + 重排）。有阶段时<b>先过滤再检索</b>：对手 / 场景 / 道具（role）
+     *       挡掉超出量级上限两级以上的素材（hidden = 挡掉几条），超一级的排在正常项后面（relaxed = 用到了超一级的）；
+     *       背景传说（lore）不限量级，但「远景」全次最多 {@link StageFit#FAR_QUOTA} 条。ignoreStage = 作者点了「也看看」；</li>
+     *   <li>重排过取相关度 ≥ 30 的、没重排取前几条，每本书最多 2 条，跨组去重；</li>
+     *   <li>explore = 每个分类再随机抽几条（from = explore），按量级分层抽，只抽上限以内的。</li>
+     * </ul>
      */
     public Map<String, Object> retrieve(Long wallId, Map<String, Object> req) {
         InspirationWall w = wall(wallId);
         List<String> exclude = w.getExcludeBooks() == null ? List.of() : w.getExcludeBooks();
+        List<Material> pinned = new ArrayList<>();
+        for (InspirationItem it : items(wallId)) {
+            if (InspirationItem.MATERIAL.equals(it.getType()) && it.getMaterial() != null) {
+                pinned.add(it.getMaterial());
+            }
+        }
+        return retrieveNeeds(exclude, pinned, req);
+    }
+
+    /**
+     * 检索的核心（灵感墙和自动规划共用，见 {@link NovelPlanService}）：pinned = 总在最前的素材（墙上钉的；自动规划为空），
+     * exclude = 屏蔽的来源书；req 同 {@link #retrieve}。
+     */
+    public Map<String, Object> retrieveNeeds(List<String> exclude, List<Material> pinned, Map<String, Object> req) {
+        StageFit.Stage stage = StageFit.of(req.get("stage"));
         Set<Long> taken = new LinkedHashSet<>();
         List<Map<String, Object>> groups = new ArrayList<>();
         boolean anyReranked = false;
+        int far = 0;
 
         List<Map<String, Object>> wallItems = new ArrayList<>();
-        for (InspirationItem it : items(wallId)) {
-            Material m = it.getMaterial();
-            if (InspirationItem.MATERIAL.equals(it.getType()) && m != null && m.getMergedInto() == null && taken.add(m.getId())) {
-                wallItems.add(candidate(m, null, null, null, "wall"));
+        for (Material m : pinned) {
+            if (m.getMergedInto() == null && taken.add(m.getId())) {
+                wallItems.add(candidate(m, null, null, null, "wall", stage));
             }
         }
         if (!wallItems.isEmpty()) {
-            groups.add(Map.of("need", Map.of("category", "", "query", "", "why", "灵感墙上钉的素材"), "items", wallItems));
+            groups.add(group(Map.of("category", "", "query", "", "why", "灵感墙上钉的素材"), wallItems, 0, false));
         }
 
         List<Map<String, Object>> needs = req.get("needs") instanceof List<?> l ? objectMapper.convertValue(l, List.class) : List.of();
         Set<String> needCats = new LinkedHashSet<>();
-        for (Map<String, Object> need : needs) {
-            String cat = Objects.toString(need.get("category"), "");
-            String query = trim(need.get("query"), 500);
+        for (Map<String, Object> raw : needs) {
+            String cat = Objects.toString(raw.get("category"), "");
+            String query = trim(raw.get("query"), 500);
             if (!MaterialService.CATEGORIES.containsKey(cat) || query.isEmpty()) {
                 continue;
             }
             needCats.add(cat);
-            int count = need.get("count") instanceof Number n ? Math.max(1, Math.min(6, n.intValue())) : 3;
-            Map<String, Object> found = materialService.vectorSearch(query, cat, null, exclude, null, count * 4);
+            Map<String, Object> need = new LinkedHashMap<>(raw);
+            String role = StageFit.role(raw.get("role"), cat);
+            need.put("role", role);
+            boolean free = !stage.limited() || Boolean.TRUE.equals(raw.get("ignoreStage"));
+            boolean lore = "lore".equals(role);
+            int count = raw.get("count") instanceof Number n ? Math.max(1, Math.min(6, n.intValue())) : 3;
+            java.util.function.Predicate<Material> keep = free || lore ? null
+                    : m -> !StageFit.FAR.equals(StageFit.fit(m, stage));
+            Map<String, Object> found = materialService.vectorSearch(query, cat, null, exclude, null, count * 6,
+                    "hybrid", true, keep);
             boolean reranked = Boolean.TRUE.equals(found.get("reranked"));
             anyReranked |= reranked;
-            Map<String, Integer> perBook = new HashMap<>();
-            List<Map<String, Object>> items = new ArrayList<>();
+            int hidden = found.get("filtered") instanceof Number f ? f.intValue() : 0;
+            // 先按相关度收候选，再把超一级 / 没信息的排到后面（稳定排序，同档内保持相关度顺序）
+            List<Map<String, Object>> cands = new ArrayList<>();
+            List<Map<String, Object>> weak = new ArrayList<>();   // 没过相关度阈值的前几条（relaxEmpty 时用）
             if (found.get("results") instanceof List<?> rs) {
                 for (Object o : rs) {
-                    if (!(o instanceof Map<?, ?> r) || !(r.get("material") instanceof Material m) || items.size() >= count) {
+                    if (!(o instanceof Map<?, ?> r) || !(r.get("material") instanceof Material m) || taken.contains(m.getId())) {
                         continue;
                     }
-                    int score = r.get("score") instanceof Integer s ? s : 0;
-                    if (reranked ? score < MaterialService.RERANK_MIN_SCORE : items.size() >= UNRANKED_TAKE) {
+                    int score = r.get("score") instanceof Integer sc ? sc : 0;
+                    if (reranked ? score < MaterialService.RERANK_MIN_SCORE : cands.size() >= UNRANKED_TAKE) {
+                        if (weak.size() < WEAK_TAKE && !(!free && StageFit.FAR.equals(StageFit.fit(m, stage)))) {
+                            Object v = r.get("matchedVariant");
+                            weak.add(candidate(m, score, v == null ? null : String.valueOf(v),
+                                    Objects.toString(r.get("matchedLabel"), null), "weak", free ? null : stage));
+                        }
                         continue;
                     }
-                    String book = Objects.toString(m.getSourceBook(), "");
-                    if (!book.isEmpty() && perBook.merge(book, 1, Integer::sum) > PER_BOOK) {
-                        continue;
-                    }
-                    if (taken.add(m.getId())) {
-                        Object variant = r.get("matchedVariant");
-                        items.add(candidate(m, score, variant == null ? null : String.valueOf(variant),
-                                Objects.toString(r.get("matchedLabel"), null), "search"));
-                    }
+                    Object variant = r.get("matchedVariant");
+                    cands.add(candidate(m, score, variant == null ? null : String.valueOf(variant),
+                            Objects.toString(r.get("matchedLabel"), null), "search", free ? null : stage));
                 }
             }
-            groups.add(Map.of("need", need, "items", items));
+            if (!free) {
+                cands.sort(java.util.Comparator.comparingInt(c -> StageFit.rank(String.valueOf(c.get("fit")))));
+            }
+            Map<String, Integer> perBook = new HashMap<>();
+            List<Map<String, Object>> items = new ArrayList<>();
+            boolean relaxed = false;
+            for (Map<String, Object> c : cands) {
+                if (items.size() >= count) {
+                    break;
+                }
+                Material m = (Material) c.get("material");
+                String book = Objects.toString(m.getSourceBook(), "");
+                if (!book.isEmpty() && perBook.getOrDefault(book, 0) >= PER_BOOK) {
+                    continue;
+                }
+                if (!free && StageFit.FAR.equals(c.get("fit"))) {
+                    if (far >= StageFit.FAR_QUOTA) {
+                        hidden++;
+                        continue;
+                    }
+                    far++;
+                }
+                relaxed |= StageFit.STRETCH.equals(c.get("fit"));
+                perBook.merge(book, 1, Integer::sum);
+                taken.add(m.getId());
+                items.add(c);
+            }
+            // 自动规划：一条都没过阈值时退一步给最相关的几条（from = weak，界面标「相关度低」，作者自己判断）
+            if (items.isEmpty() && Boolean.TRUE.equals(req.get("relaxEmpty"))) {
+                for (Map<String, Object> c : weak) {
+                    taken.add(((Material) c.get("material")).getId());
+                    items.add(c);
+                }
+            }
+            groups.add(group(need, items, hidden, relaxed));
         }
 
         if (Boolean.TRUE.equals(req.get("explore"))) {
@@ -329,13 +396,13 @@ public class InspirationService {
                     : new ArrayList<>(needCats);
             List<Map<String, Object>> items = new ArrayList<>();
             for (String cat : cats) {
-                for (Material m : sample(cat, exclude, EXPLORE_PER_CATEGORY, taken)) {
+                for (Material m : sample(cat, exclude, EXPLORE_PER_CATEGORY, taken, stage)) {
                     taken.add(m.getId());
-                    items.add(candidate(m, null, null, null, "explore"));
+                    items.add(candidate(m, null, null, null, "explore", stage));
                 }
             }
             if (!items.isEmpty()) {
-                groups.add(Map.of("need", Map.of("category", "", "query", "", "why", "随机探索：意想不到的组合"), "items", items));
+                groups.add(group(Map.of("category", "", "query", "", "why", "随机探索：意想不到的组合"), items, 0, false));
             }
         }
         // 总数上限：靠后的组从末尾裁掉
@@ -346,16 +413,32 @@ public class InspirationService {
             List<Map<String, Object>> items = (List<Map<String, Object>>) g.get("items");
             List<Map<String, Object>> keep = items.subList(0, Math.min(items.size(), Math.max(0, MAX_MATERIALS - total)));
             total += keep.size();
-            capped.add(Map.of("need", g.get("need"), "items", new ArrayList<>(keep)));
+            Map<String, Object> cg = new LinkedHashMap<>(g);
+            cg.put("items", new ArrayList<>(keep));
+            capped.add(cg);
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("groups", capped);
         out.put("total", total);
         out.put("reranked", anyReranked);
+        Map<String, Object> st = new LinkedHashMap<>();
+        st.put("phase", stage.phase());
+        st.put("tierMax", stage.tierMax());
+        out.put("stage", st);
         return out;
     }
 
-    private Map<String, Object> candidate(Material m, Integer score, String variant, String matchedLabel, String from) {
+    private static Map<String, Object> group(Map<String, Object> need, List<Map<String, Object>> items, int hidden, boolean relaxed) {
+        Map<String, Object> g = new LinkedHashMap<>();
+        g.put("need", need);
+        g.put("items", items);
+        g.put("hidden", hidden);
+        g.put("relaxed", relaxed);
+        return g;
+    }
+
+    private Map<String, Object> candidate(Material m, Integer score, String variant, String matchedLabel, String from,
+                                          StageFit.Stage stage) {
         Map<String, Object> c = new LinkedHashMap<>();
         c.put("material", m);
         c.put("score", score);
@@ -363,15 +446,19 @@ public class InspirationService {
         c.put("variant", MaterialService.isMergeMaster(m) ? (variant != null ? variant : "auto") : null);
         c.put("matchedLabel", matchedLabel);
         c.put("from", from);
+        c.put("tier", MaterialService.tierOf(m));
+        c.put("fit", StageFit.fit(m, stage));
         return c;
     }
 
     // ------------------------------------------------------------------ 逛素材 / 随机探索
 
     /**
-     * 随机抽素材：未合并、不在屏蔽书里的；先多取一批，优先有详细描述的（事实多），每本书最多 {@link #PER_BOOK} 条。
+     * 随机抽素材：未合并、不在屏蔽书里的；先多取一批，再<b>按量级分层轮流取</b>（1 级一条、2 级一条……没标的算一层），
+     * 每本书最多 {@link #PER_BOOK} 条。以前是「内容充实的优先」——神明 / 大势力在原书里事实最多、卡片最充实，
+     * 一抽全是它们；现在内容充实只在同一层里排前面。有阶段时只抽上限以内的（和没信息的）。
      */
-    List<Material> sample(String category, List<String> exclude, int count, Set<Long> skip) {
+    List<Material> sample(String category, List<String> exclude, int count, Set<Long> skip, StageFit.Stage stage) {
         LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<Material>().isNull(Material::getMergedInto);
         if (category != null && !category.isBlank()) {
             q.eq(Material::getCategory, category);
@@ -380,21 +467,41 @@ public class InspirationService {
             q.and(w -> w.isNull(Material::getSourceBook).or().notIn(Material::getSourceBook, exclude)
                     .or().eq(Material::getPinned, true));
         }
-        q.last("ORDER BY RANDOM() LIMIT " + Math.max(count * 8, 40));
-        List<Material> pool = new ArrayList<>(materialMapper.selectList(q));
-        // SQL 已随机打乱：稳定排序把内容充实的放前面，同一档里保持随机顺序
-        pool.sort(java.util.Comparator.comparingInt(m -> detailLen(m) >= RICH_CHARS ? 0 : 1));
+        q.last("ORDER BY RANDOM() LIMIT " + Math.max(count * 12, 60));
+        Map<Integer, List<Material>> layers = new java.util.TreeMap<>();
+        for (Material m : materialMapper.selectList(q)) {
+            String fit = StageFit.fit(m, stage);
+            if (skip.contains(m.getId()) || StageFit.FAR.equals(fit) || StageFit.STRETCH.equals(fit)) {
+                continue;
+            }
+            Integer tier = MaterialService.tierOf(m);
+            layers.computeIfAbsent(tier == null ? 0 : tier, k -> new ArrayList<>()).add(m);
+        }
+        // SQL 已随机打乱：稳定排序把内容充实的放在本层前面
+        layers.values().forEach(list -> list.sort(java.util.Comparator.comparingInt(m -> detailLen(m) >= RICH_CHARS ? 0 : 1)));
+        List<java.util.Iterator<Material>> its = new ArrayList<>(layers.values().stream().map(List::iterator).toList());
+        // 层的起点也随机，免得每次都从 1 级开始
+        if (!its.isEmpty()) {
+            java.util.Collections.rotate(its, java.util.concurrent.ThreadLocalRandom.current().nextInt(its.size()));
+        }
         Map<String, Integer> perBook = new HashMap<>();
         List<Material> out = new ArrayList<>();
-        for (Material m : pool) {
-            if (out.size() >= count || skip.contains(m.getId())) {
-                continue;
+        boolean progress = true;
+        while (out.size() < count && progress) {
+            progress = false;
+            for (java.util.Iterator<Material> it : its) {
+                while (out.size() < count && it.hasNext()) {
+                    Material m = it.next();
+                    String book = Objects.toString(m.getSourceBook(), "");
+                    if (!book.isEmpty() && perBook.getOrDefault(book, 0) >= PER_BOOK) {
+                        continue;
+                    }
+                    perBook.merge(book, 1, Integer::sum);
+                    out.add(m);
+                    progress = true;
+                    break; // 这一层取一条，轮到下一层
+                }
             }
-            String book = Objects.toString(m.getSourceBook(), "");
-            if (!book.isEmpty() && perBook.merge(book, 1, Integer::sum) > PER_BOOK) {
-                continue;
-            }
-            out.add(m);
         }
         return out;
     }
@@ -409,7 +516,7 @@ public class InspirationService {
         if (category != null && !category.isBlank() && !MaterialService.CATEGORIES.containsKey(category)) {
             throw new BizException(400, "素材分类无效：" + category);
         }
-        return sample(category, exclude, Math.max(1, Math.min(40, count)), Set.of());
+        return sample(category, exclude, Math.max(1, Math.min(40, count)), Set.of(), null);
     }
 
     // ------------------------------------------------------------------ ③ 生成思路 / 细化 / 修改
@@ -425,7 +532,7 @@ public class InspirationService {
             throw new BizException(400, "没有选中任何素材");
         }
         Map<Long, String> variants = NovelGenService.parseVariants(req.get("materialVariants"));
-        List<Map<String, Object>> items = genService.materialItems(ids, variants);
+        List<Map<String, Object>> items = withStage(genService.materialItems(ids, variants), req.get("stage"));
         Map<String, Object> body = baseBody(w, req);
         body.put("materials", items);
         body.put("count", req.get("count") instanceof Number n ? Math.max(1, Math.min(5, n.intValue())) : 3);
@@ -492,7 +599,8 @@ public class InspirationService {
         List<Long> ids = longs(req.get("materialIds")).stream().distinct().limit(MAX_MATERIALS).toList();
         Map<String, Object> body = baseBody(w, req);
         body.put("idea", idea);
-        body.put("materials", genService.materialItems(ids, NovelGenService.parseVariants(req.get("materialVariants"))));
+        body.put("materials", withStage(genService.materialItems(ids, NovelGenService.parseVariants(req.get("materialVariants"))),
+                req.get("stage")));
         body.put("instruction", trim(req.get("instruction"), 1000));
         if (req.get("history") instanceof List<?> h) {
             body.put("history", h.stream().map(String::valueOf).limit(20).toList());
@@ -523,9 +631,45 @@ public class InspirationService {
 
     // ------------------------------------------------------------------ 内部
 
-    /** 交给 Python 的公共部分：需求、生成什么、条件、关联工作区、墙上已收藏的思路 */
+    /** 素材条目带上量级和阶段适配（far = 远景，提示词里写明只能当背景 / 传说） */
+    List<Map<String, Object>> withStage(List<Map<String, Object>> items, Object stageReq) {
+        StageFit.Stage stage = StageFit.of(stageReq);
+        Map<Long, Material> byId = new HashMap<>();
+        materialService.listByIds(items.stream().map(i -> toLong(i.get("id"))).filter(Objects::nonNull).toList())
+                .forEach(m -> byId.put(m.getId(), m));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> it : items) {
+            Map<String, Object> copy = new LinkedHashMap<>(it);
+            Material m = byId.get(toLong(it.get("id")));
+            if (m != null) {
+                copy.put("tier", MaterialService.tierOf(m));
+                copy.put("fit", StageFit.fit(m, stage));
+            }
+            out.add(copy);
+        }
+        return out;
+    }
+
+    /** 作者确认 / 修改过的故事阶段：{phase, tierMax, protagonist}（只收这几个字段） */
+    static Map<String, Object> stageBody(Object v) {
+        if (!(v instanceof Map<?, ?> m)) {
+            return null;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("phase", Objects.toString(m.get("phase"), "any"));
+        out.put("tierMax", MaterialService.tierValue(m.get("tierMax")));
+        out.put("protagonist", trim(m.get("protagonist"), 200));
+        out.put("source", Objects.toString(m.get("source"), "user"));
+        return out;
+    }
+
+    /** 交给 Python 的公共部分：需求、生成什么、条件、故事阶段、关联工作区、墙上已收藏的思路 */
     private Map<String, Object> baseBody(InspirationWall w, Map<String, Object> req) {
         Map<String, Object> body = new LinkedHashMap<>();
+        Map<String, Object> stage = stageBody(req.get("stage"));
+        if (stage != null) {
+            body.put("stage", stage);
+        }
         body.put("request", trim(req.get("request"), 2000));
         body.put("target", target(req));
         body.put("conditions", trim(req.get("conditions"), 2000));
@@ -579,11 +723,16 @@ public class InspirationService {
     }
 
     /** 调 Python 的灵感墙接口：模型按 {source: api, configId?} / {source: gguf} / {source: local, baseId} 解析 */
-    @SuppressWarnings("unchecked")
     private Map<String, Object> python(String action, Map<String, Object> body, Object model) {
+        return callGen("/api/gen/inspire/" + action, body, model);
+    }
+
+    /** 调 Python 生成接口（灵感墙 / 自动规划共用）：解析模型、转换错误（不记录响应体） */
+    @SuppressWarnings("unchecked")
+    Map<String, Object> callGen(String path, Map<String, Object> body, Object model) {
         Map<String, Object> modelOpts = model instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
         NovelExtractService.ModelChoice choice = extractService.resolveModel(modelOpts);
-        JsonNode res = call(() -> aiClient.genInspire(action, body, choice.config(), choice.local()));
+        JsonNode res = call(() -> aiClient.genModelCall(path, body, choice.config(), choice.local()));
         return objectMapper.convertValue(res.path("data"), LinkedHashMap.class);
     }
 
