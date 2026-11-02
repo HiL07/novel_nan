@@ -1,7 +1,8 @@
 <template>
-  <ul class="spec-tree" :class="{ 'is-root': root }">
+  <ul class="spec-tree" :class="{ 'is-root': root, 'is-compact': compact }">
     <li v-for="it in items" :key="it.key">
-      <span class="spec-label">{{ it.label }}</span>
+      <!-- compact：卡片标题已经是字段名，第一层只显示内容 -->
+      <span v-if="!(compact && root)" class="spec-label">{{ it.label }}</span>
       <span v-if="it.display" class="spec-value">{{ it.display }}</span>
       <SpecTree v-if="it.children.length" :items="it.children" />
     </li>
@@ -12,7 +13,8 @@
 /** 递归展示 buildSpec 产出的设定摘要 */
 defineProps({
   items: { type: Array, required: true },
-  root: { type: Boolean, default: false }
+  root: { type: Boolean, default: false },
+  compact: { type: Boolean, default: false }
 })
 </script>
 
@@ -41,5 +43,10 @@ li {
 .spec-value {
   color: #303133;
   word-break: break-all;
+  white-space: pre-wrap;
+}
+.is-compact.is-root > li > .spec-value {
+  font-size: 14px;
+  line-height: 1.75;
 }
 </style>

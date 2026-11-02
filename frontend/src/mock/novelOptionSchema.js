@@ -114,7 +114,7 @@ const world = {
       max: 3,
       options: [opt('monarchy', '君主制'), opt('sect_rule', '宗门统治'), opt('family', '世家门阀'), opt('corporate', '财团寡头'), opt('federation', '联邦'), opt('tribal', '部落'), opt('anarchy', '无政府')]
     },
-    { key: 'rules', label: '特殊世界规则', type: 'tags', desc: '这个世界独有的设定', placeholder: '如：灵气复苏、夜晚禁止外出，回车添加' },
+    { key: 'rules', label: '特殊世界规则', type: 'tags', desc: '不能违反的硬性规则，一句话一条；每一章写作都会带上，AI 不会写出和它冲突的内容。如：法师塔必须建在地脉节点上', placeholder: '如：灵气复苏、夜晚禁止外出，回车添加' },
     { key: 'powerSystem', label: '力量体系', type: 'textarea', desc: '怎么获得力量、怎么变强；境界从低到高和突破的代价',
       placeholder: '如：魔力来自与元素签订的契约。学徒 → 正式法师 → 大法师 → 传奇（每次晋升要独自完成一次元素试炼）' },
     {
@@ -128,7 +128,7 @@ const world = {
         { key: 'detail', label: '内容', type: 'textarea', placeholder: '具体到能写进正文：它是什么、为什么特别、和主角有什么关系' }
       ]
     },
-    { key: 'mechanics', label: '世界机制', type: 'textarea', placeholder: '这个世界怎么运转：交易、律法、禁忌、魔力潮汐…' },
+    { key: 'mechanics', label: '世界机制', type: 'textarea', desc: '这个世界怎么运转：制度、交易、周期性现象的具体做法和数字；每一章写作也都会带上。如：塔税按副本收益的 30% 征收。和世界规则写的是同一件事时只留一处', placeholder: '这个世界怎么运转：交易、律法、禁忌、魔力潮汐…' },
     { key: 'resources', label: '关键资源', type: 'textarea', placeholder: '大家争的东西：谁控制、为什么值得争' },
     { key: 'worldNote', label: '世界观补充', type: 'textarea', placeholder: '任何想补充的世界设定' }
   ],

@@ -12,8 +12,14 @@ const java = (novelId, step, body) =>
 
 /** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, model} → {ideas[{title, core, situation, conflict, payoff, hook}], usage} */
 export const planIdea = (novelId, body) => java(novelId, 'idea', body)
-/** 故事优先 ② {premise?, idea?, bookConfig?, book?（= 往后追加卷）, model} → {book{titleOptions, logline, storyHook, sellingPoints, worldPoints, volumes[{title, summary, chapters, stages[]}]}, issues, extended, usage} */
+/** 参数这一步的小帮手 {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model} → {kind, value}（direction / style ≤7 字） */
+export const planAssist = (novelId, body) => java(novelId, 'assist', body)
+/** 设定的单个模块重新生成 {settings, module: rules|note|cards|power|abilities|mechanics|resources|characters|elements, category?, direction?, keep?, idea?, bookConfig?, book?, model} → {module, category, value, keep, usage} */
+export const planSettingsPart = (novelId, body) => java(novelId, 'settings-part', body)
+/** 故事优先 ③（在设定之后） {premise?, idea?, bookConfig?, settings?, volumePlan?[], volumeCount?, pace?: slow|normal|fast, book?（= 往后追加卷）, regen?{index, instruction}（= 只重来这一卷）, model} → {book{titleOptions, logline, storyHook, sellingPoints, worldPoints, volumes[{title, summary, chapters, stages[]}]}, issues, extended, usage} */
 export const planBook = (novelId, body) => java(novelId, 'book', body)
+/** 故事优先 · 骨架这一步：按骨架配配角和势力 / 地点 / 物品 / 怪物 → {characters, elements, stages, issues} */
+export const planCast = (novelId, body) => java(novelId, 'cast', body)
 /** 故事优先 ④ {settings, idea?, bookConfig?, excludeBooks?, stage?, model} → {suggestions[{target, kind, index, name, suggestion, fields, sources, leaks}], materials[], searched, usage} */
 export const planEnrich = (novelId, body) => java(novelId, 'enrich', body)
 
@@ -74,3 +80,18 @@ export function bookLayout(book) {
   })
   return rows
 }
+
+/** 骨架 → 设定编辑器的阶段表行（与 Python planner.book_stages 同一规则） */
+export function bookStages(book) {
+  return bookLayout(book).map((r) => {
+    let note = `${r.volumeTitle}·${r.title || '阶段'}：${r.goal || ''}`
+    if (r.mustHappen?.length) note += `；必须发生：${r.mustHappen.join('、')}`
+    return { range: `${r.start}-${r.end}`, power: r.power || (r.endState || '').slice(0, 60), tierMax: r.tierMax, note: note.slice(0, 300) }
+  })
+}
+
+export const PACES = [
+  { value: 'slow', label: '慢热', desc: '每卷只推进一小步，前几卷舞台基本不换' },
+  { value: 'normal', label: '适中', desc: '每卷一个新目标，舞台逐步扩大' },
+  { value: 'fast', label: '偏快', desc: '每卷明显升级 / 换地图' }
+]

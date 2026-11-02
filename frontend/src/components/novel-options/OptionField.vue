@@ -6,33 +6,17 @@
       <el-tag v-if="field.custom" size="small" type="warning" effect="plain">自定义</el-tag>
       <span v-if="field.desc" class="field-desc">{{ field.desc }}</span>
       <template v-if="ai?.enabled.value && aiFillable(field) && !choice">
-        <!-- 文本类：润色（在框内内容上扩写）/ 生成（框内文字当方向）；标签只有生成；
+        <!-- 文本 / 标签：一个「AI 重新生成」，四种方式 = 给不给方向 × 参考不参考已有内容（参考已有 = 在框内内容上扩写 / 补充）；
              单选 / 多选的 AI 在「自定义」里（只从已有选项里挑一个没有实际用处） -->
-        <span v-if="isTextField(field)" class="ai-btn" :title="polishTip">
-          <el-button
-            link
-            type="primary"
-            size="small"
-            :icon="EditPen"
-            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|polish`)"
-            :disabled="locked || !hasText"
-            @click="ai.fillField(field, container, siblings || [], path, 'polish')"
-          >
-            AI 润色
-          </el-button>
-        </span>
-        <span class="ai-btn" :title="generateTip">
-          <el-button
-            link
-            type="primary"
-            size="small"
-            :icon="MagicStick"
-            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|generate`)"
+        <span class="ai-btn" :title="serialTip">
+          <AiRegenButton
+            :label="field.label"
+            :has-existing="hasContent"
+            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|ai`)"
             :disabled="locked"
-            @click="ai.fillField(field, container, siblings || [], path, 'generate')"
-          >
-            AI 生成
-          </el-button>
+            :text="hasContent ? 'AI 重新生成' : 'AI 生成'"
+            @run="(o) => ai.fillField(field, container, siblings || [], path, o)"
+          />
         </span>
       </template>
       <el-button
@@ -130,7 +114,8 @@
 
 <script setup>
 import { computed } from 'vue'
-import { CopyDocument, Delete, EditPen, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
+import { CopyDocument, Delete, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
+import AiRegenButton from '@/components/ai/AiRegenButton.vue'
 import ChoiceWidget from './ChoiceWidget.vue'
 import InputWidget from './InputWidget.vue'
 import CharacterCards from './CharacterCards.vue'
@@ -138,7 +123,7 @@ import AppearEditor from './AppearEditor.vue'
 import { FIELD_TYPES, isChoice } from '@/novel-options/fieldTypes'
 import { clone, ensureValue, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
-import { NEW_ITEMS, aiFillable, isTextField } from '@/novel-options/aiFill'
+import { NEW_ITEMS, aiFillable } from '@/novel-options/aiFill'
 
 /**
  * 递归渲染一个选项项。
@@ -163,14 +148,11 @@ const typeLabel = computed(() => FIELD_TYPES[props.field.type]?.label || props.f
 
 /* ---- AI 按钮：大模型时可同时生成别处，只锁会写到同一处的；本地模型一次一个 ---- */
 const locked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label]))
-const hasText = computed(() => String(props.container[props.field.key] ?? '').trim() !== '')
-const serialTip = computed(() => (['local', 'gguf'].includes(ai?.cfg?.source) && locked.value ? '（本地模型 / GGUF 一次只能处理一个 AI 请求）' : ''))
-const polishTip = computed(() => (hasText.value
-  ? 'AI 润色：保留框内已写的内容，在此基础上扩写、补充细节（参考其他设定保持一致），结果替换框内内容，可撤销'
-  : 'AI 润色：先在框内写几句，AI 在此基础上扩写；框内为空时不可用') + serialTip.value)
-const generateTip = computed(() => (isTextField(props.field)
-  ? 'AI 生成：把框内文字当作大致方向（可留空），结合其他设定写出新内容并替换，可撤销'
-  : 'AI 生成：结合其他设定生成标签') + serialTip.value)
+const hasContent = computed(() => {
+  const v = props.container[props.field.key]
+  return Array.isArray(v) ? v.length > 0 : String(v ?? '').trim() !== ''
+})
+const serialTip = computed(() => (['local', 'gguf'].includes(ai?.cfg?.source) && locked.value ? '本地模型 / GGUF 一次只能处理一个 AI 请求' : ''))
 
 /** 选中的、且有细分选项（或处于编辑模式可添加细分）的选项 */
 const expandedOptions = computed(() =>
@@ -240,6 +222,14 @@ function duplicateItem(i) {
 }
 .ai-btn {
   margin-left: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+/* AI 按钮平时藏起来，鼠标移到字段上或在里面输入时才出现（正在运行的保持显示） */
+.option-field:hover > .field-head .ai-btn,
+.option-field:focus-within > .field-head .ai-btn,
+.ai-btn:has(.is-loading) {
+  opacity: 1;
 }
 .sub-block {
   margin-top: 12px;

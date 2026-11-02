@@ -54,12 +54,78 @@ public class NovelPlanService {
         if (req.get("count") instanceof Number n) {
             body.put("count", Math.max(1, Math.min(5, n.intValue())));
         }
+        // 「重新生成」：作者对之前几批灵感的反馈 {dislike, want, rejected[]}，全部带上（最多 10 条）
+        List<Map<String, Object>> feedback = new ArrayList<>();
+        if (req.get("feedback") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> f && feedback.size() < 10) {
+                    Map<String, Object> x = new LinkedHashMap<>();
+                    x.put("dislike", trim(f.get("dislike"), 300));
+                    x.put("want", trim(f.get("want"), 300));
+                    x.put("rejected", strings(f.get("rejected")).stream().limit(10).map(s -> trim(s, 80)).toList());
+                    feedback.add(x);
+                }
+            }
+        }
+        body.put("feedback", feedback);
         return python("idea", novelId, body, req.get("model"));
     }
 
-    /** 故事优先 ② {premise?, idea?, bookConfig?, tone?, conditions?, book?（有 = 往后追加卷）, model} → {book, issues, extended, …} */
+    /** 参数这一步的小帮手 {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model} → {kind, value} */
+    public Map<String, Object> assist(String novelId, Map<String, Object> req) {
+        Map<String, Object> body = story(req, false);
+        body.put("kind", trim(req.get("kind"), 20));
+        body.put("text", trim(req.get("text"), 1000));
+        return python("assist", novelId, body, req.get("model"));
+    }
+
+    /**
+     * 故事优先 ③ 全书骨架 {premise?, idea?, bookConfig?, settings?, volumePlan?[], volumeCount?, pace?, tone?, conditions?,
+     * book?（有 = 往后追加卷）, regen?{index, instruction?}（= 只重新生成这一卷）, model} → {book, issues, stages, extended, regenerated, …}
+     */
     public Map<String, Object> book(String novelId, Map<String, Object> req) {
-        return python("book", novelId, story(req, true), req.get("model"));
+        Map<String, Object> body = story(req, true);
+        if (req.get("settings") instanceof Map<?, ?> m && !m.isEmpty()) {
+            body.put("settings", m);
+        }
+        body.put("volumePlan", strings(req.get("volumePlan")).stream().limit(8).map(s -> trim(s, 200)).toList());
+        if (req.get("volumeCount") instanceof Number n) {
+            body.put("volumeCount", Math.max(0, Math.min(8, n.intValue())));
+        }
+        if (List.of("slow", "normal", "fast").contains(String.valueOf(req.get("pace")))) {
+            body.put("pace", req.get("pace"));
+        }
+        if (req.get("regen") instanceof Map<?, ?> r && r.get("index") instanceof Number i) {
+            body.put("regen", Map.of("index", i.intValue(), "instruction", trim(r.get("instruction"), 500)));
+        }
+        return python("book", novelId, body, req.get("model"));
+    }
+
+    /**
+     * 故事优先 · 骨架这一步的人物与元素 {settings（世界 + 主角）, book（全书骨架）, premise?, idea?, bookConfig?, model}
+     * → {characters（配角）, elements, stages, issues, usage, model}：登场章节和对手量级按骨架各阶段安排
+     */
+    public Map<String, Object> cast(String novelId, Map<String, Object> req) {
+        Map<String, Object> body = story(req, false);
+        body.put("settings", requireMap(req.get("settings"), "缺少设定"));
+        if (!(body.get("book") instanceof Map)) {
+            throw new BizException(400, "先生成全书骨架");
+        }
+        return python("cast", novelId, body, req.get("model"));
+    }
+
+    /**
+     * 设定的单个模块重新生成 {settings, module, category?, direction?, keep?, premise?, idea?, bookConfig?, book?, model}
+     * → {module, category, value, keep, usage, model}（四种方式：给不给方向 × 参考不参考已有）
+     */
+    public Map<String, Object> settingsPart(String novelId, Map<String, Object> req) {
+        Map<String, Object> body = story(req, false);
+        body.put("settings", requireMap(req.get("settings"), "缺少设定草案"));
+        body.put("module", trim(req.get("module"), 20));
+        body.put("category", trim(req.get("category"), 20));
+        body.put("direction", trim(req.get("direction"), 500));
+        body.put("keep", Boolean.TRUE.equals(req.get("keep")));
+        return python("settings-part", novelId, body, req.get("model"));
     }
 
     /**

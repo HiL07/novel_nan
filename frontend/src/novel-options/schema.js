@@ -36,6 +36,22 @@ const ADDED_FIELDS = {
   4: { world: ['powerSystem', 'mechanics', 'resources'] }   // 自动规划「故事优先」的力量体系 / 世界机制 / 关键资源
 }
 
+/**
+ * 内置字段的说明文字（desc）以默认结构为准：已保存的工作区带着旧的字段定义，说明改了也要能看到。
+ * 只同步 desc（纯展示），不动字段本身；用户自建的字段（custom）不碰。
+ */
+export function syncBuiltinDescs(saved, defaults) {
+  for (const defCat of defaults.categories || []) {
+    const cat = (saved.categories || []).find((c) => c.key === defCat.key && !c.custom)
+    if (!cat) continue
+    for (const f of cat.fields || []) {
+      const d = (defCat.fields || []).find((x) => x.key === f.key)
+      if (d && !f.custom && d.desc) f.desc = d.desc
+    }
+  }
+  return saved
+}
+
 export function upgradeConfig(saved, defaults) {
   const from = saved.schemaVersion || 1
   const to = defaults.schemaVersion || 1

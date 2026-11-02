@@ -433,6 +433,21 @@ class PlanReq(BaseModel):
     idea: Optional[dict] = None
     book: Optional[dict] = None
     links: Optional[dict] = None
+    # 骨架：作者的分卷方向（每卷一句话）、卷数、节奏 slow|normal|fast；regen = {index, instruction?} 只重新生成某一卷
+    volumePlan: list[str] = Field(default_factory=list, max_length=8)
+    volumeCount: int = Field(default=0, ge=0, le=8)
+    pace: str = Field(default="", max_length=10)
+    regen: Optional[dict] = None
+    # 设定的单个模块重新生成：module（rules / power / cards / characters / elements …）、category（elements 的一类）、
+    # direction（作者给的方向）、keep（参考已有内容）
+    module: str = Field(default="", max_length=20)
+    category: str = Field(default="", max_length=20)
+    direction: str = Field(default="", max_length=500)
+    keep: bool = False
+    # 灵感的「重新生成」：作者对之前几批的反馈 [{dislike, want, rejected[]}]；参数这一步的小帮手：kind + text
+    feedback: list[dict] = Field(default_factory=list, max_length=10)
+    kind: str = Field(default="", max_length=20)
+    text: str = Field(default="", max_length=1000)
     api: Optional[llm_client.ModelConfig] = None
     local: Optional[PolishReq] = None
     gguf: bool = False
@@ -467,10 +482,28 @@ def plan_book(req: PlanReq):
     return _plan(planner.book, req)
 
 
+@router.post("/plan/cast")
+def plan_cast(req: PlanReq):
+    """故事优先 ③ 骨架这一步：按骨架的阶段配配角和势力 / 地点 / 物品 / 怪物（登场章节、对手量级跟阶段走），经 Java"""
+    return _plan(planner.cast, req)
+
+
 @router.post("/plan/enrich")
 def plan_enrich(req: PlanReq):
     """故事优先 ④（可选）：设定草案 + Java 检索到的素材 → 逐条「点睛」建议（只补细节，不改名），经 Java"""
     return _plan(planner.enrich, req)
+
+
+@router.post("/plan/assist")
+def plan_assist(req: PlanReq):
+    """参数这一步的小帮手：描述 → 7 字以内的创作方向 / 文风；随手写的话 → 补充要求；润色「你的想法」，经 Java"""
+    return _plan(planner.assist, req)
+
+
+@router.post("/plan/settings-part")
+def plan_settings_part(req: PlanReq):
+    """设定的单个模块重新生成（给不给方向 × 参考不参考已有 = 四种方式），只返回这一块，经 Java"""
+    return _plan(planner.settings_part, req)
 
 
 @router.post("/plan/settings")
@@ -492,8 +525,9 @@ def plan_review(req: PlanReq):
 
 
 class PlanApplyReq(BaseModel):
-    outline: dict
+    outline: dict = Field(default_factory=dict)   # 故事优先到骨架为止时为空
     setTitle: bool = False
+    title: str = Field(default="", max_length=40)
     book: Optional[dict] = None          # 全书骨架 → novel.book
     bookConfig: Optional[dict] = None    # 写作参数 → novel.bookConfig
 

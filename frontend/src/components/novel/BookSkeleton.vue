@@ -26,6 +26,22 @@
         <span class="muted">共</span>
         <el-input-number v-model="v.chapters" size="small" :min="0" :max="2000" controls-position="right" style="width: 96px" />
         <span class="muted">章（{{ rangeOf(vi) }}）</span>
+        <el-popover :visible="regenOpen === vi" placement="bottom-start" :width="regenBasis ? 380 : 320">
+          <template #reference>
+            <el-button link type="primary" size="small" :icon="MagicStick" :loading="regenBusy === vi" :disabled="disabled"
+                       @click="openRegen(vi)">只重来这一卷</el-button>
+          </template>
+          <div class="regen">
+            <div class="muted">只重新生成第 {{ vi + 1 }} 卷，其余卷原样不动；会接上前后卷的起止状态</div>
+            <AiBasis v-if="regenBasis" :md="regenBasis" title="这次会参考" />
+            <el-input v-model="regenText" type="textarea" :autosize="{ minRows: 2 }" maxlength="500"
+                      placeholder="可选：怎么改，如「还在法师塔，写主角当上塔主前的内斗」" />
+            <div class="regen-ops">
+              <el-button size="small" @click="regenOpen = -1">取消</el-button>
+              <el-button size="small" type="primary" @click="doRegen(vi)">重新生成</el-button>
+            </div>
+          </div>
+        </el-popover>
         <el-button link type="danger" size="small" @click="book.volumes.splice(vi, 1)">删除本卷</el-button>
       </div>
       <el-input v-model="v.summary" type="textarea" :autosize="{ minRows: 1 }" size="small" placeholder="本卷主线" />
@@ -60,10 +76,29 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { MagicStick } from '@element-plus/icons-vue'
 import { bookLayout } from '@/api/novelPlan'
+import AiBasis from '@/components/ai/AiBasis.vue'
 
-const props = defineProps({ book: { type: Object, required: true } })
+const props = defineProps({
+  book: { type: Object, required: true },
+  regenBusy: { type: Number, default: -1 },   // 正在重来的卷（0 起），-1 = 没有
+  disabled: { type: Boolean, default: false },
+  regenBasis: { type: String, default: '' }   // 「只重来这一卷」会参考什么（Markdown，AiBasis 渲染）
+})
+const emit = defineEmits(['regen'])   // (卷序号, 要求)
+
+const regenOpen = ref(-1)
+const regenText = ref('')
+function openRegen(vi) {
+  regenText.value = ''
+  regenOpen.value = vi
+}
+function doRegen(vi) {
+  regenOpen.value = -1
+  emit('regen', vi, regenText.value.trim())
+}
 
 const rows = computed(() => bookLayout(props.book))
 const rowOf = (vi, si) => rows.value.find((r) => r.volume === vi && r.stage === si)
@@ -84,4 +119,6 @@ const blankStage = () => ({ title: '', chapters: 0, goal: '', startState: '', en
 .stage { margin: 8px 0 4px 12px; padding-left: 10px; border-left: 3px solid var(--el-color-primary-light-7); }
 .stage > .el-input { margin-bottom: 4px; }
 .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 8px; }
+.regen { display: flex; flex-direction: column; gap: 8px; }
+.regen-ops { display: flex; justify-content: flex-end; gap: 6px; }
 </style>

@@ -424,9 +424,11 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
         lines.append(f"作者的要求：{hint}")
     if mode == "option":
         return _custom_option(fields[0], fill, context, mat, lines, req, local)
-    # 单个文本字段：polish = 在框内已写内容上扩写；generate = 框内文字只是大致方向（可为空）
+    # 单个文本字段：polish = 在框内已写内容上扩写；generate = 框内文字只是大致方向（可为空）。
+    # 新的四种方式：direction = 作者另给的方向（可空），keep = 参考已有内容（文本 = polish；标签 = 保留已有再补充）
     single_text = mode == "field" and len(fields) == 1 and fields[0]["type"] in ("text", "textarea")
     seed = str(fill.get("seed") or "").strip()[:2000] if single_text else ""
+    direction = str(fill.get("direction") or "").strip()[:500]
     polish = single_text and fill.get("action") == "polish"
     if polish and not seed:
         raise IdeaError("框里还没有内容，无法润色；可以用「AI 生成」")
@@ -434,8 +436,20 @@ def _fill(novel: dict, req: dict, local: dict | None) -> dict:
     if polish:
         lines.append(f"作者已写的内容：「{seed}」\n在保留全部已写内容和原意的基础上润色扩写：补充具体细节、理顺语句，不改变设定、"
                      + ("篇幅约为原文的 2~3 倍（不超过 400 字）。" if long_text else "仍是简短的名称或短语（20 字内）。"))
+        if direction:
+            lines.append(f"作者这次的修改方向（必须照着来，和已写内容冲突的地方按方向改）：「{direction}」")
     elif seed:
         lines.append(f"作者给的大致方向：「{seed}」——按这个方向来写，可以大幅展开。")
+    elif direction:
+        lines.append(f"作者给的大致方向：「{direction}」——按这个方向来写，可以大幅展开。")
+    keep_value = fill.get("keepValue")   # 非文本字段（标签）参考已有：已有的保留，再补充
+    if not single_text and fill.get("keep") and keep_value:
+        shown = "、".join(map(str, keep_value)) if isinstance(keep_value, list) else str(keep_value)
+        # 只要新补充的：代码把它们接在已有的后面（让模型输出「完整内容」时它会改写已有的，合并后变成重复）
+        lines.append(f"这个字段已有的内容：{shown[:1000]}——这些原样保留，你只输出新补充的条目（2~4 条），"
+                     "不要重复、也不要改写已有的。" + (f"方向：{direction}" if direction else ""))
+    elif not single_text and direction:
+        lines.append(f"作者给的方向：「{direction}」")
     field_lines = "\n".join(_field_line(f) for f in fields)
     if polish and long_text:  # 润色扩写的篇幅以上面的要求为准，不受字段说明的 80~200 字限制
         field_lines = field_lines.replace("（80~200 字）", "（约为原文的 2~3 倍，不超过 400 字）")

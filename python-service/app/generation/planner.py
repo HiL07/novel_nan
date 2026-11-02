@@ -13,6 +13,7 @@
 设定的 JSON 结构本身就是「要填满的清单」：故事优先的设定要求世界背景卡、力量体系（境界）、能力、机制、资源，
 没有素材时模型靠题材常识把这些槽位填满（借鉴 easy-writing 的工作流建书），代码再查数量够不够。
 """
+import json
 import re
 
 from . import facts as facts_mod, ideas, inspire, spec as spec_mod, store, worldbook
@@ -31,11 +32,14 @@ OPENING_CHAPTERS = 3
 MAX_NEW_NAMES = 3      # 开篇每章新出场的有名有姓人物
 MAX_NEW_TERMS = 5      # 开篇每章新出现的专有名词
 MIN_PAYOFF_GAP = 2     # 伏笔至少隔几章再回收
+FIRST_CHAPTER_TERMS = 3   # 第 1 章新专有名词上限（评测裁判反复说故事优先「第 1 章信息密度偏高」）
 
 OPENING_RULES = """【开篇规则】（这是全书开头，大纲必须满足）
 - 第 1 章：开场就有冲突或悬念（不要从日常 / 世界介绍写起）；主角在第 1 章就亮出他想要什么、他的缺陷；章末发生激励事件，把主角推出原来的生活
 - 前 3 章内确立核心卖点（金手指 / 核心矛盾 / 这本书最吸引人的设定），让读者知道这本书「好看在哪」
 - 世界观随情节露出：哪一章用到哪条规则才露出哪条，不安排「介绍世界」的章节、不在节拍里写大段设定说明
+- 第 1 章只露出眼下这场冲突用得到的设定：新专有名词不超过 3 个，最多点到 1 个境界 / 等级名、1 处世界背景；
+  力量体系、势力格局、世界历史留到后面用到时再露（设定准备得多不等于第 1 章要讲多）
 - 人物逐个登场：每章新出场的有名有姓人物不超过 3 个，新的专有名词（地名、组织、功法、物品）不超过 5 个
 - 对手量级不超过阶段上限：开篇的敌人是主角打得过、或者需要智取的
 - 每章结尾都要有钩子（悬念、危机、反转、新目标），让读者想看下一章"""
@@ -48,7 +52,7 @@ TIER_HINT = "1 个人 / 街头，2 地方，3 一国 / 大宗门，4 大陆，5 
 IDEA_FIELDS = (("core", "核心设定"), ("situation", "主角处境"), ("conflict", "核心冲突"), ("payoff", "爽点方向"),
                ("hook", "一句话卖点"))
 DEFAULT_BOOK_CHAPTERS = 300   # 写作参数里没有目标字数时，全书骨架按这么多章搭
-MIN_COUNTS = {"cards": 4, "realms": 4, "characters": 4, "elements": 4}   # 故事优先设定的槽位下限（代码检查）
+MIN_COUNTS = {"realms": 4}   # 故事优先设定的槽位下限（代码检查；配角 / 元素的在 CAST_MIN）
 
 
 def _call(req: dict, messages: list[dict], max_tokens: int, temperature: float) -> tuple[dict, dict, str]:
@@ -143,6 +147,27 @@ def _clean_idea(d) -> dict | None:
     return out if out["core"] and (out["situation"] or out["conflict"]) else None
 
 
+def feedback_text(feedback) -> str:
+    """作者对之前几批灵感的反馈 → 提示词。每次「重新生成」记一条 {dislike, want, rejected[被否掉的灵感]}，全部带上（越后越新）"""
+    rows = [f for f in feedback if isinstance(f, dict)] if isinstance(feedback, list) else []
+    lines = []
+    for n, f in enumerate(rows[-10:], 1):
+        bits = []
+        if _clip(f.get("dislike"), 300):
+            bits.append(f"不满意：{_clip(f.get('dislike'), 300)}")
+        if _clip(f.get("want"), 300):
+            bits.append(f"希望：{_clip(f.get('want'), 300)}")
+        rejected = _strs(f.get("rejected"), 80, 10)
+        if rejected:
+            bits.append("被否掉的灵感：" + "；".join(rejected))
+        if bits:
+            lines.append(f"第 {n} 次：" + "｜".join(bits))
+    if not lines:
+        return ""
+    return ("【作者对之前几批灵感的反馈】（按时间先后，越后越新；「希望」是必须满足的要求；"
+            "新灵感不要和被否掉的重复，也不要换个名字再来一遍）\n" + "\n".join(lines))
+
+
 def idea(req: dict) -> dict:
     """{premise?, directions?[], bookConfig?, tone?, conditions?, count?} → {ideas[{title, core, situation, conflict, payoff, hook}]}
     一句话（可以为空）扩成几个完整的故事灵感，彼此明显不同，作者挑一个再改。"""
@@ -159,6 +184,9 @@ def idea(req: dict) -> dict:
         parts.append(f"基调：{_clip(req.get('tone'), 200)}")
     if _clip(req.get("conditions"), 500):
         parts.append(f"补充要求（必须满足）：{_clip(req.get('conditions'), 500)}")
+    fb = feedback_text(req.get("feedback"))
+    if fb:
+        parts.append(fb)
     parts.append(
         f"【任务】把作者的想法扩写成 {count} 个完整的故事灵感，彼此在核心设定 / 冲突 / 卖点上明显不同（不要只换名字）。每个：\n"
         "- title 暂定书名（12 字内）\n"
@@ -175,6 +203,71 @@ def idea(req: dict) -> dict:
     if not found:
         raise InspireError("模型没有给出可用的灵感，请重试")
     return {"ideas": found, "usage": usage, "model": model}
+
+
+# ---------------------------------------------------------------- 参数这一步的小帮手（创作方向 / 文风 / 补充要求 / 你的想法）
+
+ASSIST_KINDS = {
+    # 种类 → (要求, 输出最大 token)
+    "direction": ("根据作者的描述，提炼一个创作方向标签：7 个字以内，像「重生逆袭」「规则怪谈」「师徒羁绊」这样的短词，"
+                  "只输出标签本身", 40),
+    "style": ("根据作者的描述，概括一个文风：7 个字以内，如「轻松幽默」「冷峻克制」「细腻温情」，只输出文风本身", 40),
+    "conditions": ("把作者随手写的话整理成明确的补充要求：一条一行，每条一句话、能直接拿来约束创作（如「不要后宫」「主角是女性」），"
+                   "只保留作者真的提出的要求，不要自己加；最多 8 条，只输出要求本身，不要编号、不要解释", 400),
+    "premise": ("润色作者的故事想法：保留原意和作者写到的所有要素，把它写得更清楚、更具体（可以补一两处细节让想法更完整），"
+                "100 字以内，只输出润色后的想法本身", 300),
+}
+
+
+def _short_label(text: str, limit: int = 7) -> str:
+    """模型给的短标签：去掉引号 / 标点 / 前缀，截到 limit 个字"""
+    t = re.sub(r"^(创作方向|文风|标签)[：:]\s*", "", str(text or "").strip().splitlines()[0] if str(text or "").strip() else "")
+    t = re.sub(r"[「」『』\"'“”‘’《》\s]", "", t)
+    t = re.split(r"[，,、；;。！？!?.]", t)[0] or t   # 模型多写了半句：只要第一个短语，不在词中间截断
+    return t[:limit]
+
+
+def assist(req: dict) -> dict:
+    """{kind: direction|style|conditions|premise, text, bookConfig?, premise?} → {kind, value}
+    参数这一步的小帮手：一句描述 → 7 字以内的创作方向 / 文风；随手写的话 → 一条条补充要求；润色「你的想法」。不用 JSON，直接要正文"""
+    kind = str(req.get("kind") or "")
+    if kind not in ASSIST_KINDS:
+        raise InspireError(f"不认识的帮手种类：{kind}")
+    text = _clip(req.get("text"), 1000)
+    if not text:
+        raise InspireError("先写几句描述")
+    need, max_tokens = ASSIST_KINDS[kind]
+    parts = []
+    cfg = spec_mod.positioning_text(req.get("bookConfig"))
+    if cfg and kind in ("direction", "premise"):
+        parts.append("【写作参数】（参考）\n" + cfg)
+    if kind != "premise" and _clip(req.get("premise"), 500):
+        parts.append(f"作者的故事想法（参考）：{_clip(req.get('premise'), 500)}")
+    parts.append(f"作者写的：{text}")
+    parts.append(f"【任务】{need}。")
+    messages = [{"role": "system", "content": "你是网络小说编辑，帮作者把零散的想法整理成清楚的说法。只输出要求的内容，不要任何解释。"},
+                {"role": "user", "content": "\n\n".join(parts)}]
+    try:
+        if req.get("local") and (req.get("local") or {}).get("baseId"):
+            r, model = ideas._run_local(req["local"], messages, max_tokens, temperature=0.5, use_adapter=False)
+        elif req.get("api"):
+            r, model = ideas._run_api(req["api"], messages, max_tokens, temperature=0.7, json_mode=False)
+        else:
+            raise InspireError("请选择大模型、GGUF 或本地模型")
+    except ideas.IdeaError as e:
+        raise InspireError(str(e)) from e
+    out = (r.get("text") or "").strip()
+    if kind in ("direction", "style"):
+        value = _short_label(out)
+    elif kind == "conditions":
+        rows = [re.sub(r"^\s*(\d+[.、．)]|[-•·*])\s*", "", x).strip() for x in out.splitlines()]
+        value = "\n".join(x for x in rows if x)[:500]
+    else:
+        value = _clip(re.sub(r"^(润色后?的?想法|想法)[：:]\s*", "", out), 500)
+    if not value:
+        raise InspireError("模型没有给出可用的结果，请重试")
+    return {"kind": kind, "value": value, "usage": {"promptTokens": r.get("promptTokens", 0),
+                                                     "completionTokens": r.get("completionTokens", 0)}, "model": model}
 
 
 # ---------------------------------------------------------------- 故事优先 ② 全书骨架（卷 / 阶段）
@@ -324,23 +417,91 @@ def book_issues(book: dict, cfg) -> list[dict]:
     return issues
 
 
+PACES = {
+    "slow": "节奏慢热：每卷只把主线推进一小步，舞台和核心元素尽量不换；换地图 / 换舞台前要有足够铺垫，前几卷的主要舞台基本不变",
+    "normal": "节奏适中：每卷有一个清楚的新目标，舞台可以逐步扩大",
+    "fast": "节奏偏快：每卷都有明显升级或换地图，冲突密集",
+}
+_RANK = re.compile(r"[一二三四五六七八九十百两\d]+\s*(阶|级|层|重|星|品|段|转)")
+
+
+def invented_issues(bk: dict, settings_text: str) -> list[dict]:
+    """骨架里出现「二阶」「三级」这类等级，而设定里根本没有这种等级说法 → 可能是骨架在发明设定（只是提示）"""
+    if not settings_text:
+        return []
+    text = book_text(bk)
+    have = {m.group(1) for m in _RANK.finditer(settings_text)}
+    out, seen = [], set()
+    for m in _RANK.finditer(text):
+        unit = m.group(1)
+        if unit in have or m.group(0) in seen:
+            continue
+        seen.add(m.group(0))
+        out.append({"type": "invented", "term": m.group(0),
+                    "detail": f"骨架提到「{m.group(0)}」，设定里没有「…{unit}」这种等级说法，可能是骨架自己发明了设定"
+                              "（改设定或改骨架，二者要一致）"})
+    return out[:5]
+
+
+def _volume_plan_text(req: dict) -> str:
+    """作者写的分卷意图（每卷一句话）+ 卷数 + 节奏 → 提示词；都没填 = 空"""
+    plan = _strs(req.get("volumePlan"), 200, 8)
+    lines = [f"第 {i} 卷：{t}" for i, t in enumerate(plan, 1)]
+    n = _int(req.get("volumeCount"))
+    if n:
+        lines.insert(0, f"卷数：{max(1, min(8, n))} 卷")
+    pace = PACES.get(str(req.get("pace") or ""))
+    if pace:
+        lines.append(pace)
+    return ("【作者定的分卷方向】（必须照着来，不要自作主张提前换舞台 / 跳剧情）\n" + "\n".join(lines)) if lines else ""
+
+
 def book(req: dict) -> dict:
-    """{premise?, idea?, bookConfig?, tone?, conditions?, book?（已有骨架 = 延长）} → {book, issues, extended}
-    第一次：搭全书骨架；已有骨架：保留原有各卷，只追加 1~2 卷。"""
+    """{premise?, idea?, bookConfig?, settings?, volumePlan?[], volumeCount?, pace?, tone?, conditions?, book?, regen?}
+    → {book, issues, stages, extended, regenerated}
+    - 第一次：按灵感 + **设定**搭全书骨架（不许发明设定里没有的规则 / 等级），作者的分卷意图和节奏必须照着来；
+    - 带 book：保留原有各卷，只追加 1~2 卷；
+    - 带 book + regen {index, instruction?}：只重新生成第 index 卷（0 起），其余卷原样不动。"""
     cfg = req.get("bookConfig")
     old = clean_book(req.get("book"))
+    regen = req.get("regen") if isinstance(req.get("regen"), dict) else None
     if not (_clip(req.get("premise"), 500) or idea_text(req.get("idea")) or old):
         raise InspireError("先写一句构思，或者选一个灵感")
+    draft = req.get("settings") if isinstance(req.get("settings"), dict) else {}
+    st_text = _settings_text(draft) if draft else ""
     parts = [_premise(req)]
-    shape = ('{"volumes": [{"title": "卷名", "summary": "本卷主线（120 字内）", "chapters": 100, "stages": [{"title": "阶段名",'
-             ' "chapters": 40, "goal": "阶段目标", "startState": "起点状态", "endState": "终点状态", "power": "主角实力 / 身份",'
-             ' "mustHappen": ["…"], "forbidden": ["…"], "tierMax": 2}]}]')
+    if st_text:
+        parts.append("【设定】（骨架必须建立在这些设定上：只能用设定里有的规则、等级、体系和势力；"
+                     "设定里没有的等级 / 阶数 / 体系不要自己发明，需要的话用设定里已有的说法）\n" + st_text)
+    vp = _volume_plan_text(req)
+    if vp:
+        parts.append(vp)
+    volume_shape = ('{"title": "卷名", "summary": "本卷主线（120 字内）", "chapters": 100, "stages": [{"title": "阶段名",'
+                    ' "chapters": 40, "goal": "阶段目标", "startState": "起点状态", "endState": "终点状态", "power": "主角实力 / 身份",'
+                    ' "mustHappen": ["…"], "forbidden": ["…"], "tierMax": 2}]}')
+    shape = '{"volumes": [' + volume_shape + ']'
     stage_rules = (f"- 每卷 1~3 个阶段 stages：title；chapters 本阶段章数（加起来等于本卷章数）；goal 阶段目标；startState 起点状态、"
-                   "endState 终点状态（主角的处境 / 实力 / 关系到这里变成什么样）；power 这一阶段主角的实力或身份（30 字内）；"
+                   "endState 终点状态（主角的处境 / 实力 / 关系到这里变成什么样）；power 这一阶段主角的实力或身份（30 字内，用设定里的说法）；"
                    "mustHappen 必须发生的 1~3 件事；forbidden 这一阶段不能发生的事（如「不能暴露身世」「不能和最终反派正面决战」）；"
                    f"tierMax 对手量级上限 1~5（{TIER_HINT}）\n"
                    "- 阶段之间首尾相接：下一阶段的 startState 就是上一阶段的 endState；量级随卷逐步升高\n")
-    if old:
+    mode = "regen" if old and regen else "extend" if old else "new"
+    i = 0
+    if mode == "regen":
+        i = max(0, min(len(old["volumes"]) - 1, _int(regen.get("index"))))
+        rows = book_layout(old)
+        prev = next((r for r in reversed(rows) if r["volume"] == i - 1), None)
+        nxt = next((r for r in rows if r["volume"] == i + 1), None)
+        parts.append("【全书骨架】（只重写其中一卷，其余卷不变）\n" + book_text(old))
+        ask = _clip(regen.get("instruction"), 500)
+        parts.append(
+            f"【任务】只重新设计第 {i + 1} 卷（原来是《{old['volumes'][i]['title']}》）。"
+            + (f"作者的要求：{ask}。" if ask else "写得更好、更贴合分卷方向和设定。")
+            + (f"开头接上上一卷的结尾「{prev['endState'] or prev['goal']}」；" if prev else "")
+            + (f"结尾要能接上下一卷的开头「{nxt['startState'] or nxt['goal']}」；" if nxt else "")
+            + f"章数保持约 {old['volumes'][i]['chapters'] or 100} 章。\n" + stage_rules +
+            "只输出这一卷：" + volume_shape)
+    elif mode == "extend":
         last = book_layout(old)[-1]
         parts.append("【已有的全书骨架】（原样保留，不要重写）\n" + book_text(old))
         situation = _situation(req)
@@ -353,21 +514,30 @@ def book(req: dict) -> dict:
             "只输出新追加的卷：" + shape + "}")
     else:
         total = planned_chapters(cfg) or DEFAULT_BOOK_CHAPTERS
+        n = _int(req.get("volumeCount"))
+        vols = f"{max(1, min(8, n))} 卷" if n else "2~4 卷"
         parts.append(
             f"【任务】为这本书搭全书骨架（全书约 {total} 章）。\n"
             "- titleOptions：3 个候选书名\n"
             "- logline 一句话故事（40 字内）；storyHook 贯穿全书的核心钩子：读者最想知道答案的那个问题（60 字内）\n"
             "- sellingPoints 2~4 个卖点（每个 30 字内）\n"
-            "- worldPoints 3~6 条世界观要点：这个世界和别的书不一样的地方，每条 40 字内、要具体"
-            "（如「法师的魔力来自和元素签的契约，违约会被反噬」）\n"
-            f"- volumes 2~4 卷，各卷章数加起来约 {total} 章；每卷 title、summary（本卷主线，120 字内）、chapters 本卷章数\n"
+            "- worldPoints 3~6 条世界观要点：从【设定】里挑最能代表这个世界的（每条 40 字内）\n"
+            f"- volumes {vols}，各卷章数加起来约 {total} 章；每卷 title、summary（本卷主线，120 字内）、chapters 本卷章数\n"
             + stage_rules +
             "- 第一卷第一阶段 tierMax 不超过 2；第一阶段要在前几章就亮出核心卖点，主角主动出手\n"
             '输出 {"titleOptions": ["…", "…", "…"], "logline": "…", "storyHook": "…", "sellingPoints": ["…"], "worldPoints": ["…"], '
             + shape[1:] + "}")
     messages = [{"role": "system", "content": STORY_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
-    data, usage, model = _call(req, messages, 4500, 0.9)
-    if old:
+    data, usage, model = _call(req, messages, 2500 if mode == "regen" else 4500, 0.9)
+    if mode == "regen":
+        vol = data["volumes"][0] if isinstance(data.get("volumes"), list) and data["volumes"] else data
+        fixed = clean_book({"volumes": [vol]})
+        if not fixed:
+            raise InspireError("模型没有给出这一卷，请重试")
+        vols = list(old["volumes"])
+        vols[i] = fixed["volumes"][0]
+        out = {**old, "volumes": vols}
+    elif mode == "extend":
         added = clean_book({"volumes": data.get("volumes") or []})
         if not added:
             raise InspireError("模型没有给出新的卷，请重试")
@@ -379,7 +549,9 @@ def book(req: dict) -> dict:
         first = out["volumes"][0]["stages"][:1]
         if first and (first[0]["tierMax"] or 0) > 2:
             first[0]["tierMax"] = 2   # 开篇对手上限 2
-    return {"book": out, "issues": book_issues(out, cfg), "extended": bool(old), "usage": usage, "model": model}
+    issues = book_issues(out, cfg) + invented_issues(out, st_text)
+    return {"book": out, "issues": issues, "stages": book_stages(out), "extended": mode == "extend",
+            "regenerated": i if mode == "regen" else None, "usage": usage, "model": model}
 
 
 # ---------------------------------------------------------------- ① 拆需求
@@ -410,68 +582,118 @@ def _element_schema() -> str:
 
 
 STORY_WORLD_SHAPE = (
-    '"world": {"rules": ["…"], "note": "…", "cards": [{"title": "…", "content": "…", "tags": ["…"]}],'
+    '"world": {"rules": ["…"], "note": "…",'
     ' "power": {"intro": "…", "realms": [{"name": "…", "desc": "…", "cost": "…"}], "beyond": "…"},'
     ' "abilities": {"innate": "…", "acquired": "…", "dimensions": ["…"]},'
     ' "mechanics": [{"title": "…", "desc": "…"}], "resources": [{"title": "…", "desc": "…"}]}')
 
 
+LEAD_SHAPE = ('"characters": [{"name": "…", "role": "主角", "tagline": "一句话人设", "personality": ["性格词，≤4 个"], "goal": "…",'
+              ' "fear": "…", "secret": "…", "abilities": ["…"], "background": "…（100 字内）", "arc": "成长弧光（60 字内）"}]')
+
+
 def _settings_story(req: dict, opening: bool, stage: dict) -> dict:
-    """故事优先：设定从全书骨架推出，不需要素材（选了素材就当可选参考）。
-    JSON 结构里的槽位（背景卡 / 境界 / 能力 / 机制 / 资源）就是要模型填满的清单。"""
-    bk = clean_book(req.get("book"))
+    """故事优先 ② 设定：只做世界 + 主角，依据写作参数和选中的灵感（不需要素材，选了素材就当可选参考）。
+    配角、势力 / 地点 / 物品 / 怪物、阶段表要按全书骨架的阶段安排，放到骨架那一步（cast）生成。
+    JSON 结构里的槽位（境界 / 能力 / 机制 / 资源）就是要模型填满的清单。
+    不生成世界背景卡（和世界规则重叠）和书名（书名在骨架那一步选，灵感的暂定名是候选之一）。"""
     block, refs = inspire._material_block(req.get("materials") or [])
     parts = [_premise(req)]
-    if bk:
-        parts.append("【全书骨架】\n" + book_text(bk))
     situation = _situation(req)
     if situation:
-        parts.append(f"【这本书现在的局面】（已有的设定不要重复，只补接下来需要的新东西）\n{situation}")
-    st = inspire._stage_text({**stage, "chapter": _written(req.get("novelId")) + 1})
-    if st:
-        parts.append(st)
+        parts.append(f"【这本书现在的局面】（已有的设定不要重复，只补新东西）\n{situation}")
     if block:
         parts.append("【可参考的素材】（可选：用得上就改编进来，名字换新，sources 写编号；用不上就不用）\n" + block)
-    if opening:
-        parts.append(OPENING_RULES)
-    serve = "所有设定都要服务于【全书骨架】：主角的欲望 / 缺陷 / 秘密 / 能力代价要能推动各阶段「必须发生」的事。\n" if bk else ""
     parts.append(
-        "【任务】为这本书做一套原创设定。" + serve +
-        "- world.rules 3~6 条这个世界独有的规则（每条 40 字内）；world.note 世界观补充（200 字内）\n"
-        "- world.cards 4~6 张世界背景卡：这个世界最有画面感的地方 / 体系 / 历史（如浮空城、法师塔、禁忌之地、旧神战争），"
-        "title + content（120 字内，具体到能写进正文）+ tags\n"
+        "【任务】为这本书做世界设定和主角（配角、势力、地点等之后按全书骨架再配，这里不要写）。\n"
+        "- world.rules 3~6 条这个世界独有的规则（每条 40 字内）；world.note 世界观补充（200 字内，"
+        "写这个世界最有画面感的地方 / 体系 / 历史，如浮空城、法师塔、旧神战争）\n"
         "- world.power 力量体系：intro 怎么获得、怎么变强（120 字内）；realms 4~8 个境界 / 等级，从低到高，每个 name + desc"
         "（这个境界能做到什么，50 字内）+ cost（突破的门槛或代价，40 字内）；beyond 更高层次的留白（60 字内）。"
         "题材没有修炼 / 等级概念的（都市、悬疑…）就写成主角能力或地位的成长阶梯\n"
         "- world.abilities 能力：innate 先天（谁天生有什么）、acquired 后天（怎么学会 / 换来）、dimensions 衡量能力的维度"
         "（如 魔力量、施法速度、元素亲和）\n"
-        "- world.mechanics 2~5 条世界机制（这个世界怎么运转：交易、律法、禁忌、魔力潮汐…），title + desc（60 字内）\n"
+        "- world.mechanics 2~5 条世界机制（这个世界怎么运转：制度、交易、周期性现象的具体做法和数字），title + desc（60 字内）；"
+        "和世界规则写的是同一件事时只写在一处\n"
         "- world.resources 2~5 种关键资源（谁控制、为什么值得争），title + desc（60 字内）\n"
-        "- 主角：必须有欲望（goal）、缺陷 / 恐惧（fear）、秘密，能力要有代价；role 填「主角」\n"
-        f"- 配角 3~6 个，role 只能是 {' / '.join(ROLE_LABELS[1:])}；每个人的欲望要和主角冲突或互补；"
-        "appearFrom = 第几章登场（主角和第 1 章就出场的填 1）\n"
-        "- 元素（势力 / 地点 / 物品 / 怪物）4~8 个，fields 按下面的字段写；tier = 量级 1~5"
-        f"（{TIER_HINT}）；appearFrom 同上\n"
-        f"{_element_schema()}\n"
-        + ("- 对手按骨架各阶段的「对手上限」分布，appearFrom 落在对应阶段的章节里；更强的存在可以有，但只作传说或很晚才登场\n"
-           if bk else "- 前 10 章的对手量级不能超过【故事阶段】的上限；更强的存在可以有，但 appearFrom 要晚于第 10 章，或者只作传说\n") +
-        "- 名字贴题材、好记，不要用烂大街的名字；不用素材的条目 sources 留空、adapted 留空\n"
-        + ("" if bk else "- 阶段表 stages：按章节划分主角的成长（range 如「1-10」，power 主角实力，tierMax 对手上限 1~5）\n") +
-        '输出 {"title": "建议书名", ' + STORY_WORLD_SHAPE + ','
-        ' "characters": [{"name": "…", "role": "主角", "tagline": "一句话人设", "personality": ["性格词，≤4 个"], "goal": "…",'
-        ' "fear": "…", "secret": "…", "abilities": ["…"], "background": "…（100 字内）", "arc": "成长弧光（60 字内）",'
-        ' "relationToLead": "与主角的关系", "appearFrom": 1, "sources": [], "adapted": ""}],'
-        ' "elements": [{"category": "faction", "name": "…", "fields": {"stance": "敌对", "feature": "…"}, "tier": 2,'
-        ' "appearFrom": 1, "sources": [], "adapted": ""}]'
-        + ("" if bk else ', "stages": [{"range": "1-10", "power": "…", "tierMax": 2, "note": "…"}]') + "}")
+        "- characters 只写主角 1 个：必须有欲望（goal）、缺陷 / 恐惧（fear）、秘密（secret），能力要有代价；role 填「主角」；"
+        "名字贴题材、好记，不要用烂大街的名字\n"
+        "- 都要贴合选定的灵感和写作参数（题材、文风、卖点）\n"
+        '输出 {' + STORY_WORLD_SHAPE + ', ' + LEAD_SHAPE + '}')
+    messages = [{"role": "system", "content": STORY_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
+    data, usage, model = _call(req, messages, 4000, 0.9)
+    draft = _clean_settings(data, refs, opening)
+    draft["characters"] = [c for c in draft["characters"] if c["role"] == "主角"][:1]
+    draft["elements"], draft["stages"] = [], []
+    issues = settings_issues(draft, req.get("materials") or [], stage, _written(req.get("novelId")) + 1)
+    issues += story_issues(draft, None, opening)
+    return {"draft": draft, "issues": issues, "opening": opening, "stage": stage, "usage": usage, "model": model}
+
+
+CAST_MIN = {"characters": 3, "elements": 4}   # 骨架那一步配角 / 元素的下限（代码检查）
+CAST_ELEMENT_SHAPE = '{"category": "faction", "name": "…", "fields": {"stance": "敌对", "feature": "…"}, "tier": 2, "appearFrom": 1}'
+CAST_CHARACTER_SHAPE = ('{"name": "…", "role": "反派", "tagline": "一句话人设", "personality": ["性格词，≤4 个"], "goal": "…",'
+                        ' "fear": "…", "secret": "…", "abilities": ["…"], "background": "…（100 字内）", "arc": "成长弧光（60 字内）",'
+                        ' "relationToLead": "与主角的关系", "appearFrom": 1}')
+CAST_RULES = ("- appearFrom = 第几章登场，必须落在骨架里第一次需要它的那个阶段的章节范围内\n"
+              "- 对手（反派、宿敌、敌对势力、怪物）的量级不能超过它登场那个阶段的「对手上限」；更强的存在可以有，"
+              "但只作传说，或者 appearFrom 放到上限够高的阶段\n"
+              "- 骨架「必须发生」里点了名的人物 / 势力 / 地点 / 物品，都要有对应的卡（名字一致）\n"
+              "- 名字贴题材、好记，不要用烂大街的名字\n")
+
+
+def cast(req: dict) -> dict:
+    """故事优先 ③ 骨架这一步的人物与元素：{settings（世界 + 主角）, book, premise?, idea?, bookConfig?}
+    → {characters（配角，不含主角）, elements, stages, issues}。登场章节落在需要它的阶段里，对手量级不超过所在阶段的上限，
+    骨架「必须发生」里点了名的人物 / 势力都要有卡（代码再查一遍）。"""
+    bk = clean_book(req.get("book"))
+    if not bk:
+        raise InspireError("先生成全书骨架")
+    draft = req.get("settings") if isinstance(req.get("settings"), dict) else {}
+    opening = not _written(req.get("novelId"))
+    lead = [c for c in draft.get("characters") or [] if isinstance(c, dict) and c.get("role") == "主角"]
+    world_only = {**draft, "characters": lead, "elements": [], "stages": []}
+    parts = [_premise(req),
+             "【设定】（世界和主角已经定好：人物和元素要建立在这些设定上，不要改、不要另起一套规则或等级）\n"
+             + (_settings_text(world_only) or "（还没有设定）"),
+             "【全书骨架】\n" + book_text(bk)]
+    situation = _situation(req)
+    if situation:
+        parts.append(f"【这本书现在的局面】（已有的人物 / 元素不要重复，只补接下来需要的）\n{situation}")
+    parts.append(
+        "【任务】按全书骨架给这本书配人物和元素（主角已经有了，不要再写主角）。\n"
+        f"- 配角 4~8 个，role 只能是 {' / '.join(ROLE_LABELS[1:])}；每个人的欲望要和主角冲突或互补\n"
+        "- 元素（势力 / 地点 / 物品 / 怪物）5~10 个，覆盖骨架的各个阶段，fields 按下面的字段写；"
+        f"tier = 量级 1~5（{TIER_HINT}）\n"
+        f"{_element_schema()}\n" + CAST_RULES +
+        '输出 {"characters": [' + CAST_CHARACTER_SHAPE + '], "elements": [' + CAST_ELEMENT_SHAPE + ']}')
     messages = [{"role": "system", "content": STORY_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
     data, usage, model = _call(req, messages, 6000, 0.9)
-    draft = _clean_settings(data, refs, opening)
-    if bk:
-        draft["stages"] = book_stages(bk)   # 阶段表由骨架算，不让模型另写一份
-    issues = settings_issues(draft, req.get("materials") or [], stage, _written(req.get("novelId")) + 1)
-    issues += story_issues(draft, bk, opening)
-    return {"draft": draft, "issues": issues, "opening": opening, "stage": stage, "usage": usage, "model": model}
+    got = _clean_settings({"characters": data.get("characters"), "elements": data.get("elements")}, {}, opening, need_lead=False)
+    chars = [c for c in got["characters"] if c["role"] != "主角"]
+    issues = cast_issues({**draft, "characters": lead + chars, "elements": got["elements"]}, bk, opening)
+    return {"characters": chars, "elements": got["elements"], "stages": book_stages(bk), "issues": issues,
+            "usage": usage, "model": model}
+
+
+def cast_issues(draft: dict, bk: dict, opening: bool) -> list[dict]:
+    """骨架这一步的代码检查：人物 / 元素够不够（开篇才查）、对手量级超过登场阶段的上限、骨架点名的东西有没有卡"""
+    issues = []
+    if opening:
+        have = {"characters": sum(1 for c in draft.get("characters") or [] if c.get("role") != "主角"),
+                "elements": len(draft.get("elements") or [])}
+        for k, lab in (("characters", "配角"), ("elements", "势力 / 地点 / 物品 / 怪物")):
+            if have[k] < CAST_MIN[k]:
+                issues.append({"type": "thin", "detail": f"{lab}只有 {have[k]} 个（建议至少 {CAST_MIN[k]} 个）"})
+    for e in draft.get("elements") or []:
+        hostile = e.get("category") == "monster" or "敌" in str((e.get("fields") or {}).get("stance") or "")
+        row = book_position(bk, e.get("appearFrom") or 1)
+        if hostile and row and row.get("tierMax") and (e.get("tier") or 0) > row["tierMax"]:
+            issues.append({"type": "tier", "term": e["name"],
+                           "detail": f"「{e['name']}」量级 {e['tier']} 超过登场阶段「{row['title'] or row['volumeTitle']}」"
+                                     f"的对手上限 {row['tierMax']}（第{e.get('appearFrom') or 1}章登场）"})
+    issues += story_issues(draft, bk, False)
+    return issues
 
 
 def story_issues(draft: dict, bk: dict | None, opening: bool) -> list[dict]:
@@ -479,12 +701,9 @@ def story_issues(draft: dict, bk: dict | None, opening: bool) -> list[dict]:
     issues = []
     w = draft.get("world") or {}
     if opening:
-        have = {"cards": len(w.get("cards") or []), "realms": len((w.get("power") or {}).get("realms") or []),
-                "characters": len(draft.get("characters") or []), "elements": len(draft.get("elements") or [])}
-        labels = {"cards": "世界背景卡", "realms": "力量体系的境界", "characters": "人物", "elements": "势力 / 地点 / 物品 / 怪物"}
-        for k, n in MIN_COUNTS.items():
-            if have[k] < n:
-                issues.append({"type": "thin", "detail": f"{labels[k]}只有 {have[k]} 个（建议至少 {n} 个），设定偏单薄"})
+        realms = len((w.get("power") or {}).get("realms") or [])
+        if realms < MIN_COUNTS["realms"]:
+            issues.append({"type": "thin", "detail": f"力量体系的境界只有 {realms} 个（建议至少 {MIN_COUNTS['realms']} 个），设定偏单薄"})
     if bk:
         text = _settings_text(draft)
         for r in book_layout(bk):
@@ -540,7 +759,178 @@ def settings(req: dict) -> dict:
     return {"draft": draft, "issues": issues, "opening": opening, "stage": stage, "usage": usage, "model": model}
 
 
-def _clean_settings(d: dict, refs: dict[str, int], opening: bool) -> dict:
+# ---------------------------------------------------------------- 设定的单个模块重新生成（四种方式：给不给方向 × 参考不参考已有）
+
+PART_MODULES = {
+    # 模块 → (名称, 要求, 输出形状)
+    "rules": ("世界规则", "3~6 条这个世界独有的规则，每条 40 字内", '{"rules": ["…"]}'),
+    "note": ("世界观补充", "一段世界观补充，200 字内", '{"note": "…"}'),
+    "power": ("力量体系", "intro 怎么获得、怎么变强（120 字内）；realms 4~8 个境界 / 等级，从低到高，每个 name + desc（能做到什么，50 字内）"
+              "+ cost（突破的门槛或代价，40 字内）；beyond 更高层次的留白（60 字内）。题材没有等级概念的就写成能力 / 地位的成长阶梯",
+              '{"power": {"intro": "…", "realms": [{"name": "…", "desc": "…", "cost": "…"}], "beyond": "…"}}'),
+    "abilities": ("能力", "innate 先天（谁天生有什么）、acquired 后天（怎么学会 / 换来）、dimensions 衡量能力的维度",
+                  '{"abilities": {"innate": "…", "acquired": "…", "dimensions": ["…"]}}'),
+    "mechanics": ("世界机制", "2~5 条世界机制（这个世界怎么运转：交易、律法、禁忌…），title + desc（60 字内）",
+                  '{"mechanics": [{"title": "…", "desc": "…"}]}'),
+    "resources": ("关键资源", "2~5 种关键资源（谁控制、为什么值得争），title + desc（60 字内）",
+                  '{"resources": [{"title": "…", "desc": "…"}]}'),
+    "lead": ("主角", "主角 1 个（必须有 goal 欲望、fear 缺陷 / 恐惧、secret 秘密，能力有代价，role 填「主角」）", '{' + LEAD_SHAPE + '}'),
+    "characters": ("配角", f"配角 4~8 个（role 只能是 {' / '.join(ROLE_LABELS[1:])}，欲望和主角冲突或互补，appearFrom = 第几章登场；"
+                   "不要写主角）",
+                   '{"characters": [{"name": "…", "role": "主角", "tagline": "…", "personality": ["…"], "goal": "…", "fear": "…",'
+                   ' "secret": "…", "abilities": ["…"], "background": "…", "arc": "…", "relationToLead": "…", "appearFrom": 1}]}'),
+    "elements": ("势力 / 地点 / 物品 / 怪物", "4~8 个，fields 按字段写，tier = 量级 1~5（" + TIER_HINT + "），appearFrom = 第几章登场",
+                 '{"elements": [{"category": "faction", "name": "…", "fields": {"stance": "敌对", "feature": "…"}, "tier": 2, "appearFrom": 1}]}'),
+}
+WORLD_MODULES = ("rules", "note", "cards", "power", "abilities", "mechanics", "resources")
+
+
+def _module_value(draft: dict, module: str, category: str = ""):
+    if module in WORLD_MODULES:
+        return (draft.get("world") or {}).get(module)
+    if module == "elements" and category:
+        return [e for e in draft.get("elements") or [] if e.get("category") == category]
+    if module in ("lead", "characters"):   # 主角 / 配角都在 characters 里，按 role 分开
+        lead = module == "lead"
+        return [c for c in draft.get("characters") or [] if isinstance(c, dict) and (c.get("role") == "主角") == lead]
+    return draft.get(module)
+
+
+def _without(draft: dict, module: str, category: str = "") -> dict:
+    """去掉要重写的那一块（剩下的作为「其余设定」给模型对齐）"""
+    d = {**draft, "world": dict(draft.get("world") or {})}
+    if module in WORLD_MODULES:
+        d["world"].pop(module, None)
+    elif module == "elements":
+        d["elements"] = [e for e in d.get("elements") or [] if category and e.get("category") != category]
+    elif module in ("lead", "characters"):
+        lead = module == "lead"
+        d["characters"] = [c for c in d.get("characters") or [] if isinstance(c, dict) and (c.get("role") == "主角") != lead]
+    else:
+        d[module] = []
+    return d
+
+
+def settings_part(req: dict) -> dict:
+    """{settings, module, category?（elements 时只重写这一类）, direction?, keep?, premise?, idea?, bookConfig?, book?}
+    → {module, category, value, keep, usage}。四种方式：direction 给 / 不给 × keep（参考已有：先读已有内容，保留并补充，不重复）。
+    只返回这一块的新内容，前端整块替换（可撤销）。"""
+    module = str(req.get("module") or "")
+    if module not in PART_MODULES:
+        raise InspireError(f"不认识的设定模块：{module}")
+    draft = req.get("settings") if isinstance(req.get("settings"), dict) else {}
+    category = str(req.get("category") or "") if module == "elements" else ""
+    if category and category not in ELEMENT_FIELDS:
+        raise InspireError(f"不认识的元素类别：{category}")
+    label, need, shape = PART_MODULES[module]
+    if category:
+        label = ELEMENT_LABELS_ZH[category]
+        need = (f"3~6 个{label}，category 都填 {category}；fields 按字段写，tier = 量级 1~5（{TIER_HINT}），"
+                "appearFrom = 第几章登场")
+    direction = _clip(req.get("direction"), 500)
+    keep = bool(req.get("keep"))
+    existing = _module_value(draft, module, category)
+    opening = not _written(req.get("novelId"))
+    parts = [_premise(req)]
+    bk = clean_book(req.get("book"))
+    if bk:
+        parts.append("【全书骨架】\n" + book_text(bk, detail=False))
+    rest = _settings_text(_without(draft, module, category))
+    if rest and direction:
+        # 给了方向：其余设定按块列出（带块名），模型才能说清楚哪一块和方向矛盾
+        parts.append("【其余设定】（按块列出；新内容要和这些一致）\n" + _blocks_text(draft, module, category))
+    elif rest:
+        parts.append("【其余设定】（新内容要和这些一致，不要矛盾）\n" + rest)
+    if keep and existing:
+        parts.append(f"【已有的{label}】\n" + json.dumps(existing, ensure_ascii=False)[:4000])
+    task = [f"【任务】重新生成「{label}」：{need}。"]
+    if direction:
+        task.append(f"作者给的方向（必须照着来）：{direction}")
+    if keep and existing:
+        task.append(f"在【已有的{label}】基础上做：已有的保留（作者的方向要求修改的才改），再补充新的，不要和已有的重复；"
+                    f"输出完整的{label}（已有的 + 新的）。")
+    else:
+        task.append("不用管原来的版本，整块重新设计，和【其余设定】保持一致。")
+    if module == "elements":
+        task.append(_element_schema())
+    if module in ("characters", "elements") and bk:
+        task.append(CAST_RULES)
+    elif module in ("characters", "lead"):
+        task.append("名字贴题材、好记。")
+    out_shape = shape
+    if direction and rest:
+        keys = "、".join(CONFLICT_KEYS)
+        task.append("另外检查【其余设定】：有和作者这次的方向矛盾的句子，就在 conflicts 里列出 {block: 所在的块（只能是 " + keys + "），"
+                    "text: 矛盾的那句（照抄，40 字内）}；只是提到同一个东西、并不矛盾的不算；没有就空数组。")
+        out_shape = shape[:-1] + ', "conflicts": [{"block": "rules", "text": "…"}]}'
+    task.append("只输出 " + out_shape)
+    parts.append("\n".join(task))
+    messages = [{"role": "system", "content": STORY_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
+    max_tokens = 3500 if module in ("characters", "elements") else 1800
+    data, usage, model = _call(req, messages, max_tokens, 0.9)
+    if module == "lead":
+        raw = data.get("characters") or data.get("lead") or []
+        raw = [raw] if isinstance(raw, dict) else raw
+        value = [{**c, "role": "主角"} for c in _clean_settings({"characters": raw[:1]}, {}, opening)["characters"]]
+    elif module in ("characters", "elements"):
+        raw = data.get(module) or data.get("items") or []
+        if category:   # 只重写一类：模型偶尔不填 / 填错 category，统一改成这一类
+            raw = [{**e, "category": category} for e in raw if isinstance(e, dict)]
+        got = _clean_settings({module: raw}, {}, opening, need_lead=False)[module]
+        value = [c for c in got if c.get("role") != "主角"] if module == "characters" else got
+    elif module == "rules":
+        value = _strs(data.get("rules"), 60, 8)
+    elif module == "note":
+        value = _clip(data.get("note"), 800)
+    else:
+        value = _clean_world_extra({module: data.get(module)}).get(module)
+    if not value:
+        raise InspireError(f"模型没有给出可用的「{label}」，请重试")
+    return {"module": module, "category": category, "value": value, "keep": keep,
+            "related": conflicts_of(data, module, category), "usage": usage, "model": model}
+
+
+CONFLICT_KEYS = ("rules", "note", "power", "abilities", "mechanics", "resources", "lead", "characters",
+                 "faction", "location", "item", "monster")
+
+
+def _blocks_text(draft: dict, module: str, category: str) -> str:
+    """其余设定按块列出：[块名] 名称：内容（每块 ≤800 字）"""
+    lines = []
+    for key in CONFLICT_KEYS:
+        m, cat = ("elements", key) if key in ELEMENT_FIELDS else (key, "")
+        if (m, cat) == (module, category):
+            continue
+        v = _module_value(draft, m, cat)
+        if not v:
+            continue
+        label = ELEMENT_LABELS_ZH[cat] if cat else PART_MODULES[m][0]
+        text = v if isinstance(v, str) else "；".join(v) if m == "rules" else json.dumps(v, ensure_ascii=False)
+        lines.append(f"[{key}] {label}：{text[:800]}")
+    return "\n".join(lines)
+
+
+def conflicts_of(data: dict, module: str, category: str) -> list[dict]:
+    """模型指出的「其余设定里和方向矛盾的句子」→ [{module, category, label, term}]：按方向重写一块后提醒作者一起改
+    （例：方向「法师塔没有阶数」只改了力量体系，世界规则里还写着「塔每层试炼解锁」）。只认合法的块名，每块一条。
+    最早用「方向里的词在别的块里出现」来判断，核心名词（法师塔）几乎每块都有，提醒全是噪音，所以改成让模型判断矛盾"""
+    out, seen = [], set()
+    for c in data.get("conflicts") or []:
+        if not isinstance(c, dict):
+            continue
+        block = str(c.get("block") or "").strip()
+        if block not in CONFLICT_KEYS:
+            continue
+        m, cat = ("elements", block) if block in ELEMENT_FIELDS else (block, "")
+        if (m, cat) == (module, category) or (m, cat) in seen:
+            continue
+        seen.add((m, cat))
+        out.append({"module": m, "category": cat, "label": ELEMENT_LABELS_ZH[cat] if cat else PART_MODULES[m][0],
+                    "term": _clip(c.get("text"), 60)})
+    return out[:6]
+
+
+def _clean_settings(d: dict, refs: dict[str, int], opening: bool, need_lead: bool = True) -> dict:
     chars = []
     for c in d.get("characters") or []:
         if not isinstance(c, dict) or not _clip(c.get("name"), 40):
@@ -553,7 +943,7 @@ def _clean_settings(d: dict, refs: dict[str, int], opening: bool) -> dict:
                       "arc": _clip(c.get("arc"), 300), "relationToLead": _clip(c.get("relationToLead"), 80),
                       "appearFrom": max(1, _int(c.get("appearFrom"), 1)) if role != "主角" else 1,
                       "sources": inspire._refs(c.get("sources"), refs), "adapted": _clip(c.get("adapted"), 120)})
-    if chars and not any(c["role"] == "主角" for c in chars):
+    if need_lead and chars and not any(c["role"] == "主角" for c in chars):
         chars[0]["role"], chars[0]["appearFrom"] = "主角", 1
     elements = []
     for e in d.get("elements") or []:
@@ -624,13 +1014,32 @@ def _clean_world_extra(world: dict) -> dict:
     return out
 
 
+# 网文通用词：由它们拼成的素材名（黑市、法师公会、冒险者学院…）不算「照搬原书专有名词」
+GENERIC_WORDS = (
+    "法师 魔法师 魔导师 剑士 骑士 冒险者 佣兵 盗贼 猎人 刺客 牧师 术士 炼金术士 修士 修仙者 武者 剑修 丹师 器师 阵师 "
+    "公会 协会 学院 学府 学宫 商会 帝国 王国 王朝 帝都 王都 皇城 城邦 宗门 门派 世家 家族 教会 神殿 圣殿 议会 联盟 部落 军团 卫队 "
+    "黑市 拍卖行 酒馆 旅馆 集市 港口 遗迹 秘境 禁地 深渊 森林 荒原 雪山 沙漠 海域 地下城 地牢 高塔 法师塔 浮空城 "
+    "魔法 魔力 灵气 斗气 元素 契约 诅咒 血脉 灵根 功法 秘籍 丹药 灵石 魔晶 魔核 神器 法宝 圣物 "
+    "魔兽 妖兽 魔物 亡灵 巨龙 精灵 矮人 兽人 恶魔 天使 神明 吸血鬼 狼人 "
+    "主角 反派 导师 伙伴 宿敌 系统 金手指 退婚 打脸 逆袭"
+).split()
+
+
+def _generic(term: str) -> bool:
+    """能完全由通用词拼出来（如「法师公会」=「法师」+「公会」）"""
+    t = term.strip()
+    if not t:
+        return True
+    return any(t.startswith(w) and (len(t) == len(w) or _generic(t[len(w):])) for w in GENERIC_WORDS)
+
+
 def _leak_terms(materials: list[dict]) -> dict[str, str]:
-    """来源素材的专有名词（名称、多版本的版本名）→ 来源书；草案里出现 = 没改名"""
+    """来源素材的专有名词（名称、多版本的版本名）→ 来源书；草案里出现 = 没改名。通用词拼成的名字不算"""
     terms = {}
     for m in materials:
         for t in [m.get("title"), *[v.get("label") for v in m.get("variants") or [] if isinstance(v, dict)]]:
             t = str(t or "").strip()
-            if len(t) >= 2:
+            if len(t) >= 2 and not _generic(t):
                 terms[t] = m.get("book") or ""
     return terms
 
@@ -737,7 +1146,8 @@ def outline(req: dict) -> dict:
         "cast 本章出场的有名有姓人物；newTerms 本章第一次出现的专有名词（地名、组织、功法、物品）；"
         "foreshadow 本章对伏笔做什么 [{key, action: plant 埋下 / advance 推进 / resolve 回收}]；clocks 本章定下或到期的定时事件 key；"
         "hook 章末钩子（30 字内）" + ("；openingNote 本章的开篇要点（作者写的时候注意什么，40 字内）" if opening else "") + "\n"
-        "- 人物只用设定里的（可以有无名路人），并且不早于他的登场章节出场\n"
+        "- 人物只用设定里的（可以有无名路人），并且不早于他的登场章节出场；配角登场那一章的节拍里要写出他想要什么、"
+        "为什么这么做（不要只当推动主角的工具人）\n"
         "- 不要保守：每章都要有让读者想追下一章的强冲突或强悬念（有人付出代价、关系破裂、计划败露、局势失控），"
         "主角要主动出手而不是被事件推着走；合理不等于平淡\n"
         f"- foreshadows：3~6 条伏笔，key 用 P1、P2…，plantIn 埋下的章，payoffIn 回收的章（至少隔 {MIN_PAYOFF_GAP} 章；"
@@ -823,9 +1233,12 @@ def outline_issues(out: dict, draft: dict, opening: bool, start: int) -> list[di
             if len(new_names) > MAX_NEW_NAMES:
                 issues.append({"chapter": n, "type": "opening",
                                "detail": f"新出场人物 {len(new_names)} 个（{'、'.join(new_names)}），开篇每章不超过 {MAX_NEW_NAMES} 个"})
-            if len(c.get("newTerms") or []) > MAX_NEW_TERMS:
+            limit = FIRST_CHAPTER_TERMS if n == start else MAX_NEW_TERMS
+            if len(c.get("newTerms") or []) > limit:
                 issues.append({"chapter": n, "type": "opening",
-                               "detail": f"新名词 {len(c['newTerms'])} 个，开篇每章不超过 {MAX_NEW_TERMS} 个，读者记不住"})
+                               "detail": f"新名词 {len(c['newTerms'])} 个（{'、'.join(c['newTerms'])}），"
+                                         + (f"第 1 章不超过 {limit} 个，设定留到后面用到再露" if n == start
+                                            else f"开篇每章不超过 {limit} 个，读者记不住")})
         for name in c.get("cast") or []:
             if appear.get(name, 1) > n:
                 issues.append({"chapter": n, "type": "early",
@@ -915,14 +1328,23 @@ def apply(novel_id: str, req: dict) -> dict:
        setTitle?, book?, bookConfig?} → 计划伏笔 / 定时事件记进账本（planned），大纲里的 key 换成账本编号后保存为 novel.outline；
        book = 全书骨架（novel.book，续规划按它找当前阶段），bookConfig = 写作参数（novel.bookConfig，写正文进【作品定位】）"""
     out = req.get("outline") if isinstance(req.get("outline"), dict) else {}
-    if not out.get("chapters"):
-        raise InspireError("大纲是空的")
     novel = store.get_novel(novel_id)
     extra = {}
     if clean_book(req.get("book")):
         extra["book"] = clean_book(req["book"])
     if spec_mod.clean_book_config(req.get("bookConfig")):
         extra["bookConfig"] = spec_mod.clean_book_config(req["bookConfig"])
+    if not out.get("chapters"):
+        # 故事优先现在到骨架为止：没有大纲，只存骨架 / 写作参数 / 书名（设定由前端写进设定编辑器）
+        if not extra and not req.get("setTitle"):
+            raise InspireError("没有可写入的内容")
+        fields = dict(extra)
+        title = _clip(req.get("title") or out.get("title"), 40)
+        if req.get("setTitle") and title:
+            fields["title"] = title
+        if fields:
+            store.update_novel(novel_id, **fields)
+        return {"outline": None, "ids": {}, "planned": 0, "book": bool(extra.get("book"))}
     facts = store.get_facts(novel_id)
     ids = facts_mod.add_plan(facts, out.get("foreshadows") or [], out.get("clocks") or [])
     chapters = []

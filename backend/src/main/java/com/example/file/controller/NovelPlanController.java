@@ -48,6 +48,24 @@ public class NovelPlanController {
         return ResultResponses.handle(() -> service.book(novelId, body), log, "生成全书骨架失败");
     }
 
+    /** POST /api/novel/plan/{novelId}/cast {settings, book, premise?, idea?, bookConfig?, model}（故事优先：按骨架配人物 / 元素） */
+    @PostMapping("/cast")
+    public ResponseEntity<Result<Map<String, Object>>> cast(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> service.cast(novelId, body), log, "生成人物和元素失败");
+    }
+
+    /** POST /api/novel/plan/{novelId}/assist {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model}（参数这一步的小帮手） */
+    @PostMapping("/assist")
+    public ResponseEntity<Result<Map<String, Object>>> assist(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> service.assist(novelId, body), log, "AI 生成失败");
+    }
+
+    /** POST /api/novel/plan/{novelId}/settings-part {settings, module, category?, direction?, keep?, model}（设定单个模块重新生成） */
+    @PostMapping("/settings-part")
+    public ResponseEntity<Result<Map<String, Object>>> settingsPart(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> service.settingsPart(novelId, body), log, "重新生成设定失败");
+    }
+
     /** POST /api/novel/plan/{novelId}/enrich {settings, idea?, bookConfig?, excludeBooks?, stage?, model}（故事优先 ④ 素材点睛） */
     @PostMapping("/enrich")
     public ResponseEntity<Result<Map<String, Object>>> enrich(@PathVariable String novelId, @RequestBody Map<String, Object> body) {

@@ -1,12 +1,15 @@
 <template>
   <div class="settings-editor">
     <div class="page-header">
-      <span class="header-hint">只有你选择 / 填写 / 调整过的内容才会作为生成约束；标注「默认，未确认」的值不会写进提示词</span>
+      <div class="header-title">
+        <slot name="lead" />
+        <el-tooltip placement="bottom-start" :show-after="200"
+                    content="只有你选择 / 填写 / 调整过的内容才会作为生成约束；没动过的默认值不会写进提示词。点卡片修改，空着的项在下面「还可以补充」里">
+          <el-icon class="hint-icon"><InfoFilled /></el-icon>
+        </el-tooltip>
+        <el-tag v-if="editMode" size="small" type="warning" effect="plain" closable @close="editMode = false">编辑结构中</el-tag>
+      </div>
       <div class="header-actions">
-        <span class="edit-switch">
-          编辑模式
-          <el-switch v-model="editMode" />
-        </span>
         <AiFillSettings
           v-if="aiEnabled"
           :cfg="aiCfg"
@@ -18,9 +21,21 @@
           :suggest="aiSuggestHints"
           @update:blocked-books="setBlockedBooks"
         />
-        <el-button :icon="Collection" @click="openPicker">从素材库添加</el-button>
-        <el-button :icon="RefreshLeft" @click="resetAll">重置设定</el-button>
         <slot name="actions" />
+        <el-dropdown trigger="click" @command="onMore">
+          <el-button :icon="MoreFilled">更多</el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="picker" :icon="Collection">从素材库添加</el-dropdown-item>
+              <el-dropdown-item command="preview" :icon="View">查看 AI 看到的设定</el-dropdown-item>
+              <el-dropdown-item command="json" :icon="Document" :disabled="!spec.length">查看 JSON</el-dropdown-item>
+              <el-dropdown-item command="structure" :icon="Operation" divided>
+                {{ editMode ? '退出编辑结构' : '编辑结构（增删字段 / 选项）' }}
+              </el-dropdown-item>
+              <el-dropdown-item command="reset" :icon="RefreshLeft">重置设定</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </div>
 
@@ -37,7 +52,9 @@
         >
           <el-icon><component :is="cat.icon || 'Collection'" /></el-icon>
           <span class="nav-label">{{ cat.label }}</span>
-          <span class="nav-count">{{ filledCount(cat) }}/{{ cat.fields.length }}</span>
+          <el-tooltip :content="`已填 ${filledCount(cat)} / ${cat.fields.length} 项`" placement="right" :show-after="300">
+            <span class="nav-dot" :class="`is-${progressOf(cat)}`" />
+          </el-tooltip>
         </div>
 
         <div class="nav-group-title">自定义元素</div>
@@ -50,7 +67,9 @@
         >
           <el-icon><component :is="cat.icon || 'Collection'" /></el-icon>
           <span class="nav-label">{{ cat.label }}</span>
-          <span class="nav-count">{{ filledCount(cat) }}/{{ cat.fields.length }}</span>
+          <el-tooltip :content="`已填 ${filledCount(cat)} / ${cat.fields.length} 项`" placement="right" :show-after="300">
+            <span class="nav-dot" :class="`is-${progressOf(cat)}`" />
+          </el-tooltip>
         </div>
         <el-button class="nav-add" :icon="Plus" plain type="primary" @click="openCategoryEditor(null)">
           添加自定义元素
@@ -81,14 +100,75 @@
           <el-button type="primary" :icon="Plus" @click="addCategoryField">添加选项项</el-button>
         </el-empty>
 
-        <OptionField
-          v-for="field in activeCategory.fields"
-          :key="`${activeCategory.key}:${field.key}`"
-          :field="field"
-          :container="values[activeCategory.key]"
-          :siblings="activeCategory.fields"
-          :path="[activeCategory.label]"
-        />
+        <!-- 编辑结构：所有字段都以表单展开（增删字段 / 选项要看到全部） -->
+        <template v-if="editMode">
+          <OptionField
+            v-for="field in activeCategory.fields"
+            :key="`${activeCategory.key}:${field.key}`"
+            :field="field"
+            :container="values[activeCategory.key]"
+            :siblings="activeCategory.fields"
+            :path="[activeCategory.label]"
+          />
+        </template>
+
+        <!-- 平时：填过的字段是内容卡片，点一下才编辑；空着的收进「还可以补充」 -->
+        <template v-else>
+          <div v-if="shownFields.length" class="field-grid">
+            <template v-for="field in shownFields" :key="`${activeCategory.key}:${field.key}`">
+              <!-- 列表（背景卡、阶段表、怪物…）：卡片网格，点卡片在下面展开编辑 -->
+              <div v-if="isGroupGrid(field)" class="field-card wide is-group">
+                <GroupCardGrid :field="field" :container="values[activeCategory.key]" :path="[activeCategory.label]" />
+              </div>
+              <div v-else-if="isOpen(field)" class="field-card is-editing" :class="{ wide: isWide(field) }">
+                <OptionField
+                  :field="field"
+                  :container="values[activeCategory.key]"
+                  :siblings="activeCategory.fields"
+                  :path="[activeCategory.label]"
+                />
+                <div v-if="field.type !== 'group'" class="card-foot">
+                  <el-button size="small" type="primary" plain :icon="Check" @click="closeField(field)">完成</el-button>
+                </div>
+              </div>
+              <div v-else class="field-card is-reading" :class="{ wide: isWide(field) }" title="点击修改" @click="openField(field)">
+                <div class="fc-head">
+                  <span class="fc-title">{{ field.label }}</span>
+                  <el-icon class="fc-edit"><EditPen /></el-icon>
+                </div>
+                <!-- 力量体系：境界从低到高画成阶梯（悬停看说明 / 突破代价） -->
+                <template v-if="ladderOf(field).steps.length">
+                  <div v-if="ladderOf(field).intro" class="ladder-intro">{{ ladderOf(field).intro }}</div>
+                  <div class="ladder">
+                    <template v-for="(st, i) in ladderOf(field).steps" :key="i">
+                      <span v-if="i" class="ladder-arrow">›</span>
+                      <el-tooltip :content="st.desc || st.name" placement="top" :show-after="200" :disabled="!st.desc">
+                        <span class="ladder-step" :style="{ '--lv': i / Math.max(ladderOf(field).steps.length - 1, 1) }">{{ st.name }}</span>
+                      </el-tooltip>
+                    </template>
+                  </div>
+                  <div v-if="ladderOf(field).rest" class="ladder-intro">{{ ladderOf(field).rest }}</div>
+                </template>
+                <!-- 标签：都是短词 → 小圆角标签；有长句（如世界规则）→ 列表，长句做成圆角标签很难读 -->
+                <div v-else-if="field.type === 'tags' && values[activeKey][field.key].every((t) => String(t).length <= 14)" class="chips">
+                  <span v-for="t in values[activeKey][field.key]" :key="t" class="chip">{{ t }}</span>
+                </div>
+                <ul v-else-if="field.type === 'tags'" class="rule-list">
+                  <li v-for="t in values[activeKey][field.key]" :key="t">{{ t }}</li>
+                </ul>
+                <SpecTree v-else :items="summaryOf(field)" root compact />
+              </div>
+            </template>
+          </div>
+          <el-empty v-else-if="activeCategory.fields.length" :image-size="70"
+                    description="这一类还没有填写，从下面挑一项开始，或者用「AI 补全本分类」" />
+          <div v-if="emptyFields.length" class="more-fields">
+            <span class="more-label">还可以补充：</span>
+            <el-button v-for="field in emptyFields" :key="field.key" size="small" round :icon="Plus" @click="openField(field)">
+              {{ field.label }}
+            </el-button>
+          </div>
+        </template>
 
         <el-button
           v-if="editMode && activeCategory.fields.length"
@@ -102,23 +182,20 @@
         </el-button>
       </el-card>
 
-      <!-- 设定预览 -->
-      <el-card class="box-card preview-card" shadow="never">
-        <template #header>
-          <div class="card-header">
-            <span class="card-title">设定预览</span>
-            <div>
-              <el-button link type="primary" :disabled="!spec.length" @click="jsonVisible = true">查看 JSON</el-button>
-            </div>
-          </div>
-        </template>
-        <el-empty v-if="!spec.length" description="还没有选择任何设定" :image-size="80" />
-        <div v-for="c in spec" :key="c.key" class="preview-cat">
-          <div class="preview-cat-title" @click="activeKey = c.key">{{ c.label }}</div>
-          <SpecTree :items="c.items" root />
-        </div>
-      </el-card>
     </div>
+
+    <!-- AI 看到的设定（原来右侧的「设定预览」栏） -->
+    <el-drawer v-model="previewVisible" title="AI 看到的设定" size="420px" append-to-body>
+      <div class="muted drawer-hint">只包含你选择 / 填写过的内容，写正文和 AI 构思时就是按这份设定生成的</div>
+      <el-empty v-if="!spec.length" description="还没有选择任何设定" :image-size="80" />
+      <div v-for="c in spec" :key="c.key" class="preview-cat">
+        <div class="preview-cat-title" @click="activeKey = c.key; previewVisible = false">{{ c.label }}</div>
+        <SpecTree :items="c.items" root />
+      </div>
+      <template #footer>
+        <el-button :disabled="!spec.length" @click="jsonVisible = true">查看 JSON</el-button>
+      </template>
+    </el-drawer>
 
     <FieldEditor
       v-model="fieldEditor.visible"
@@ -170,11 +247,12 @@
 <script setup>
 import { computed, h, onMounted, provide, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
-import { Collection, CopyDocument, Delete, Edit, MagicStick, Plus, RefreshLeft } from '@element-plus/icons-vue'
+import { Check, Collection, CopyDocument, Delete, Document, Edit, EditPen, InfoFilled, MagicStick, MoreFilled, Operation, Plus, RefreshLeft, View } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import FieldEditor from './FieldEditor.vue'
 import CategoryEditor from './CategoryEditor.vue'
 import SpecTree from './SpecTree.vue'
+import GroupCardGrid from './GroupCardGrid.vue'
 import AiFillSettings from './AiFillSettings.vue'
 import { generateIdeas } from '@/api/novelGen'
 import { errorMessage } from '@/api/request'
@@ -185,7 +263,7 @@ import { applyMaterial, applyPlanItem, resolveVersions } from '@/novel-options/m
 import { useBlockedBooks } from '@/components/material/blockedBooks'
 import { getMaterial, isMultiVersion, materialVariants, recordMaterialUse } from '@/api/material'
 import MaterialPicker from '@/components/material/MaterialPicker.vue'
-import { buildSpec, clone, initValues, isFilled, newGroupItem, specToJson, uid, upgradeConfig } from '@/novel-options/schema'
+import { buildSpec, clone, initValues, isFilled, newGroupItem, specToJson, summarizeFields, syncBuiltinDescs, uid, upgradeConfig } from '@/novel-options/schema'
 
 /**
  * 小说设定编辑器（原「小说创作」页），嵌在工作区中使用。
@@ -220,6 +298,64 @@ function filledCount(cat) {
   return cat.fields.filter((f) => isFilled(f, values[cat.key])).length
 }
 
+/** 导航上的进度点：没填 / 填了一部分 / 填了大半 */
+function progressOf(cat) {
+  const n = filledCount(cat)
+  if (!n) return 'empty'
+  return n / Math.max(cat.fields.length, 1) >= 0.6 ? 'full' : 'part'
+}
+
+/* ---- 内容卡片：填过的字段只显示内容，点一下才展开成表单；空着的收进「还可以补充」 ---- */
+const openFields = reactive(new Set())   // 正在编辑的字段 `分类.字段`
+const fieldId = (field) => `${activeKey.value}.${field.key}`
+const filled = (field) => isFilled(field, values[activeKey.value])
+// 分组（角色卡、阶段表、背景卡…）本身就是可增删的列表：有内容就一直展开
+const isOpen = (field) => openFields.has(fieldId(field)) || (field.type === 'group' && filled(field))
+const shownFields = computed(() => (activeCategory.value?.fields || []).filter((f) => filled(f) || openFields.has(fieldId(f))))
+const emptyFields = computed(() => (activeCategory.value?.fields || []).filter((f) => !filled(f) && !openFields.has(fieldId(f))))
+// 长文本、分组、带细分选项的选择项占满一行，其余两列排
+const isWide = (field) => {
+  if (['textarea', 'group'].includes(field.type)) return true
+  const picked = values[activeKey.value]?.[field.key]?.selected || []
+  return (field.options || []).some((o) => o.children?.length && picked.includes(o.value))
+}
+const summaryOf = (field) => summarizeFields([field], values[activeKey.value])
+
+// 分组（除了角色卡这种自带卡片视图的）一律用卡片网格；有内容的才算「填过」，空分组在「还可以补充」里
+const isGroupGrid = (field) => field.type === 'group' && field.display !== 'characterCards' && isOpen(field)
+
+/** 力量体系文本 → 阶梯：「1. 学徒：能做到…（突破：…）」这样的行是一级；其余行是简介 / 补充 */
+const LADDER_LINE = /^\s*(\d+)[.、．)]\s*([^：:（(\n]{1,16})\s*[：:]?\s*(.*)$/
+function ladderOf(field) {
+  if (field.key !== 'powerSystem') return { steps: [] }
+  const lines = String(values[activeKey.value]?.[field.key] || '').split('\n')
+  const steps = []
+  const intro = []
+  const rest = []
+  for (const line of lines) {
+    const m = line.match(LADDER_LINE)
+    if (m) steps.push({ name: m[2].trim(), desc: m[3].trim() })
+    else if (line.trim() && !/^境界/.test(line.trim())) (steps.length ? rest : intro).push(line.trim())
+  }
+  return steps.length >= 2 ? { steps, intro: intro.join('\n'), rest: rest.join('\n') } : { steps: [] }
+}
+
+function openField(field) {
+  openFields.add(fieldId(field))
+}
+function closeField(field) {
+  openFields.delete(fieldId(field))
+}
+
+const previewVisible = ref(false)
+function onMore(cmd) {
+  if (cmd === 'picker') openPicker()
+  else if (cmd === 'preview') previewVisible.value = true
+  else if (cmd === 'json') jsonVisible.value = true
+  else if (cmd === 'structure') editMode.value = !editMode.value
+  else if (cmd === 'reset') resetAll()
+}
+
 let ready = false
 
 async function loadSchema(useSaved = true) {
@@ -234,7 +370,8 @@ async function loadSchema(useSaved = true) {
     schemaVersion.value = res.data.schemaVersion || 1
     templates.value = res.data.elementTemplates
     genericSuggestions.value = res.data.genericSuggestions
-    const saved = useSaved && props.config?.categories?.length ? upgradeConfig(clone(props.config), res.data) : null
+    const saved = useSaved && props.config?.categories?.length
+      ? syncBuiltinDescs(upgradeConfig(clone(props.config), res.data), res.data) : null
     categories.value = saved ? saved.categories : res.data.categories
     Object.keys(values).forEach((k) => delete values[k])
     categories.value.forEach((c) => (values[c.key] = saved?.values?.[c.key] || initValues(c.fields)))
@@ -465,29 +602,44 @@ const busyKeyOf = (path, field) => `${path.join('/')}|${field.key}`
  * 文本类字段（action）：polish = AI 润色，保留框内已写内容并扩写；generate = AI 生成，框内文字只当大致方向（可空）。
  * 文本写入后可「撤销」；选择 / 标签字段已有内容时先确认覆盖。
  */
-async function aiFillField(field, container, siblings, path, action = 'generate') {
+/**
+ * 字段的 AI 填写。how = {direction, keep}（AiRegenButton 的四种方式：给不给方向 × 参考不参考已有内容），
+ * 也兼容旧的 'polish' / 'generate'。文本：参考已有 = 在框内内容上润色扩写（+ 方向）；不参考 = 按方向重新写。
+ * 标签：参考已有 = 保留已有的再补充；不参考 = 重新生成（覆盖前确认）。
+ */
+async function aiFillField(field, container, siblings, path, how = 'generate') {
+  const opts = typeof how === 'string' ? { keep: how === 'polish', direction: '' } : { keep: !!how?.keep, direction: how?.direction || '' }
   const text = isTextField(field)
   const before = container[field.key]
-  const seed = text ? String(before ?? '').trim() : ''
-  if (action === 'polish' && !seed) {
-    ElMessage.warning('框里还没有内容，无法润色；可以先写几句，或用「AI 生成」')
+  const boxText = text ? String(before ?? '').trim() : ''
+  const action = text && opts.keep ? 'polish' : 'generate'
+  if (action === 'polish' && !boxText) {
+    ElMessage.warning('框里还没有内容，无法在已有内容上修改；可以先写几句，或者不勾「参考已有内容」')
     return
   }
-  if (!text && isFilled(field, container)) {
+  if (!text && !opts.keep && isFilled(field, container)) {
     try {
-      await ElMessageBox.confirm(`「${field.label}」已有内容，用 AI 生成的内容覆盖？`, 'AI 填写', { type: 'warning' })
+      await ElMessageBox.confirm(`「${field.label}」已有内容，用 AI 重新生成的内容覆盖？（想保留已有的，勾「参考已有内容」）`, 'AI 填写', { type: 'warning' })
     } catch {
       return
     }
   }
-  const label = action === 'polish' ? '润色' : '生成'
+  const label = opts.keep ? '修改' : '生成'
+  // 文本：polish 的 seed = 框内内容，direction 另给；generate 的 seed = 方向（旧的「生成」把框内文字当方向）
+  const seed = text ? (action === 'polish' ? boxText : opts.direction || (typeof how === 'string' ? boxText : '')) : ''
   const r = await aiCall({
     mode: 'field', path, fields: [fieldSchema(field)], current: currentValues(siblings, container, field.key),
-    ...(text ? { action, seed } : {})
-  }, `${busyKeyOf(path, field)}|${action}`, '', [...path, field.label],
-  { pick: { action: label, target: [...path, field.label].join(' › '), query: [...path, field.label, seed].filter(Boolean).join(' ') } })
+    ...(text ? { action, seed } : {}),
+    direction: opts.direction, keep: opts.keep, ...(!text && opts.keep ? { keepValue: before } : {})
+  }, `${busyKeyOf(path, field)}|ai`, '', [...path, field.label],
+  { pick: { action: label, target: [...path, field.label].join(' › '), query: [...path, field.label, opts.direction || boxText].filter(Boolean).join(' ') } })
   if (!r) return
-  if (!applyValue(field, container, r.values?.[field.key], addOption)) {
+  const value = r.values?.[field.key]
+  // 标签参考已有：模型只给新补充的，接在已有的后面（去重）
+  const merged = !text && opts.keep && field.type === 'tags' && Array.isArray(before)
+    ? [...new Set([...before, ...(Array.isArray(value) ? value : String(value ?? '').split(/[、，,]/)).map((v) => String(v).trim()).filter(Boolean)])]
+    : value
+  if (!applyValue(field, container, merged, addOption)) {
     ElMessage.warning('模型没有给出这个字段的内容，请重试')
     return
   }
@@ -498,7 +650,7 @@ async function aiFillField(field, container, siblings, path, action = 'generate'
   // 文本：给一个「撤销」，恢复成 AI 写入前的内容
   const n = ElNotification({
     type: 'success',
-    title: `AI 已${action === 'polish' ? '润色' : '生成'}「${field.label}」`,
+    title: `AI 已${label}「${field.label}」`,
     duration: 8000,
     message: h('span', ['可以继续修改，或 ', h('a', {
       style: 'cursor: pointer; color: var(--el-color-primary)',
@@ -760,13 +912,20 @@ onMounted(() => loadSchema(true))
 </script>
 
 <style scoped>
-.box-card {
-  border: none;
-  border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+/* 设定页的几个设计变量（之后整个工作区统一时再提到外层） */
+.settings-editor {
+  /* 工作区打开时取墨色主题的 --ws-*（styles/ink-theme.css），否则用默认值 */
+  --se-ink: var(--ws-ink, #303133);
+  --se-sub: var(--ws-sub, #909399);
+  --se-line: var(--ws-line, #e8e9ed);
+  --se-card: var(--ws-card, #fff);
+  --se-soft: var(--ws-soft, #f7f8fa);
+  --se-radius: var(--ws-radius, 10px);
 }
-.page-header {
-  margin-bottom: 12px;
+.box-card {
+  border: 1px solid var(--se-line);
+  border-radius: var(--se-radius);
+  box-shadow: none;
 }
 .page-header,
 .card-header {
@@ -775,45 +934,55 @@ onMounted(() => loadSchema(true))
   justify-content: space-between;
   gap: 12px;
 }
-.card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #303133;
+.page-header {
+  margin-bottom: 12px;
 }
-.header-hint {
-  margin-left: 12px;
-  font-size: 12px;
-  color: #909399;
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--se-ink);
+}
+.hint-icon {
+  color: var(--se-sub);
+  cursor: help;
 }
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
 }
-.edit-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #606266;
+.muted {
+  font-size: 12px;
+  color: var(--se-sub);
 }
 
 .create-body {
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr) 320px;
+  grid-template-columns: 180px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
 
 /* 导航 */
+.nav-card {
+  position: sticky;
+  top: 12px;
+}
 .nav-card :deep(.el-card__body) {
-  padding: 12px 10px;
+  padding: 12px 8px;
 }
 .nav-group-title {
-  margin: 6px 6px 6px;
+  margin: 4px 8px 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--se-sub);
 }
 .nav-group-title:not(:first-child) {
   margin-top: 16px;
@@ -822,14 +991,14 @@ onMounted(() => loadSchema(true))
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 10px;
+  padding: 8px 10px;
   font-size: 14px;
-  color: #303133;
-  border-radius: 6px;
+  color: var(--se-ink);
+  border-radius: 8px;
   cursor: pointer;
 }
 .nav-item:hover {
-  background: #f5f7fa;
+  background: var(--se-soft);
 }
 .nav-item.is-active {
   color: var(--el-color-primary);
@@ -843,10 +1012,21 @@ onMounted(() => loadSchema(true))
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.nav-count {
-  font-size: 12px;
-  font-weight: normal;
-  color: #909399;
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--el-color-primary);
+}
+.nav-dot.is-empty {
+  border-color: #c8cad0;
+}
+.nav-dot.is-part {
+  background: linear-gradient(90deg, var(--el-color-primary) 50%, transparent 50%);
+}
+.nav-dot.is-full {
+  background: var(--el-color-primary);
 }
 .nav-add {
   width: 100%;
@@ -856,7 +1036,7 @@ onMounted(() => loadSchema(true))
   margin: 8px 4px 0;
   font-size: 12px;
   line-height: 1.5;
-  color: #909399;
+  color: var(--se-sub);
 }
 
 /* 主区域 */
@@ -865,11 +1045,11 @@ onMounted(() => loadSchema(true))
   align-items: center;
   gap: 12px;
   padding-bottom: 12px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid #ebeef5;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--se-line);
 }
 .cat-icon {
-  font-size: 26px;
+  font-size: 24px;
   color: var(--el-color-primary);
 }
 .cat-title-wrap {
@@ -878,23 +1058,146 @@ onMounted(() => loadSchema(true))
 .cat-title {
   font-size: 17px;
   font-weight: 600;
-  color: #303133;
+  color: var(--se-ink);
 }
 .cat-desc {
   margin-top: 2px;
   font-size: 12px;
-  color: #909399;
+  color: var(--se-sub);
 }
 .add-field-btn {
   margin-top: 12px;
 }
 
-/* 预览 */
-.preview-card {
-  position: sticky;
-  top: 16px;
-  max-height: calc(100vh - 32px);
-  overflow: auto;
+/* 内容卡片 */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+  gap: 12px;
+}
+.field-card {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--se-card);
+  border: 1px solid var(--se-line);
+  border-radius: var(--se-radius);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.field-card.wide {
+  grid-column: 1 / -1;
+}
+.field-card.is-reading {
+  cursor: pointer;
+}
+.field-card.is-reading:hover {
+  border-color: var(--el-color-primary-light-5);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
+.field-card.is-editing {
+  border-color: var(--el-color-primary-light-5);
+  box-shadow: 0 0 0 3px var(--el-color-primary-light-9);
+}
+.field-card.is-editing :deep(.option-field) {
+  padding: 0;
+}
+.fc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.fc-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--se-sub);
+}
+.fc-edit {
+  margin-left: auto;
+  color: var(--se-sub);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.field-card.is-reading:hover .fc-edit {
+  opacity: 1;
+}
+.card-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.more-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--se-line);
+}
+.more-fields .el-button + .el-button {
+  margin-left: 0;
+}
+.more-label {
+  font-size: 13px;
+  color: var(--se-sub);
+}
+
+.field-card.is-group {
+  cursor: default;
+}
+.ladder-intro {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--se-ink);
+  white-space: pre-wrap;
+}
+.ladder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0;
+}
+.ladder-step {
+  padding: 4px 10px;
+  font-size: 13px;
+  color: var(--se-ink);
+  /* 越往上越深：颜色随等级加深 */
+  background: color-mix(in srgb, var(--el-color-primary) calc(8% + var(--lv) * 30%), #fff);
+  border-radius: 999px;
+  cursor: default;
+}
+.ladder-arrow {
+  color: var(--se-sub);
+}
+.rule-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--se-ink);
+}
+.rule-list li::marker {
+  color: var(--el-color-primary);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  padding: 2px 10px;
+  font-size: 13px;
+  color: var(--se-ink);
+  background: var(--se-soft);
+  border: 1px solid var(--se-line);
+  border-radius: 999px;
+}
+
+/* AI 看到的设定（抽屉） */
+.drawer-hint {
+  margin-bottom: 12px;
 }
 .preview-cat + .preview-cat {
   margin-top: 14px;
@@ -911,7 +1214,7 @@ onMounted(() => loadSchema(true))
 .json-hint {
   margin: 4px 0 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--se-sub);
 }
 .json-box {
   max-height: 55vh;
@@ -920,19 +1223,20 @@ onMounted(() => loadSchema(true))
   overflow: auto;
   font-size: 12px;
   line-height: 1.5;
-  background: #f7f8fa;
-  border: 1px solid #e4e7ed;
+  background: var(--se-soft);
+  border: 1px solid var(--se-line);
   border-radius: 6px;
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1100px) {
   .create-body {
-    grid-template-columns: 180px minmax(0, 1fr);
+    grid-template-columns: 1fr;
   }
-  .preview-card {
-    grid-column: 1 / -1;
+  .nav-card {
     position: static;
-    max-height: none;
+  }
+  .field-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

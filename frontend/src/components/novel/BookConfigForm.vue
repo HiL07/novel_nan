@@ -43,18 +43,26 @@
       <el-input v-model="cfg.sellingPoint" maxlength="200" placeholder="可选，如：每一卷探索一座新的浮空城，主角靠偷学禁咒越级" />
     </el-form-item>
     <el-form-item label="文风">
-      <el-input v-model="cfg.style" maxlength="60" placeholder="可选，如：轻松幽默 / 细腻 / 冷峻" />
+      <div class="style-row">
+        <el-input v-model="cfg.style" maxlength="60" placeholder="可选，如：轻松幽默 / 细腻 / 冷峻（也就是全书的基调）" />
+        <AiShortGen v-if="assist" :run="(d) => assist('style', d)" title="描述想要的感觉，AI 概括成文风" text="AI 生成"
+                    placeholder="如：读起来要像老朋友讲故事，偶尔自嘲，打斗干脆利落" @use="(v) => (cfg.style = v)" />
+      </div>
     </el-form-item>
   </el-form>
 </template>
 
 <script setup>
 import { AUDIENCES, CHAPTER_WORDS, GENRES, PLATFORMS, POVS, STORY_TAGS, TARGET_WORDS } from '@/api/novelPlan'
+import AiShortGen from '@/components/ai/AiShortGen.vue'
 
 const cfg = defineModel({ type: Object, required: true })
+// (kind, text) => Promise<string>：自动规划页传进来（AI 生成文风）；工作区「作品定位」对话框里不传就不显示
+defineProps({ assist: { type: Function, default: null } })
 </script>
 
 <style scoped>
 .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 8px; }
 .grid :deep(.el-select) { width: 100%; }
+.style-row { display: flex; gap: 8px; align-items: center; width: 100%; }
 </style>

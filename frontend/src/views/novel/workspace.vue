@@ -68,15 +68,13 @@
     </el-card>
 
     <el-card v-if="novel" class="box-card" shadow="never">
-      <el-tabs v-model="tab">
+      <!-- 新工作区：规划期间只显示「自动规划」（其他标签头藏起来，面板不卸载——写进时要用设定编辑器）；写进后自动规划消失 -->
+      <el-alert v-if="planning" type="info" show-icon :closable="false" class="frame-tip"
+                title="新工作区：先在「自动规划」里搭好框架（参数 · 灵感 → 设定 → 全书骨架），写进工作区后，设定 / AI 构思 / 写作 / 故事账本 / 世界书会出现" />
+      <el-tabs v-model="tab" :class="{ 'planning-tabs': planning }">
         <!-- ===================== 设定 ===================== -->
         <el-tab-pane name="settings">
-          <template #label>设定<el-badge v-if="settingsDirty" is-dot class="dirty-dot" /></template>
-          <div class="positioning">
-            <span class="muted">作品定位：</span>
-            <span>{{ positioningText || '未填（平台 / 题材 / 读者 / 卖点…，写正文时会带上）' }}</span>
-            <el-button link type="primary" @click="openBookConfig">修改</el-button>
-          </div>
+          <template #label><span>设定</span><el-badge v-if="settingsDirty" is-dot class="dirty-dot" /></template>
           <el-dialog v-model="bookConfigDialog.visible" title="作品定位 / 写作参数" width="720px" append-to-body>
             <BookConfigForm v-if="bookConfigDialog.cfg" v-model="bookConfigDialog.cfg" />
             <template #footer>
@@ -92,6 +90,11 @@
             :ai="{ apiModel, localModels, adapters, llama, model: novel.model }"
             @change="settingsDirty = true"
           >
+            <template #lead>
+              <span class="muted">作品定位</span>
+              <span class="positioning-text">{{ positioningText || '未填（平台 / 题材 / 读者 / 卖点…，写正文时会带上）' }}</span>
+              <el-button link type="primary" @click="openBookConfig">修改</el-button>
+            </template>
             <template #actions>
               <el-button type="primary" :icon="Check" :loading="savingSettings" @click="saveSettings()">保存设定</el-button>
             </template>
@@ -99,22 +102,26 @@
         </el-tab-pane>
 
         <!-- ===================== 自动规划 ===================== -->
-        <el-tab-pane label="自动规划" name="plan" lazy>
+        <el-tab-pane v-if="planning" label="自动规划" name="plan" lazy>
+          <!-- :key = 工作区 id：页面是 keep-alive 复用的，切换工作区时必须整个重建，否则会带着上一个工作区的草稿（还会存进新工作区） -->
           <PlanWizard
+            :key="novel.id"
             :novel-id="novel.id"
             :chapter-count="novel.chapters.length ? Math.max(...novel.chapters.map((c) => c.index)) : 0"
             :initial-premise="String(route.query.plan || '')"
             :apply-settings="applyPlanSettings"
             :book="novel.book || null"
             :book-config="novel.bookConfig || null"
-            :continue-signal="planContinue"
             @applied="onPlanApplied"
           />
         </el-tab-pane>
 
         <!-- ===================== 构思 ===================== -->
-        <el-tab-pane label="AI 构思" name="ideas" lazy>
+        <el-tab-pane name="ideas" lazy>
+          <template #label><span>AI 构思</span></template>
+          <!-- 同上：构思结果、大纲草稿、勾选记录都是按工作区的，切换工作区要重建 -->
           <IdeaPanel
+            :key="novel.id"
             ref="ideaRef"
             :novel="novel"
             :read-settings="readSettings"
@@ -130,7 +137,8 @@
         </el-tab-pane>
 
         <!-- ===================== 写作 ===================== -->
-        <el-tab-pane label="写作" name="write">
+        <el-tab-pane name="write">
+          <template #label><span>写作</span></template>
           <div class="write-grid">
             <!-- 章节列表 -->
             <div class="chapter-col">
@@ -182,12 +190,7 @@
                       <span>第{{ outlineNext.index }}章 {{ outlineNext.title }}</span>
                       <el-button link type="primary" :disabled="busy" @click="fillFromOutline">按大纲填入</el-button>
                     </template>
-                    <template v-else-if="novel.book && novel.outline?.chapters?.length">
-                      <el-tag size="small" type="warning">大纲已写完</el-tag>
-                      <el-button link type="primary" :disabled="busy" @click="continuePlan">
-                        按全书骨架规划接下来 10 章
-                      </el-button>
-                    </template>
+                    <!-- 「按全书骨架规划接下来 10 章」依赖自动规划的大纲步骤，大纲步骤先拿掉了，按钮一起隐藏（docs/待办.md「待定」） -->
                     <el-button link type="primary" :icon="MagicStick" :disabled="busy" @click="tab = 'ideas'">AI 构思本章（可结合素材库）</el-button>
                   </div>
                 </el-form-item>
@@ -345,13 +348,14 @@
         <!-- ===================== 故事账本 ===================== -->
         <el-tab-pane name="facts">
           <template #label>
-            故事账本<el-badge v-if="openForeshadows" :value="openForeshadows" type="warning" class="facts-badge" />
+            <span>故事账本</span><el-badge v-if="openForeshadows" :value="openForeshadows" type="warning" class="facts-badge" />
           </template>
           <FactsPanel :novel-id="novel.id" :locked="!!busy" :reload-key="factsKey" @open-count="(n) => (openForeshadows = n)" />
         </el-tab-pane>
 
         <!-- ===================== 世界书 ===================== -->
-        <el-tab-pane label="世界书" name="worldbook" lazy>
+        <el-tab-pane name="worldbook" lazy>
+          <template #label><span>世界书</span></template>
           <WorldBook :novel-id="novel.id" :reload-key="factsKey" />
         </el-tab-pane>
       </el-tabs>
@@ -386,7 +390,7 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElTable, ElTableColumn, ElTag } from 'element-plus'
 import { Back, Check, CopyDocument, Delete, EditPen, MagicStick, VideoPause, VideoPlay, View } from '@element-plus/icons-vue'
@@ -480,6 +484,15 @@ const models = ref([])
 const inferState = ref(null)
 const loadError = ref('')
 const tab = ref('write')
+// 工作区搭好框架了没有：有全书骨架、保存过设定、或已经写过章节。没搭好之前只能用「自动规划」
+const framed = computed(() => !!(novel.value?.book || novel.value?.settings?.spec?.length || novel.value?.chapters?.length))
+// 规划中：打开时还没搭框架。只显示「自动规划」；第一次「写进工作区」后关掉（不直接用 framed：写进时设定先保存，framed 会提前变）
+const planning = ref(false)
+watch([tab, planning], ([t, p]) => {
+  if (!novel.value) return
+  if (p && t !== 'plan') tab.value = 'plan'
+  else if (!p && t === 'plan') tab.value = 'settings'
+})
 const titleDraft = ref('')
 const editorRef = ref()
 const ideaRef = ref()
@@ -685,7 +698,8 @@ async function loadNovel() {
       form.title = ''
       form.goal = ''
       fillFromOutline()
-      tab.value = n.settings.spec ? 'write' : 'settings'
+      planning.value = !framed.value
+      tab.value = planning.value ? 'plan' : n.settings.spec?.length ? 'write' : 'settings'
       // 回到页面时接上仍在进行的生成任务
       job.value = s.activeJob && s.activeJob.novelId === n.id ? s.activeJob : null
     }
@@ -725,11 +739,6 @@ async function saveBookConfig() {
   } finally {
     bookConfigDialog.saving = false
   }
-}
-const planContinue = ref(0)
-function continuePlan() {
-  planContinue.value++
-  tab.value = 'plan'
 }
 
 async function saveTitle() {
@@ -1017,6 +1026,12 @@ async function applyPlanSettings(items) {
 async function onPlanApplied() {
   await loadNovel()
   factsKey.value++
+  // 写设定时 spec 已经先保存了（framed 那时就变了），所以按「是不是还在规划中」判断
+  if (planning.value && framed.value) {
+    planning.value = false   // 第一次写进框架：自动规划消失，其他页出现，带作者去设定页看看
+    tab.value = 'settings'
+    ElMessage.success('框架已写进工作区，设定 / AI 构思 / 写作等页面已出现；设定页里每一项都能继续改')
+  }
 }
 
 /** 灵感墙「写进工作区」：设定元素 → 设定页按素材应用；构思方向 → AI 构思页的构思方向框（sessionStorage 交接，读完即删） */
@@ -1059,6 +1074,14 @@ watch(() => route.params.id, (id) => id && route.name === 'novelWorkspace' && lo
 watch(() => route.query.plan, (p) => { if (p) tab.value = 'plan' }, { immediate: true })
 onActivated(() => loadNovel().then(applyInspire).then(schedule))
 onDeactivated(() => clearTimeout(timer))
+
+// 墨色 + 赭红主题（styles/ink-theme.css）：只在工作区打开时挂到 <html> 上（弹窗 / 下拉挂在 body 下，也要一起变）
+const themeOn = () => document.documentElement.classList.add('ink-theme')
+const themeOff = () => document.documentElement.classList.remove('ink-theme')
+onMounted(themeOn)
+onActivated(themeOn)
+onDeactivated(themeOff)
+onBeforeUnmount(themeOff)
 </script>
 
 <style scoped>
@@ -1097,7 +1120,7 @@ onDeactivated(() => clearTimeout(timer))
 .chapter-edit {
   margin-top: 10px;
 }
-.positioning { display: flex; gap: 6px; align-items: center; font-size: 13px; margin-bottom: 10px; }
+.positioning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .outline-hint {
   display: flex;
   align-items: center;
@@ -1116,6 +1139,9 @@ onDeactivated(() => clearTimeout(timer))
   margin: 8px 0;
   font-size: 12px;
 }
+.frame-tip { margin-bottom: 10px; }
+/* 规划中：只露出「自动规划」标签头，其他面板留着不卸载（写进工作区要用设定编辑器） */
+.planning-tabs :deep(.el-tabs__item:not(#tab-plan)) { display: none; }
 .dirty-dot {
   margin-left: 4px;
 }
