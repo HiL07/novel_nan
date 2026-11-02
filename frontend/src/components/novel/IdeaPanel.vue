@@ -46,7 +46,7 @@
 
     <!-- 构思输入：方向 + 素材 -->
     <el-form label-width="90px" class="idea-form">
-      <el-form-item label="构思模型">
+      <el-form-item label="构思模型" data-anchor="模型与参考">
         <div class="mat-row">
           <el-radio-group v-model="source" size="small">
             <el-radio-button value="api">大模型（API）</el-radio-button>
@@ -117,7 +117,7 @@
           placeholder="可选：整体基调，如：黑暗压抑的废土求生，节奏快，带点黑色幽默（后续走向 / 书名 / 大纲 / 章节都会围绕它）"
         />
       </el-form-item>
-      <el-form-item label="构思方向">
+      <el-form-item label="构思方向" data-anchor="构思方向 · 后续走向">
         <div class="hint-box">
           <el-input
             v-model="hint"
@@ -226,7 +226,7 @@
     </el-form>
 
     <!-- 本次用到的素材 -->
-    <div v-if="last?.usedMaterials?.length" class="used">
+    <div v-if="last?.usedMaterials?.length" class="used" data-anchor="本次用到的素材">
       <span class="muted">提供给模型的素材：</span>
       <el-tooltip v-for="m in last.usedMaterials" :key="m.id" :content="m.auto ? `自动匹配 ${m.score} 分：${m.reason}` : '手动选择'" placement="top">
         <el-tag size="small" :type="m.auto ? 'success' : ''" effect="plain">{{ categoryOf(m.category)?.label }} · {{ m.title }}</el-tag>
@@ -237,7 +237,7 @@
     <div v-if="last && last.kind !== 'outline'" class="muted edit-tip">AI 给出的内容都可以直接修改后再采用</div>
 
     <!-- 书名候选 -->
-    <div v-if="last?.kind === 'title'" class="result">
+    <div v-if="last?.kind === 'title'" class="result" data-anchor="书名候选">
       <div v-for="(t, i) in last.result.titles" :key="i" class="idea-card">
         <div class="idea-head">
           <el-input v-model="t.title" size="small" class="idea-input" maxlength="100"><template #prepend>书名</template></el-input>
@@ -249,7 +249,7 @@
     </div>
 
     <!-- 章节方案 -->
-    <div v-if="last?.kind === 'chapter'" class="result">
+    <div v-if="last?.kind === 'chapter'" class="result" data-anchor="章节方案">
       <div v-for="(o, i) in last.result.options" :key="i" class="idea-card">
         <div class="idea-head">
           <el-input v-model="o.title" size="small" class="idea-input" maxlength="60"><template #prepend>第{{ last.nextIndex }}章</template></el-input>
@@ -261,7 +261,7 @@
     </div>
 
     <!-- 大纲草稿（可编辑，采用后保存到工作区） -->
-    <div v-if="draft" class="result">
+    <div v-if="draft" class="result" data-anchor="大纲草稿">
       <div class="outline-head">
         <b>大纲草稿</b>
         <span class="muted">可直接修改，点「采用大纲」后保存到工作区，写作时按章自动填入标题与目标</span>
@@ -274,7 +274,7 @@
     </div>
 
     <!-- 已采用的大纲 -->
-    <div v-if="novel.outline && !draft" class="result">
+    <div v-if="novel.outline && !draft" class="result" data-anchor="已采用的大纲">
       <div class="outline-head">
         <b>已采用的大纲</b>
         <span class="muted">保存于 {{ novel.outline.savedAt }}</span>
@@ -735,7 +735,7 @@ async function clearOutline() {
 .cat-mark {
   margin-left: 4px;
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .direction-bar {
   display: flex;
@@ -756,7 +756,7 @@ async function clearOutline() {
   margin-bottom: 6px;
   font-size: 13px;
   line-height: 1.6;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 6px;
 }
 .direction-card.polished {
@@ -854,7 +854,7 @@ async function clearOutline() {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .ol-ledger {
   display: flex;
@@ -871,7 +871,7 @@ async function clearOutline() {
   margin-top: 2px;
 }
 .warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .used {
   margin: 4px 0 10px;
@@ -884,7 +884,7 @@ async function clearOutline() {
   margin-bottom: 8px;
   font-size: 13px;
   line-height: 1.7;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
 }
 .idea-input {
@@ -909,7 +909,7 @@ async function clearOutline() {
   margin-bottom: 6px;
   font-size: 13px;
   line-height: 1.7;
-  border-left: 3px solid #e4e7ed;
+  border-left: 3px solid var(--el-border-color-light);
 }
 .outline :deep(.ol-chapter.next) {
   border-left-color: var(--el-color-success);

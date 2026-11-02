@@ -1,9 +1,8 @@
 import request, { aiRequest } from './request'
 
 /**
- * 自动规划（docs/自动规划.md），两条路线：
- * - 故事优先（mode: 'story'，不依赖素材库）：写作参数 + 灵感 → 全书骨架 → 设定 → 素材点睛（可选）→ 10 章大纲 → 审稿 → 写进工作区
- * - 素材优先：一句构思 → 拆需求 → 选素材 → 设定草案 → 10 章大纲 + 伏笔计划 → 审稿 → 写进工作区
+ * 自动规划（docs/自动规划.md），故事优先（不依赖素材库）：写作参数 + 灵感 → 设定 → 全书骨架 + 人物 / 元素 → 写进工作区；
+ * 素材点睛 / 10 章大纲 / 审稿的接口还在（续规划和以后用）。原来的「素材优先」路线 2026-11-02 删掉了
  * 只产出设定 / 大纲 / 计划伏笔，不写正文。模型步骤经 Java（带模型配置、组装素材）；草稿与写入直接调 Python。
  * model = {source: api, configId?} | {source: gguf} | {source: local, baseId}（components/persona/ModelPicker）
  */
@@ -23,15 +22,11 @@ export const planCast = (novelId, body) => java(novelId, 'cast', body)
 /** 故事优先 ④ {settings, idea?, bookConfig?, excludeBooks?, stage?, model} → {suggestions[{target, kind, index, name, suggestion, fields, sources, leaks}], materials[], searched, usage} */
 export const planEnrich = (novelId, body) => java(novelId, 'enrich', body)
 
-/** ① {premise, tone?, conditions?, stage?, model} → {summary, needs[{category, query, count, role, why}], stage, opening, startIndex, usage} */
-export const planNeeds = (novelId, body) => java(novelId, 'needs', body)
-/** ② {needs, excludeBooks?, stage?} → {groups[{need, items[{material, score, variant, matchedLabel, from: search|weak, tier, fit}], hidden}], reranked}（本地，不花 token） */
-export const planRetrieve = (novelId, body) => java(novelId, 'retrieve', body)
-/** ③ {premise, tone?, stage?, materialIds, materialVariants?, model} → {draft{title, world, characters[], elements[], stages[]}, issues[], usage} */
+/** 设定（世界 + 主角）{premise?, idea?, bookConfig?, book?, materialIds?, materialVariants?, model} → {draft{world, characters[], elements[], stages[]}, issues[], usage} */
 export const planSettings = (novelId, body) => java(novelId, 'settings', body)
-/** ④ {premise, tone?, settings, materialIds?, stage?, count?, model} → {outline{title, logline, synopsis, chapters[], foreshadows[], clocks[]}, issues[], usage} */
+/** 10 章大纲 {premise?, idea?, bookConfig?, book?, settings, materialIds?, count?, model} → {outline{title, logline, synopsis, chapters[], foreshadows[], clocks[]}, issues[], usage} */
 export const planOutline = (novelId, body) => java(novelId, 'outline', body)
-/** ⑤ {premise, tone?, settings, outline, stage?, model} → {chapters[{index, problems[], revised?}], overall[], codeIssues[], usage} */
+/** 审稿 {premise?, idea?, bookConfig?, book?, settings, outline, model} → {chapters[{index, problems[], revised?}], overall[], codeIssues[], usage} */
 export const planReview = (novelId, body) => java(novelId, 'review', body)
 
 /** 写进工作区：大纲 + 账本里的计划伏笔 / 定时事件（设定由页面写进设定编辑器后保存）→ {outline, ids, planned} */

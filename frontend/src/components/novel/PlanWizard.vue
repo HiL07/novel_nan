@@ -1,28 +1,13 @@
 <template>
   <div class="plan-wizard">
-    <div class="mode-bar">
-      <el-radio-group v-model="st.mode" size="small" :disabled="!!busy" @change="onMode">
-        <el-radio-button value="story">故事优先（不需要素材库）</el-radio-button>
-        <el-radio-button value="material" :disabled="libraryEmpty">素材优先</el-radio-button>
-      </el-radio-group>
-      <span v-if="libraryEmpty" class="muted">素材库是空的，只能走故事优先</span>
-    </div>
     <div class="intro muted">
-      <template v-if="story">
-        先定<b>写作参数</b>和<b>故事灵感</b> → AI 生成<b>设定</b>（世界规则、力量体系、世界机制、关键资源和主角）→
-        在设定的基础上搭<b>全书骨架</b>（分卷 + 阶段），同时按骨架配好<b>配角、势力 / 地点 / 物品 / 怪物和阶段表</b> → <b>写进工作区</b>。
-        每一步进入时 AI 先自动生成，每一块都能直接改、也能给个方向让 AI 重来；写进工作区之后在「设定」页里也都能继续改。
-        <b>不用素材库也能完整走下来</b>，只生成框架，不写正文。
-      </template>
-      <template v-else>
-        从一句构思出发，AI 按素材库给你选配角色 / 世界观 / 势力地点物品 / 阶段表，再规划 {{ CHAPTERS }} 章大纲和伏笔、定时事件计划。
-        <b>只生成写小说用的规划，不写正文</b>；每一步都可以改、可以重来，最后确认才写进工作区（设定 → 设定页，大纲 → AI 构思页的已采用大纲，伏笔计划 → 故事账本「计划中」）。
-        <template v-if="startIndex > 1">这本书已经写到第 {{ startIndex - 1 }} 章：规划第 {{ startIndex }}~{{ startIndex + CHAPTERS - 1 }} 章，只补新元素，不套开篇规则。</template>
-        <template v-else>工作区还没有章节 = <b>开篇</b>：前 3 章按开篇规则规划（开场冲突、主角欲望与缺陷、核心卖点、人物逐个登场、章末钩子）。</template>
-      </template>
+      先定<b>写作参数</b>和<b>故事灵感</b> → AI 生成<b>设定</b>（世界规则、力量体系、世界机制、关键资源和主角）→
+      在设定的基础上搭<b>全书骨架</b>（分卷 + 阶段），同时按骨架配好<b>配角、势力 / 地点 / 物品 / 怪物和阶段表</b> → <b>写进工作区</b>。
+      每一步进入时 AI 先自动生成，每一块都能直接改、也能给个方向让 AI 重来；写进工作区之后在「设定」页里也都能继续改。
+      <b>不用素材库也能完整走下来</b>，只生成框架，不写正文。
     </div>
 
-    <el-steps :active="stepIndex" finish-status="success" simple class="steps">
+    <el-steps v-if="!externalSteps" :active="stepIndex" finish-status="success" simple class="steps">
       <el-step v-for="s in steps" :key="s.key" :title="s.title" @click="goStep(s.key)" />
     </el-steps>
 
@@ -214,91 +199,13 @@
       </template>
     </div>
 
-    <!-- 素材优先 ① 构思 -->
-    <div v-show="st.step === 'premise'" class="pane">
-      <el-form label-width="84px">
-        <el-form-item label="一句构思">
-          <el-input v-model="st.premise" type="textarea" :rows="2" maxlength="500" show-word-limit
-                    placeholder="如：法师喜欢冒险 / 废柴少年靠收破烂逆袭 / 被退婚的女主开了家侦探社" />
-        </el-form-item>
-        <el-form-item label="基调"><el-input v-model="st.tone" maxlength="200" placeholder="可选，如：轻松幽默、热血、压抑悬疑" /></el-form-item>
-        <el-form-item label="补充要求">
-          <el-input v-model="st.conditions" type="textarea" :rows="2" maxlength="500"
-                    placeholder="可选，如：不要后宫；主角是女性；舞台是海岛群" />
-        </el-form-item>
-        <el-form-item label="模型"><ModelPicker v-model="model" store-key="nan_novel.plan.model" /></el-form-item>
-        <el-form-item label="屏蔽来源书">
-          <el-select v-model="st.excludeBooks" multiple filterable allow-create clearable placeholder="这些书的素材不用（可选）" style="width: 420px">
-            <el-option v-for="b in sourceBooks" :key="b" :label="b" :value="b" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <div class="ops">
-        <el-button type="primary" :loading="busy === 'needs'" :disabled="!!busy || !st.premise.trim()" @click="run(runNeeds)">下一步：拆出需要的素材</el-button>
-        <el-button :loading="busy === 'auto'" :disabled="!!busy || !st.premise.trim()" @click="runAuto">一键全自动（AI 自己选完，停在写入前）</el-button>
-        <span class="muted">约 4 次模型调用、1~2 分钟（大模型几分钱）；检索素材在本机，不花 token</span>
-      </div>
-      <div v-if="autoLog.length" class="auto-log"><div v-for="(l, i) in autoLog" :key="i">{{ l }}</div></div>
-    </div>
-
-    <!-- 素材优先 ② 选素材 -->
-    <div v-show="st.step === 'materials'" class="pane">
-      <template v-if="st.needs">
-        <div class="muted">AI 的理解：{{ st.needs.summary }}（{{ stageText }}）</div>
-        <div class="section-head"><span class="col-title">检索需求</span><span class="muted">可以改检索词 / 数量、删掉、加一条，再「检索素材」</span></div>
-        <div v-for="(n, i) in st.needs.needs" :key="i" class="need-row">
-          <el-select v-model="n.category" size="small" style="width: 100px">
-            <el-option v-for="c in MATERIAL_CATEGORIES" :key="c.code" :label="c.label" :value="c.code" />
-          </el-select>
-          <el-input v-model="n.query" size="small" style="flex: 1" />
-          <el-input-number v-model="n.count" size="small" :min="1" :max="6" style="width: 96px" />
-          <span class="muted why">{{ n.why }}</span>
-          <el-button link type="danger" size="small" @click="st.needs.needs.splice(i, 1)">删除</el-button>
-        </div>
-        <div class="ops">
-          <el-button size="small" @click="st.needs.needs.push({ category: 'character', query: '', count: 3, role: '', why: '' })">加一条</el-button>
-          <el-button type="primary" size="small" :loading="busy === 'retrieve'" :disabled="!!busy" @click="run(runRetrieve)">检索素材</el-button>
-        </div>
-      </template>
-      <template v-if="st.groups">
-        <div class="section-head"><span class="col-title">候选素材（已选 {{ pickedIds.length }}）</span>
-          <span class="muted">勾选要用的；「相关度低」= 这条需求没有素材过相关度线，给了最接近的，自己判断</span></div>
-        <div v-for="(g, gi) in st.groups" :key="gi" class="group">
-          <div class="group-head">{{ categoryOf(g.need.category)?.label || '' }} · {{ g.need.query || g.need.why }}
-            <span class="muted">{{ g.need.why }}</span>
-            <span v-if="g.hidden" class="muted">（挡掉 {{ g.hidden }} 条超出阶段量级的）</span>
-          </div>
-          <div v-if="!g.items.length" class="muted">没有找到，设定里这部分由 AI 自己构思</div>
-          <div v-for="it in g.items" :key="it.material.id" class="mat" :class="{ on: st.picked[it.material.id] }">
-            <el-checkbox v-model="st.picked[it.material.id]" />
-            <div class="mat-body">
-              <b>{{ it.material.title }}</b>
-              <el-tag v-if="it.from === 'weak'" size="small" type="warning" effect="plain">相关度低</el-tag>
-              <el-tag v-if="it.score != null" size="small" effect="plain">相关 {{ it.score }}</el-tag>
-              <el-tag v-if="it.tier" size="small" type="info" effect="plain">量级 {{ it.tier }}</el-tag>
-              <el-tag v-if="it.fit === 'stretch'" size="small" type="warning" effect="plain">略超阶段</el-tag>
-              <span v-if="it.material.sourceBook" class="muted">《{{ it.material.sourceBook }}》</span>
-              <div class="muted">{{ it.material.summary }}</div>
-            </div>
-          </div>
-        </div>
-        <div class="ops">
-          <el-button type="primary" :loading="busy === 'settings'" :disabled="!!busy" @click="run(runSettings)">
-            下一步：用 {{ pickedIds.length }} 条素材生成设定草案
-          </el-button>
-        </div>
-      </template>
-    </div>
-
-    <!-- 设定草案（两条路线共用） -->
+    <!-- 设定（世界 + 主角） -->
     <div v-show="st.step === 'settings'" class="pane">
       <template v-if="draft">
-        <template v-if="story">
-          <AiBasis :md="settingsBasis" title="设定根据这些生成" />
-          <RunSnapshot run-key="settings" />
-          <div class="muted mt">每一块都可以直接改；不满意的块点「AI 重新生成」单独重来——可以给一句方向，也可以勾「参考已有内容」在原来的基础上补充。
-            写进工作区之后在「设定」页里也能继续改。</div>
-        </template>
+        <AiBasis :md="settingsBasis" title="设定根据这些生成" />
+        <RunSnapshot run-key="settings" />
+        <div class="muted mt">每一块都可以直接改；不满意的块点「AI 重新生成」单独重来——可以给一句方向，也可以勾「参考已有内容」在原来的基础上补充。
+          写进工作区之后在「设定」页里也能继续改。</div>
         <IssueList :issues="st.settings.issues" />
         <!-- 按方向重写了一块后，模型指出其他块里和方向矛盾的句子：提醒一起改，免得设定前后矛盾（骨架会照着设定写） -->
         <div v-if="st.related?.items?.length" class="related">
@@ -313,8 +220,7 @@
           </div>
         </div>
         <el-form label-width="84px" class="mt">
-          <!-- 故事优先的书名在全书骨架那一步选（灵感的暂定名是候选之一），这里不再出现 -->
-          <el-form-item v-if="!story" label="书名"><el-input v-model="draft.title" maxlength="40" style="width: 300px" /></el-form-item>
+          <!-- 书名在全书骨架那一步选（灵感的暂定名是候选之一） -->
           <el-form-item label="世界规则">
             <div class="list-edit">
               <div v-for="(r, i) in draft.world.rules" :key="i" class="row">
@@ -334,114 +240,47 @@
           </el-form-item>
         </el-form>
 
-        <!-- 故事优先不生成世界背景卡（和世界规则重叠；设定页里的「世界背景卡」照旧可以自己加） -->
-        <template v-if="story">
-          <div class="section-head"><span class="col-title">力量体系 · 能力</span>
-            <PartRegen module="power" /><PartRegen module="abilities" /></div>
-          <div v-if="power && abilities" class="card">
-            <el-input v-model="power.intro" type="textarea" :autosize="{ minRows: 1 }" size="small" placeholder="怎么获得、怎么变强" />
-            <div v-for="(r, i) in power.realms" :key="'r' + i" class="need-row mt">
-              <el-tag size="small" effect="plain">{{ i + 1 }}</el-tag>
-              <el-input v-model="r.name" size="small" style="width: 120px" placeholder="境界" />
-              <el-input v-model="r.desc" size="small" style="flex: 2" placeholder="能做到什么" />
-              <el-input v-model="r.cost" size="small" style="flex: 1" placeholder="突破的门槛 / 代价" />
-              <el-button link type="danger" size="small" @click="power.realms.splice(i, 1)">删</el-button>
-            </div>
-            <el-button link size="small" @click="power.realms.push({ name: '', desc: '', cost: '' })">+ 境界</el-button>
-            <el-input v-model="power.beyond" size="small" class="mt"><template #prepend>更高层次</template></el-input>
-            <div class="grid2 mt">
-              <el-input v-model="abilities.innate" size="small"><template #prepend>先天</template></el-input>
-              <el-input v-model="abilities.acquired" size="small"><template #prepend>后天</template></el-input>
-            </div>
+        <!-- 不生成世界背景卡（和世界规则重叠；设定页里的「世界背景卡」照旧可以自己加） -->
+        <div class="section-head"><span class="col-title">力量体系 · 能力</span>
+          <PartRegen module="power" /><PartRegen module="abilities" /></div>
+        <div v-if="power && abilities" class="card">
+          <el-input v-model="power.intro" type="textarea" :autosize="{ minRows: 1 }" size="small" placeholder="怎么获得、怎么变强" />
+          <div v-for="(r, i) in power.realms" :key="'r' + i" class="need-row mt">
+            <el-tag size="small" effect="plain">{{ i + 1 }}</el-tag>
+            <el-input v-model="r.name" size="small" style="width: 120px" placeholder="境界" />
+            <el-input v-model="r.desc" size="small" style="flex: 2" placeholder="能做到什么" />
+            <el-input v-model="r.cost" size="small" style="flex: 1" placeholder="突破的门槛 / 代价" />
+            <el-button link type="danger" size="small" @click="power.realms.splice(i, 1)">删</el-button>
           </div>
-          <div class="grid2">
-            <div v-for="[k, lab] in [['mechanics', '世界机制'], ['resources', '关键资源']]" :key="k">
-              <div class="section-head"><span class="col-title">{{ lab }}</span>
-                <el-button link size="small" @click="(draft.world[k] ||= []).push({ title: '', desc: '' })">+ 一条</el-button>
-                <PartRegen :module="k" /></div>
-              <div v-if="k === 'mechanics'" class="muted field-tip mech-tip">这个世界怎么运转：制度、交易、周期性现象的具体做法和数字；每一章写作也都会带上。如：塔税按副本收益的 30% 征收。和世界规则写的是同一件事时只留一处</div>
-              <div v-for="(x, i) in draft.world[k]" :key="k + i" class="need-row">
-                <el-input v-model="x.title" size="small" style="width: 110px" />
-                <el-input v-model="x.desc" size="small" style="flex: 1" />
-                <el-button link type="danger" size="small" @click="draft.world[k].splice(i, 1)">删</el-button>
-              </div>
+          <el-button link size="small" @click="power.realms.push({ name: '', desc: '', cost: '' })">+ 境界</el-button>
+          <el-input v-model="power.beyond" size="small" class="mt"><template #prepend>更高层次</template></el-input>
+          <div class="grid2 mt">
+            <el-input v-model="abilities.innate" size="small"><template #prepend>先天</template></el-input>
+            <el-input v-model="abilities.acquired" size="small"><template #prepend>后天</template></el-input>
+          </div>
+        </div>
+        <div class="grid2">
+          <div v-for="[k, lab] in [['mechanics', '世界机制'], ['resources', '关键资源']]" :key="k">
+            <div class="section-head"><span class="col-title">{{ lab }}</span>
+              <el-button link size="small" @click="(draft.world[k] ||= []).push({ title: '', desc: '' })">+ 一条</el-button>
+              <PartRegen :module="k" /></div>
+            <div v-if="k === 'mechanics'" class="muted field-tip mech-tip">这个世界怎么运转：制度、交易、周期性现象的具体做法和数字；每一章写作也都会带上。如：塔税按副本收益的 30% 征收。和世界规则写的是同一件事时只留一处</div>
+            <div v-for="(x, i) in draft.world[k]" :key="k + i" class="need-row">
+              <el-input v-model="x.title" size="small" style="width: 110px" />
+              <el-input v-model="x.desc" size="small" style="flex: 1" />
+              <el-button link type="danger" size="small" @click="draft.world[k].splice(i, 1)">删</el-button>
             </div>
           </div>
-        </template>
-
-        <!-- 故事优先：设定这一步只有主角；配角、势力地点…、阶段表按骨架的阶段安排，在骨架那一步 -->
-        <template v-if="story">
-          <div class="section-head"><span class="col-title">主角</span><PartRegen module="lead" />
-            <span class="muted">配角、势力 / 地点 / 物品 / 怪物、阶段表在下一步按全书骨架安排</span></div>
-          <PlanCastCard v-for="c in leadChars" :key="'lead' + draft.characters.indexOf(c)" :item="c" lead />
-          <el-button v-if="!leadChars.length" link size="small" @click="draft.characters.unshift({ ...blankCharacter(), role: '主角', appearFrom: 1 })">+ 主角</el-button>
-        </template>
-        <template v-else>
-        <div class="section-head"><span class="col-title">人物（{{ draft.characters.length }}）</span>
-          <el-button link size="small" @click="draft.characters.push(blankCharacter())">+ 人物</el-button>
-          <PartRegen module="characters" /></div>
-        <div v-for="(c, i) in draft.characters" :key="'c' + i" class="card">
-          <div class="card-head">
-            <el-input v-model="c.name" size="small" style="width: 110px" placeholder="名字" />
-            <el-select v-model="c.role" size="small" style="width: 110px">
-              <el-option v-for="r in ROLE_LABELS" :key="r" :label="r" :value="r" />
-            </el-select>
-            <span class="muted">第</span><el-input-number v-model="c.appearFrom" size="small" :min="1" :max="999" controls-position="right" style="width: 80px" /><span class="muted">章登场</span>
-            <el-input v-model="c.tagline" size="small" style="flex: 1" placeholder="一句话人设" />
-            <el-button link type="danger" size="small" @click="draft.characters.splice(i, 1)">删除</el-button>
-          </div>
-          <div class="grid3">
-            <el-input v-model="c.goal" size="small"><template #prepend>想要</template></el-input>
-            <el-input v-model="c.fear" size="small"><template #prepend>缺陷 / 恐惧</template></el-input>
-            <el-input v-model="c.secret" size="small"><template #prepend>秘密</template></el-input>
-          </div>
-          <el-collapse class="more"><el-collapse-item title="更多（性格、能力、背景、成长、与主角关系）">
-            <div class="grid2">
-              <el-input :model-value="c.personality.join('、')" size="small" @update:model-value="c.personality = splitList($event)"><template #prepend>性格</template></el-input>
-              <el-input :model-value="c.abilities.join('、')" size="small" @update:model-value="c.abilities = splitList($event)"><template #prepend>能力</template></el-input>
-              <el-input v-model="c.relationToLead" size="small"><template #prepend>与主角</template></el-input>
-              <el-input v-model="c.arc" size="small"><template #prepend>成长弧光</template></el-input>
-            </div>
-            <el-input v-model="c.background" type="textarea" :rows="2" size="small" placeholder="背景故事" class="mt" />
-          </el-collapse-item></el-collapse>
-          <SourceLine :sources="c.sources" :adapted="c.adapted" :titles="materialTitles" />
         </div>
 
-        <div class="section-head"><span class="col-title">势力 / 地点 / 物品 / 怪物（{{ draft.elements.length }}）</span>
-          <PartRegen v-for="(lab, cat) in ELEMENT_LABELS" :key="cat" module="elements" :category="cat" /></div>
-        <div v-for="(e, i) in draft.elements" :key="'e' + i" class="card">
-          <div class="card-head">
-            <el-tag size="small">{{ ELEMENT_LABELS[e.category] }}</el-tag>
-            <el-input v-model="e.name" size="small" style="width: 150px" />
-            <span class="muted">量级</span><el-input-number v-model="e.tier" size="small" :min="1" :max="5" controls-position="right" style="width: 76px" />
-            <span class="muted">第</span><el-input-number v-model="e.appearFrom" size="small" :min="1" :max="999" controls-position="right" style="width: 80px" /><span class="muted">章登场</span>
-            <el-button link type="danger" size="small" @click="draft.elements.splice(i, 1)">删除</el-button>
-          </div>
-          <div v-for="(v, k) in e.fields" :key="k" class="field-line">
-            <span class="muted">{{ FIELD_LABELS[k] || k }}：</span>
-            <el-input :model-value="Array.isArray(v) ? v.join('、') : v" size="small"
-                      @update:model-value="e.fields[k] = Array.isArray(v) ? splitList($event) : $event" />
-          </div>
-          <SourceLine :sources="e.sources" :adapted="e.adapted" :titles="materialTitles" />
-        </div>
-
-        <div class="section-head"><span class="col-title">阶段表</span>
-          <span v-if="story" class="muted">{{ bookObj ? '由全书骨架算出（重新生成骨架会更新）' : '下一步搭好全书骨架后，会按骨架的阶段重算' }}</span>
-          <el-button link size="small" @click="draft.stages.push({ range: '', power: '', tierMax: 2, note: '' })">+ 阶段</el-button></div>
-        <div v-for="(s, i) in draft.stages" :key="'s' + i" class="need-row">
-          <el-input v-model="s.range" size="small" style="width: 90px" placeholder="1-10" />
-          <el-input v-model="s.power" size="small" style="flex: 1" placeholder="主角实力" />
-          <span class="muted">对手上限</span><el-input-number v-model="s.tierMax" size="small" :min="1" :max="5" style="width: 90px" />
-          <el-input v-model="s.note" size="small" style="flex: 1" placeholder="备注" />
-          <el-button link type="danger" size="small" @click="draft.stages.splice(i, 1)">删</el-button>
-        </div>
-        </template>
+        <!-- 设定这一步只有主角；配角、势力地点…、阶段表按骨架的阶段安排，在骨架那一步 -->
+        <div class="section-head"><span class="col-title">主角</span><PartRegen module="lead" />
+          <span class="muted">配角、势力 / 地点 / 物品 / 怪物、阶段表在下一步按全书骨架安排</span></div>
+        <PlanCastCard v-for="c in leadChars" :key="'lead' + draft.characters.indexOf(c)" :item="c" lead />
+        <el-button v-if="!leadChars.length" link size="small" @click="draft.characters.unshift({ ...blankCharacter(), role: '主角', appearFrom: 1 })">+ 主角</el-button>
         <div class="ops">
           <el-button :loading="busy === 'settings'" :disabled="!!busy" @click="run(runSettings)">整份重新生成设定</el-button>
-          <el-button v-if="story" type="primary" :loading="busy === 'book' || busy === 'cast'" :disabled="!!busy" @click="run(enterBook)">下一步：生成全书骨架</el-button>
-          <el-button v-else type="primary" :loading="busy === 'outline'" :disabled="!!busy" @click="run(runOutline)">
-            下一步：规划 {{ CHAPTERS }} 章
-          </el-button>
+          <el-button type="primary" :loading="busy === 'book' || busy === 'cast'" :disabled="!!busy" @click="run(enterBook)">下一步：生成全书骨架</el-button>
         </div>
       </template>
     </div>
@@ -561,24 +400,23 @@
 
     <!-- 写进工作区 -->
     <div v-show="st.step === 'apply'" class="pane">
-      <template v-if="draft && (story ? bookObj : outline)">
+      <template v-if="draft && bookObj">
         <div class="summary">
           <el-checkbox v-model="applyOpts.settings">
-            设定：{{ draft.characters.length }} 个人物、{{ draft.elements.length }} 个元素、{{ draft.world.rules.length }} 条世界规则<template v-if="story">、力量体系、世界机制、关键资源</template>、{{ draft.stages.length }} 行阶段表（追加进设定页，不覆盖已有的；之后都能在设定页里改）
+            设定：{{ draft.characters.length }} 个人物、{{ draft.elements.length }} 个元素、{{ draft.world.rules.length }} 条世界规则、力量体系、世界机制、关键资源、{{ draft.stages.length }} 行阶段表（追加进设定页，不覆盖已有的；之后都能在设定页里改）
           </el-checkbox>
-          <el-checkbox v-if="!story" v-model="applyOpts.outline">大纲：第 {{ outline.chapters[0]?.index }}~{{ outline.chapters.at(-1)?.index }} 章（替换这些章节的已采用大纲）+ {{ outline.foreshadows.length }} 条伏笔、{{ outline.clocks.length }} 个定时事件写进故事账本「计划中」</el-checkbox>
-          <el-checkbox v-if="story && bookObj" v-model="applyOpts.book">全书骨架（{{ bookObj.volumes.length }} 卷）和写作参数（写正文时作为「作品定位」）</el-checkbox>
+          <el-checkbox v-model="applyOpts.book">全书骨架（{{ bookObj.volumes.length }} 卷）和写作参数（写正文时作为「作品定位」）</el-checkbox>
           <el-checkbox v-model="applyOpts.title">书名改成《{{ applyTitle }}》</el-checkbox>
         </div>
         <div class="ops">
-          <el-button type="primary" :loading="busy === 'apply'" :disabled="!!busy || (!applyOpts.settings && !(story ? applyOpts.book || applyOpts.title : applyOpts.outline))" @click="runApply()">写进工作区</el-button>
+          <el-button type="primary" :loading="busy === 'apply'" :disabled="!!busy || (!applyOpts.settings && !applyOpts.book && !applyOpts.title)" @click="runApply()">写进工作区</el-button>
           <span v-if="st.appliedAt" class="muted">已于 {{ st.appliedAt }} 写入过一次（再写会重复追加设定）</span>
         </div>
       </template>
-      <div v-else class="muted">{{ story ? '先完成设定和全书骨架' : '先完成设定草案和大纲' }}</div>
+      <div v-else class="muted">先完成设定和全书骨架</div>
     </div>
 
-    <div v-if="autoLog.length && !['idea', 'premise'].includes(st.step)" class="auto-log mt"><div v-for="(l, i) in autoLog" :key="i">{{ l }}</div></div>
+    <div v-if="autoLog.length && st.step !== 'idea'" class="auto-log mt"><div v-for="(l, i) in autoLog" :key="i">{{ l }}</div></div>
     <TokenUsageBar v-if="usage.calls" :usage="usage" class="mt" />
   </div>
 </template>
@@ -596,10 +434,10 @@ import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import BookConfigForm from '@/components/novel/BookConfigForm.vue'
 import BookSkeleton from '@/components/novel/BookSkeleton.vue'
 import PlanCastCard from '@/components/novel/PlanCastCard.vue'
-import { MATERIAL_CATEGORIES, categoryOf, getMaterialSources } from '@/api/material'
+import { getMaterialSources } from '@/api/material'
 import {
-  ACTION_LABELS, DIRECTIONS, ELEMENT_LABELS, PACES, ROLE_LABELS, applyPlan, blankBookConfig, bookLayout, bookStages, getPlanDraft,
-  planAssist, planBook, planCast, planEnrich, planIdea, planNeeds, planOutline, planRetrieve, planReview, planSettings, planSettingsPart,
+  ACTION_LABELS, DIRECTIONS, ELEMENT_LABELS, PACES, applyPlan, blankBookConfig, bookLayout, bookStages, getPlanDraft,
+  planAssist, planBook, planCast, planEnrich, planIdea, planOutline, planReview, planSettings, planSettingsPart,
   savePlanDraft
 } from '@/api/novelPlan'
 import { errorMessage } from '@/api/request'
@@ -611,40 +449,27 @@ const props = defineProps({
   applySettings: { type: Function, required: true },   // (items) => Promise<{done, failed}>：写进设定编辑器并保存
   book: { type: Object, default: null },               // 工作区已保存的全书骨架（novel.book）
   bookConfig: { type: Object, default: null },         // 工作区已保存的写作参数（novel.bookConfig）
-  continueSignal: { type: Number, default: 0 }         // 写作页「按骨架规划接下来 10 章」：变化一次 = 自动续规划一次
+  continueSignal: { type: Number, default: 0 },        // 写作页「按骨架规划接下来 10 章」：变化一次 = 自动续规划一次
+  externalSteps: { type: Boolean, default: false }     // 步骤条由外面画（工作区书房左栏，用 expose 的 nav）
 })
 const emit = defineEmits(['applied'])
 
 const CHAPTERS = 10
-const MODE_KEY = 'nan_novel.plan.mode'
 // 故事优先到全书骨架为止就写进工作区（素材点睛 / 10 章大纲 / 审稿的代码还在，先不放进流程，见 docs/待办.md「待定」）
 const STORY_STEPS = [['idea', '参数 · 灵感'], ['settings', '设定'], ['book', '全书骨架'], ['apply', '写进工作区']]
-const MATERIAL_STEPS = [['premise', '构思'], ['materials', '选素材'], ['settings', '设定草案'], ['outline', `${CHAPTERS} 章大纲`],
-  ['review', '审稿'], ['apply', '写进工作区']]
 const IDEA_FIELDS = [['title', '暂定名'], ['core', '核心设定'], ['situation', '主角处境'], ['conflict', '核心冲突'], ['payoff', '爽点方向'], ['hook', '一句话卖点']]
 const FIELD_LABELS = { stance: '立场', feature: '特点', kind: '类型', detail: '描述', effect: '作用', appearance: '外形',
   abilities: '能力', weakness: '弱点', habitat: '栖息地' }
 const CHARACTER_LABELS = { tagline: '一句话人设', goal: '想要', fear: '缺陷 / 恐惧', secret: '秘密', background: '背景', arc: '成长弧光' }
-const PHASES = { opening: '开篇', early: '前期', mid: '中期', late: '后期', any: '不限' }
 
-const savedMode = () => {
-  try {
-    return localStorage.getItem(MODE_KEY) === 'material' ? 'material' : 'story'
-  } catch {
-    return 'story'
-  }
-}
 const blankState = () => ({
-  mode: savedMode(), step: savedMode() === 'story' ? 'idea' : 'premise',
+  step: 'idea',
   premise: '', tone: '', conditions: '', excludeBooks: [],
-  // 故事优先
   bookConfig: blankBookConfig(), directions: [], ideas: null, ideaPick: -1, idea: null, book: null, bookTitle: '',
   enrich: null, enrichOriginals: {},
   volumePlan: [], volumeCount: 0, pace: 'normal', partUndo: {}, related: null,
   customDirections: [], ideaFeedback: [], ideaRuns: [],
   castIssues: [], castAt: '', runs: {}, sig: {},   // 骨架这一步的人物 / 元素检查；每次 AI 生成的依据快照；生成时输入的指纹（改过才问要不要重来）   // 自定义创作方向；重新生成时的反馈（全部记录）；每批灵感的输入快照   // 骨架的分卷方向 / 卷数 / 节奏；设定分模块重来的撤销
-  // 素材优先
-  needs: null, groups: null, picked: {},
   settings: null, outline: null, review: null, originals: {}, appliedAt: ''
 })
 const st = reactive(blankState())
@@ -656,9 +481,8 @@ const libraryEmpty = ref(false)
 const usage = reactive({ source: 'api', calls: 0, promptTokens: 0, completionTokens: 0 })
 const applyOpts = reactive({ settings: true, outline: true, book: true, title: props.chapterCount === 0 })
 
-const story = computed(() => st.mode === 'story')
-const steps = computed(() => (story.value ? STORY_STEPS : MATERIAL_STEPS).map(([key, title]) => ({ key, title })))
-const stepIndex = computed(() => Math.max(0, steps.value.findIndex((s) => s.key === st.step)))
+const steps = STORY_STEPS.map(([key, title]) => ({ key, title }))
+const stepIndex = computed(() => Math.max(0, steps.findIndex((s) => s.key === st.step)))
 const startIndex = computed(() => props.chapterCount + 1)
 const opening = computed(() => startIndex.value === 1)
 const draft = computed(() => st.settings?.draft)
@@ -677,25 +501,17 @@ const regenIndex = ref(-1)
 const partBusy = ref('')
 const power = computed(() => draft.value.world.power)
 const abilities = computed(() => draft.value.world.abilities)
-/** 故事优先的设定一定有力量体系 / 能力两块（模型没给也留出空位，方便手填） */
+/** 设定一定有力量体系 / 能力两块（模型没给也留出空位，方便手填） */
 function ensureWorldSlots() {
   const w = draft.value?.world
-  if (!story.value || !w) return
+  if (!w) return
   w.power ||= { intro: '', realms: [], beyond: '' }
   w.abilities ||= { innate: '', acquired: '', dimensions: [] }
 }
-const stageText = computed(() => {
-  const s = st.needs?.stage
-  return s ? `${PHASES[s.phase] || s.phase}${s.tierMax ? `，对手不超过量级 ${s.tierMax}` : ''}` : ''
-})
-const allItems = computed(() => (st.groups || []).flatMap((g) => g.items))
-const pickedIds = computed(() => (story.value ? [] : allItems.value.filter((it) => st.picked[it.material.id]).map((it) => it.material.id)))
 const enrichTitles = computed(() => Object.fromEntries((st.enrich?.materials || []).map((m) => [m.id, `${m.title}${m.book ? `（《${m.book}》）` : ''}`])))
-const materialTitles = computed(() => ({ ...Object.fromEntries(allItems.value.map((it) => [it.material.id, it.material.title])), ...enrichTitles.value }))
-const applyTitle = computed(() => (story.value && (st.bookTitle || st.idea?.title)) || outline.value?.title || draft.value?.title || '')
+const applyTitle = computed(() => st.bookTitle || st.idea?.title || outline.value?.title || '')
 // 书名候选：骨架给的 3 个 + 选中灵感的暂定名（去重）；也可以自己输入
 const titleChoices = computed(() => [...new Set([...(bookObj.value?.titleOptions || []), st.idea?.title].filter(Boolean))])
-const splitList = (s) => String(s || '').split(/[、,，;；]/).map((x) => x.trim()).filter(Boolean)
 const chapterOf = (i) => outline.value?.chapters.find((c) => c.index === i)
 const blankCharacter = () => ({ name: '', role: '配角', tagline: '', personality: [], goal: '', fear: '', secret: '', abilities: [],
   background: '', arc: '', relationToLead: '', appearFrom: startIndex.value, sources: [], adapted: '' })
@@ -719,19 +535,23 @@ onMounted(async () => {
     if (res.code === 0) draftOwner = id
     if (res.code === 0 && res.data) {
       const d = res.data
-      if (typeof d.step === 'number') {   // 旧草稿（只有素材优先，步骤是序号）
-        d.mode = 'material'
-        d.step = MATERIAL_STEPS[d.step]?.[0] || 'premise'
+      if (typeof d.step === 'number' || d.mode === 'material') {
+        // 素材优先路线已删除：它的草稿（设定结构不同）不再读进来，只留构思和补充要求；下次自动保存会覆盖
+        st.premise = d.premise || ''
+        st.conditions = d.conditions || ''
+        ElMessage.info('「素材优先」路线已经删掉了，之前那份规划草稿不再使用，请重新规划')
+      } else {
+        delete d.mode
+        Object.assign(st, blankState(), d)
+        // 流程到骨架为止：停在点睛 / 大纲 / 审稿的旧草稿回到骨架
+        if (['enrich', 'outline', 'review'].includes(st.step)) st.step = 'book'
       }
-      Object.assign(st, blankState(), d)
-      // 故事优先现在到骨架为止：停在点睛 / 大纲 / 审稿的旧草稿回到骨架
-      if (st.mode === 'story' && ['enrich', 'outline', 'review'].includes(st.step)) st.step = 'book'
     }
   } catch {
     // 没有草稿
   }
   if (props.bookConfig && !st.bookConfig?.genre) st.bookConfig = { ...blankBookConfig(), ...props.bookConfig }
-  if (st.mode === 'story' && st.tone?.trim()) {
+  if (st.tone?.trim()) {
     if (!st.bookConfig.style?.trim()) st.bookConfig.style = st.tone.trim().slice(0, 60)
     st.tone = ''
   }
@@ -744,7 +564,6 @@ onMounted(async () => {
     const books = res.code === 0 ? res.data || [] : []
     sourceBooks.value = books.map((s) => s.book)
     libraryEmpty.value = res.code === 0 && !books.length
-    if (libraryEmpty.value && !story.value && !st.needs) onMode('story')
   } catch {
     // 拿不到来源书不影响规划
   }
@@ -756,33 +575,16 @@ watch(() => props.continueSignal, (v) => {
   if (v && v !== handledSignal) autoContinue()
 })
 
-function onMode(m) {
-  st.mode = m
-  try {
-    localStorage.setItem(MODE_KEY, m)
-  } catch {
-    // 记不住也没关系
-  }
-  if (!steps.value.some((s) => s.key === st.step)) st.step = steps.value[0].key
-}
-
 function goStep(key) {
-  if (story.value && !busy.value) {
-    // 故事优先：点步骤 = 进入那一步（还没生成过就自动生成；上一步改过会问要不要重新生成）
-    if (key === 'settings' && st.idea) return run(enterSettings)
-    if (key === 'book' && st.settings) return run(enterBook)
-    if (key === 'apply' && st.settings && st.book) st.step = key
-    if (key === 'idea') st.step = key
-    return
-  }
-  const ready = {
-    idea: true, premise: true, book: !!st.settings, materials: !!st.needs, settings: !!st.settings, enrich: !!st.settings,
-    outline: !!st.outline, review: !!st.review, apply: !!(st.settings && st.outline)
-  }
-  if (ready[key]) st.step = key
+  if (busy.value) return
+  // 点步骤 = 进入那一步（还没生成过就自动生成；上一步改过会问要不要重新生成）
+  if (key === 'settings' && st.idea) return run(enterSettings)
+  if (key === 'book' && st.settings) return run(enterBook)
+  if (key === 'apply' && st.settings && st.book) st.step = key
+  if (key === 'idea') st.step = key
 }
 
-/* ---------- 故事优先：进入一步时自动生成；上一步改过才问要不要重来（不覆盖手改） ---------- */
+/* ---------- 进入一步时自动生成；上一步改过才问要不要重来（不覆盖手改） ---------- */
 const settingsSig = computed(() => JSON.stringify([st.bookConfig, st.directions, st.premise.trim(), st.conditions.trim(), st.idea]))
 const bookSig = computed(() => JSON.stringify([settingsSig.value, draft.value?.world, leadChars.value, st.volumePlan, st.volumeCount, st.pace]))
 const askRegen = (msg) => ElMessageBox.confirm(msg, '上一步改过了', { confirmButtonText: '重新生成', cancelButtonText: '保留现在的', type: 'warning' })
@@ -902,16 +704,14 @@ function toggleDirection(d) {
 
 /* ---------- 每一步 ---------- */
 const base = () => {
-  const b = { premise: st.premise.trim(), tone: st.tone.trim(), conditions: st.conditions.trim(), stage: st.needs?.stage, model: model.value }
-  if (story.value) {
-    // 续规划时可能没有灵感：拿骨架的一句话当构思
-    if (!b.premise && !st.idea) b.premise = bookObj.value?.logline || draft.value?.title || ''
-    Object.assign(b, { mode: 'story', stage: undefined, bookConfig: st.bookConfig, idea: st.idea || undefined })
-  }
+  const b = { premise: st.premise.trim(), tone: st.tone.trim(), conditions: st.conditions.trim(), model: model.value,
+    bookConfig: st.bookConfig, idea: st.idea || undefined }
+  // 续规划时可能没有灵感：拿骨架的一句话当构思
+  if (!b.premise && !st.idea) b.premise = bookObj.value?.logline || ''
   return b
 }
 
-const withBook = () => (story.value ? bookObj.value || undefined : undefined)
+const withBook = () => bookObj.value || undefined
 
 function addUsage(u) {
   if (!u) return
@@ -941,7 +741,6 @@ async function step(name, fn) {
   }
 }
 
-/* 故事优先 */
 /** 生成一批灵感；withFeedback = 带上作者写过的所有反馈（「说说原因再生成」）。每批记一份输入快照（「查看生成逻辑」） */
 async function runIdea(withFeedback = false) {
   const inputs = { premise: st.premise.trim(), directions: [...st.directions], bookConfig: clone(st.bookConfig),
@@ -1040,8 +839,8 @@ function partValue(module, category) {
   if (!d) return null
   if (WORLD_PARTS.includes(module)) return d.world[module]
   if (module === 'elements') return d.elements.filter((e) => e.category === category)
-  if (story.value && module === 'lead') return d.characters.filter((c) => c.role === '主角')
-  if (story.value && module === 'characters') return d.characters.filter((c) => c.role !== '主角')
+  if (module === 'lead') return d.characters.filter((c) => c.role === '主角')
+  if (module === 'characters') return d.characters.filter((c) => c.role !== '主角')
   return d[module]
 }
 const filledPart = (v) => (Array.isArray(v) ? v.length > 0 : v && typeof v === 'object' ? Object.values(v).some((x) => (Array.isArray(x) ? x.length : x)) : !!v)
@@ -1049,8 +848,8 @@ function setPart(module, category, value) {
   const d = draft.value
   if (WORLD_PARTS.includes(module)) d.world[module] = value
   else if (module === 'elements') d.elements = [...d.elements.filter((e) => e.category !== category), ...value]
-  else if (story.value && module === 'lead') d.characters = [...value, ...d.characters.filter((c) => c.role !== '主角')]
-  else if (story.value && module === 'characters') d.characters = [...d.characters.filter((c) => c.role === '主角'), ...value]
+  else if (module === 'lead') d.characters = [...value, ...d.characters.filter((c) => c.role !== '主角')]
+  else if (module === 'characters') d.characters = [...d.characters.filter((c) => c.role === '主角'), ...value]
   else d[module] = value
   if (module === 'power' || module === 'abilities') ensureWorldSlots()
 }
@@ -1116,49 +915,26 @@ function revertSuggestion(i) {
   delete st.enrichOriginals[i]
 }
 
-/* 素材优先 */
-async function runNeeds() {
-  const body = { ...base(), stage: undefined }   // 拆需求时阶段由 Python 按工作区算（开篇 = 对手上限 2）
-  const data = await step('needs', () => planNeeds(props.novelId, body))
-  Object.assign(st, { needs: data, groups: null, picked: {}, settings: null, outline: null, review: null, originals: {}, step: 'materials' })
-  if (!(data.needs || []).length) ElMessage.warning('AI 没拆出检索需求，可以手动加')
-  else await runRetrieve()
-}
-
-async function runRetrieve() {
-  const needs = st.needs.needs.filter((n) => n.query.trim())
-  const data = await step('retrieve', () => planRetrieve(props.novelId, { needs, stage: st.needs.stage, excludeBooks: st.excludeBooks }))
-  st.groups = data.groups || []
-  // AI 预选：过了相关度线的都勾上，「相关度低」的不勾
-  st.picked = Object.fromEntries(st.groups.flatMap((g) => g.items).map((it) => [it.material.id, it.from !== 'weak']))
-  st.step = 'materials'
-}
-
-/* 共用 */
 async function runSettings() {
-  const variants = {}
-  if (!story.value) for (const it of allItems.value) if (st.picked[it.material.id] && it.variant) variants[it.material.id] = it.variant
   // 新书：设定在骨架之前生成，不带骨架；续规划（已写过章节）带上骨架，只补接下来要用的新东西
   const book = startIndex.value > 1 ? withBook() : undefined
-  const data = await step('settings', () => planSettings(props.novelId, { ...base(), book, materialIds: pickedIds.value, materialVariants: variants }))
+  const data = await step('settings', () => planSettings(props.novelId, { ...base(), book }))
   const prev = draft.value
   Object.assign(st, { settings: data, enrich: null, enrichOriginals: {}, partUndo: {}, outline: null, review: null, originals: {}, step: 'settings' })
-  if (story.value) {
-    // 设定只重做世界 + 主角：骨架那一步配好的配角 / 元素 / 阶段表先留着（重新生成骨架时会一起更新）
-    if (prev) {
-      draft.value.characters = [...draft.value.characters.filter((c) => c.role === '主角'), ...prev.characters.filter((c) => c.role !== '主角')]
-      draft.value.elements = prev.elements || []
-      draft.value.stages = prev.stages || []
-    }
-    if (bookObj.value && !draft.value.stages.length) draft.value.stages = bookStages(bookObj.value)
-    st.sig.settings = settingsSig.value
-    snapshot('settings', settingsBasis.value)
+  // 设定只重做世界 + 主角：骨架那一步配好的配角 / 元素 / 阶段表先留着（重新生成骨架时会一起更新）
+  if (prev) {
+    draft.value.characters = [...draft.value.characters.filter((c) => c.role === '主角'), ...prev.characters.filter((c) => c.role !== '主角')]
+    draft.value.elements = prev.elements || []
+    draft.value.stages = prev.stages || []
   }
+  if (bookObj.value && !draft.value.stages.length) draft.value.stages = bookStages(bookObj.value)
+  st.sig.settings = settingsSig.value
+  snapshot('settings', settingsBasis.value)
   ensureWorldSlots()
 }
 
 async function runOutline() {
-  const data = await step('outline', () => planOutline(props.novelId, { ...base(), book: withBook(), settings: draft.value, materialIds: pickedIds.value, count: CHAPTERS }))
+  const data = await step('outline', () => planOutline(props.novelId, { ...base(), book: withBook(), settings: draft.value, count: CHAPTERS }))
   Object.assign(st, { outline: data, review: null, originals: {}, step: 'outline' })
 }
 
@@ -1194,38 +970,22 @@ function autoLogger() {
   return (s) => autoLog.value.push(`${new Date().toLocaleTimeString()} ${s}`)
 }
 
-/** 一键全自动：故事优先 = 灵感（没选就用第一个）→ 设定 → 骨架 → 大纲 → 审稿并采用修正（不做点睛）；
- *  素材优先 = AI 选素材（过了相关度线的全用）→ 设定 → 大纲 → 审稿并采用修正。都停在「写进工作区」 */
+/** 一键全自动：灵感（没选就用第一个）→ 设定 → 骨架 → 人物 / 元素，停在「写进工作区」 */
 async function runAuto() {
   busy.value = 'auto'
   const log = autoLogger()
   try {
-    if (story.value) {
-      if (!st.idea) {
-        log('生成故事灵感…')
-        await runIdea()
-        log(`用第一个灵感「${st.idea?.title || ''}」；生成设定…`)
-      } else log(`用选定的灵感「${st.idea.title || ''}」；生成设定…`)
-      await runSettings()
-      log(`设定：主角「${leadChars.value[0]?.name || ''}」、${draft.value.world.rules.length} 条世界规则；搭全书骨架…`)
-      await runBook(false)
-      log(`骨架：${bookObj.value.volumes.length} 卷、${bookLayout(bookObj.value).length} 个阶段；按骨架配人物和元素…`)
-      await runCast()
-      log(`${castChars.value.length} 个配角、${draft.value.elements.length} 个元素。请检查后「写进工作区」`)
-      st.step = 'apply'
-      return
-    } else {
-      log('拆需求…')
-      await runNeeds()
-      log(`检索到 ${allItems.value.length} 条候选，用 ${pickedIds.value.length} 条；生成设定草案…`)
-      await runSettings()
-      log(`设定：${draft.value.characters.length} 个人物、${draft.value.elements.length} 个元素；规划 ${CHAPTERS} 章…`)
-    }
-    await runOutline()
-    log('审稿…')
-    await runReview()
-    adoptAll()
-    log(`采用了 ${Object.keys(st.originals).length} 章的修正。请检查后「写进工作区」`)
+    if (!st.idea) {
+      log('生成故事灵感…')
+      await runIdea()
+      log(`用第一个灵感「${st.idea?.title || ''}」；生成设定…`)
+    } else log(`用选定的灵感「${st.idea.title || ''}」；生成设定…`)
+    await runSettings()
+    log(`设定：主角「${leadChars.value[0]?.name || ''}」、${draft.value.world.rules.length} 条世界规则；搭全书骨架…`)
+    await runBook(false)
+    log(`骨架：${bookObj.value.volumes.length} 卷、${bookLayout(bookObj.value).length} 个阶段；按骨架配人物和元素…`)
+    await runCast()
+    log(`${castChars.value.length} 个配角、${draft.value.elements.length} 个元素。请检查后「写进工作区」`)
     st.step = 'apply'
   } catch (e) {
     log(`中断：${errorMessage(e, '失败')}（已完成的步骤保留在草稿里，可以从那一步继续）`)
@@ -1240,10 +1000,9 @@ async function autoContinue() {
   if (busy.value) return
   const bk = props.book || bookObj.value
   if (!bk) {
-    ElMessage.warning('这个工作区还没有全书骨架，先用「故事优先」做一次规划')
+    ElMessage.warning('这个工作区还没有全书骨架，先做一次自动规划')
     return
   }
-  onMode('story')
   st.book = { book: clone(bk), issues: [] }
   if (props.bookConfig) st.bookConfig = { ...blankBookConfig(), ...props.bookConfig }
   busy.value = 'auto'
@@ -1318,17 +1077,11 @@ async function runApply(quiet = false) {
       msgs.push(`设定写入 ${r.done} 条`)
       if (r.failed?.length) ElMessage.error({ message: r.failed.join('；'), duration: 8000 })
     }
-    if (story.value && (applyOpts.book || applyOpts.title)) {
+    if (applyOpts.book || applyOpts.title) {
       const extra = { title: applyTitle.value, ...(applyOpts.book && bookObj.value ? { book: bookObj.value, bookConfig: st.bookConfig } : {}) }
       const res = await applyPlan(props.novelId, {}, applyOpts.title, extra)
       if (res.code !== 0) throw new Error(res.message)
       msgs.push(res.data.book ? '全书骨架和写作参数已保存' : '书名已更新')
-    } else if (!story.value && (applyOpts.outline || applyOpts.title)) {
-      const o = { ...outline.value, title: applyTitle.value }
-      const extra = story.value && applyOpts.book && bookObj.value ? { book: bookObj.value, bookConfig: st.bookConfig } : {}
-      const res = await applyPlan(props.novelId, o, applyOpts.title, extra)
-      if (res.code !== 0) throw new Error(res.message)
-      msgs.push(`大纲 ${o.chapters.length} 章，账本计划中伏笔 ${res.data.planned} 条${res.data.book ? '，全书骨架已保存' : ''}`)
     }
     st.appliedAt = new Date().toLocaleString()
     ElMessage.success(`已写进工作区：${msgs.join('，')}`)
@@ -1341,7 +1094,9 @@ async function runApply(quiet = false) {
   }
 }
 
-defineExpose({ autoContinue })
+// 书房左栏的竖排步骤：steps / 当前序号 / 跳转（reactive 里的 computed 访问时自动解包）
+const nav = reactive({ steps, stepIndex, goStep, busy })
+defineExpose({ autoContinue, nav })
 
 /* ---------- 小组件 ---------- */
 /** 设定块标题旁的「AI 重新生成」+「撤销」 */
@@ -1353,7 +1108,7 @@ const PartRegen = defineComponent({
       const label = p.category ? ELEMENT_LABELS[p.category] : PART_LABELS[p.module]
       return h('span', { class: 'part-regen' }, [
         h(AiRegenButton, { label, text: p.category ? `重来${label}` : 'AI 重新生成', hasExisting: filledPart(partValue(p.module, p.category)),
-          basis: story.value ? partBasis(p.module, p.category) : '',
+          basis: partBasis(p.module, p.category),
           loading: partBusy.value === key, disabled: !!busy.value && partBusy.value !== key,
           onRun: (o) => regenPart(p.module, p.category, o) }),
         key in st.partUndo ? h(ElButton, { link: true, size: 'small', onClick: () => undoPart(p.module, p.category) }, () => '撤销') : null
@@ -1372,16 +1127,6 @@ const IssueList = defineComponent({
       ? h('div', { class: 'issues' }, [h('b', '代码检查发现：'), ...p.issues.map((i) =>
         h('div', { class: 'warn' }, `· ${i.chapter ? `第${i.chapter}章 ` : ''}【${TYPE[i.type] || i.type}】${i.detail}`))])
       : null)
-  }
-})
-
-const SourceLine = defineComponent({
-  props: { sources: { type: Array, default: () => [] }, adapted: { type: String, default: '' }, titles: { type: Object, default: () => ({}) } },
-  setup(p) {
-    return () => (p.sources?.length || p.adapted
-      ? h('div', { class: 'muted source' }, `来源：${(p.sources || []).map((id) => p.titles[id] || `素材 ${id}`).join('、') || '（AI 原创）'}`
-        + (p.adapted ? `｜改编：${p.adapted}` : ''))
-      : h('div', { class: 'muted source' }, '来源：AI 原创'))
   }
 })
 
@@ -1424,7 +1169,6 @@ const ChapterCard = defineComponent({
 </script>
 
 <style scoped>
-.mode-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
 .intro { font-size: 13px; line-height: 1.7; margin-bottom: 12px; }
 .muted { color: var(--el-text-color-secondary); font-size: 12px; }
 .steps { margin-bottom: 14px; cursor: pointer; }
@@ -1440,15 +1184,8 @@ const ChapterCard = defineComponent({
 .idea.on, .card.adopted { border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .idea .hook { margin: 4px 0; font-size: 13px; }
 .need-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
-.why { width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.group { margin-bottom: 12px; }
-.group-head { font-weight: 500; margin-bottom: 6px; }
-.mat { display: flex; gap: 8px; padding: 6px 8px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; margin-bottom: 6px; }
-.mat.on { border-color: var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }
-.mat-body .el-tag { margin-left: 6px; }
 .card { border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
 .card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .more { margin-top: 6px; }
 .field-line { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }

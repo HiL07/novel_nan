@@ -1089,7 +1089,7 @@ onDeactivated(() => clearTimeout(timer))
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .sys-card {
   margin-bottom: 16px;
@@ -1097,7 +1097,7 @@ onDeactivated(() => clearTimeout(timer))
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .sys-row {
   display: flex;
@@ -1105,7 +1105,7 @@ onDeactivated(() => clearTimeout(timer))
   flex-wrap: wrap;
   gap: 16px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .sys-item {
   display: inline-flex;
@@ -1130,7 +1130,7 @@ onDeactivated(() => clearTimeout(timer))
 .toolbar-hint,
 .hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .hint {
   margin-left: 8px;
@@ -1141,10 +1141,10 @@ onDeactivated(() => clearTimeout(timer))
   gap: 6px 18px;
   margin: -4px 0 12px;
   padding: 8px 12px;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 4px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .kind-legend-item {
   display: inline-flex;
@@ -1160,12 +1160,12 @@ onDeactivated(() => clearTimeout(timer))
 .kind-tech {
   margin-top: 3px;
   font-size: 12px;
-  color: #a8abb2;
+  color: var(--el-text-color-placeholder);
 }
 .gguf-p {
   margin: 0 0 12px;
   line-height: 1.7;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .gguf-cmd {
   display: flex;
@@ -1177,7 +1177,7 @@ onDeactivated(() => clearTimeout(timer))
   flex: 1;
   min-width: 0;
   padding: 8px 10px;
-  background: #f4f4f5;
+  background: var(--el-fill-color-light);
   border-radius: 4px;
   font-size: 12px;
   word-break: break-all;
@@ -1206,7 +1206,7 @@ onDeactivated(() => clearTimeout(timer))
 .section-title {
   margin: 18px 0 8px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .job-error {
   display: block;
@@ -1224,7 +1224,7 @@ onDeactivated(() => clearTimeout(timer))
   gap: 10px;
   margin-bottom: 10px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .gen-params {
   margin-top: 10px;
@@ -1232,7 +1232,7 @@ onDeactivated(() => clearTimeout(timer))
 .infer-status {
   margin-bottom: 12px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .est-inline {
   display: block;
@@ -1287,12 +1287,12 @@ onDeactivated(() => clearTimeout(timer))
   font-size: 14px;
   line-height: 1.8;
   white-space: pre-wrap;
-  background: #f7f8fa;
-  border: 1px solid #e4e7ed;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
 }
 .gen-prompt {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .rec-list {
   display: flex;
@@ -1303,7 +1303,7 @@ onDeactivated(() => clearTimeout(timer))
 .rec-item {
   padding: 8px 12px;
   font-size: 13px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   cursor: pointer;
 }
@@ -1337,7 +1337,7 @@ onDeactivated(() => clearTimeout(timer))
 .dir-list {
   height: 320px;
   overflow-y: auto;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
 }
 .dir-item {
@@ -1358,7 +1358,7 @@ onDeactivated(() => clearTimeout(timer))
 .loss-line {
   margin-bottom: 8px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .loss-pt {
   display: inline-block;

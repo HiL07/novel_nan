@@ -156,7 +156,7 @@ const open = ref(props.live ? ['plan'] : props.chapter.review?.issues?.length &&
   gap: 8px;
 }
 .quote {
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .quote.clickable {
   color: var(--el-color-primary);
@@ -164,7 +164,7 @@ const open = ref(props.live ? ['plan'] : props.chapter.review?.issues?.length &&
   text-decoration: underline dotted;
 }
 .issue-fix {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 .fact-line {
   margin-bottom: 4px;
@@ -180,6 +180,6 @@ const open = ref(props.live ? ['plan'] : props.chapter.review?.issues?.length &&
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

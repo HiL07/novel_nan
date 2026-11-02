@@ -1,14 +1,14 @@
 <template>
   <aside class="sidebar" :class="{ 'is-collapse': isCollapse }">
+    <!-- 菜单由路由表驱动（取带 meta.title 的路由项，见 docx/fronted_vue3/router/router.md）。工作区页面不显示侧栏（书房布局自带顶栏 / 右侧图标栏，见 layout/index.vue） -->
     <div class="sidebar-header">
-      <span v-show="!isCollapse" class="sidebar-title">文件管理</span>
+      <span v-show="!isCollapse" class="sidebar-title">小说工坊</span>
       <el-icon class="collapse-btn" @click="isCollapse = !isCollapse">
         <component :is="isCollapse ? 'Expand' : 'Fold'" />
       </el-icon>
     </div>
 
     <el-scrollbar>
-      <!-- 菜单由路由表驱动：取带 meta.title 的路由项（见 docx/fronted_vue3/router/router.md） -->
       <el-menu
         :default-active="activeMenu"
         :collapse="isCollapse"
@@ -16,9 +16,6 @@
         :unique-opened="true"
         router
         class="sidebar-menu"
-        background-color="#001529"
-        text-color="#a6adb4"
-        active-text-color="#ffffff"
       >
         <template v-for="item in menuItems" :key="item.path">
           <!-- meta.children：带子菜单的项（如「小说抓取」），子项各自是一个路由地址 -->
@@ -61,13 +58,15 @@ const activeMenu = computed(() => route.path)
 </script>
 
 <style scoped>
+/* 颜色取 styles/ink-theme.css 的 --ws-side-*（宣纸白侧栏，激活项 = 浅赭红底 + 左侧赭红竖条） */
 .sidebar {
   width: 220px;
   flex: 0 0 220px;
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #001529;
+  background: var(--ws-side);
+  border-right: 1px solid var(--ws-line);
   transition: width 0.2s;
 }
 .sidebar.is-collapse {
@@ -82,23 +81,27 @@ const activeMenu = computed(() => route.path)
   align-items: center;
   justify-content: space-between;
   padding: 0 16px;
-  color: #ffffff;
+  color: var(--ws-ink);
 }
 .sidebar.is-collapse .sidebar-header {
   justify-content: center;
   padding: 0;
 }
 .sidebar-title {
-  font-size: 16px;
-  font-weight: 600;
+  font-family: var(--ws-font-title);
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
   white-space: nowrap;
+  color: var(--ws-ink);
 }
 .collapse-btn {
   font-size: 18px;
+  color: var(--ws-side-text);
   cursor: pointer;
 }
 .collapse-btn:hover {
-  color: var(--el-color-primary);
+  color: var(--ws-accent);
 }
 
 .sidebar :deep(.el-scrollbar) {
@@ -107,25 +110,50 @@ const activeMenu = computed(() => route.path)
 }
 
 .sidebar-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--ws-side-text);
+  --el-menu-active-color: var(--ws-accent);
+  --el-menu-hover-bg-color: var(--ws-side-hover);
+  --el-menu-hover-text-color: var(--ws-ink);
+  --el-menu-item-height: 48px;
+  --el-menu-sub-item-height: 44px;
   border-right: none;
+  background: transparent;
+  padding: 0 8px;
 }
-.sidebar-menu :deep(.el-menu-item:hover) {
-  background-color: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
+.sidebar.is-collapse .sidebar-menu {
+  padding: 0;
+}
+.sidebar-menu :deep(.el-menu-item),
+.sidebar-menu :deep(.el-sub-menu__title) {
+  position: relative;
+  margin: 2px 0;
+  border-radius: 8px;
+}
+.sidebar-menu :deep(.el-menu-item:hover),
+.sidebar-menu :deep(.el-sub-menu__title:hover) {
+  background-color: var(--ws-side-hover);
+  color: var(--ws-ink);
 }
 .sidebar-menu :deep(.el-menu-item.is-active) {
-  background-color: var(--el-color-primary);
-  color: #ffffff;
+  background-color: var(--ws-side-active-bg);
+  color: var(--ws-accent);
+  font-weight: 600;
 }
-/* 子菜单：标题与普通菜单项同色，展开后的子项背景略深 */
-.sidebar-menu :deep(.el-sub-menu__title:hover) {
-  background-color: rgba(255, 255, 255, 0.08);
-  color: #ffffff;
+.sidebar-menu :deep(.el-menu-item.is-active)::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--ws-accent);
 }
 .sidebar-menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
-  color: #ffffff;
+  color: var(--ws-accent);
 }
 .sidebar-menu :deep(.el-menu--inline) {
-  background-color: #000c17;
+  background-color: transparent;
 }
 </style>

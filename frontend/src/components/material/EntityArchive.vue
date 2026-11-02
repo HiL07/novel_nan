@@ -132,17 +132,17 @@ function chapterSpan(e) {
 .tip {
   margin: 8px 0 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .entity {
   padding: 8px 10px;
   margin-bottom: 8px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
 }
 .entity.checked {
-  border-color: #a0cfff;
-  background: #f5f9ff;
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
 }
 .entity-head {
   display: flex;
@@ -151,11 +151,11 @@ function chapterSpan(e) {
 }
 .name {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .del {
   margin-left: auto;
@@ -164,7 +164,7 @@ function chapterSpan(e) {
   margin-top: 4px;
   font-size: 13px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .pager {
   margin-top: 10px;

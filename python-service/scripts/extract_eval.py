@@ -4,11 +4,11 @@
   .venv/Scripts/python scripts/extract_eval.py --text 某小说.txt --chapters 1-10 \\
       --run gguf1=http://127.0.0.1:8002/v1,1 --run gguf2=http://127.0.0.1:8002/v1,2 \\
       [--run deepseek=https://api.deepseek.com,1,deepseek-chat,DEEPSEEK_API_KEY] [--baseline deepseek] \\
-      [--chunk 3000] [--out 结果.json]
+      [--depth standard] [--chunk 3000] [--out 结果.json]
 
 --run 名称=地址,遍数[,模型名[,存 API Key 的环境变量]]：模型名缺省时取服务 /v1/models 的第一个（llama.cpp）。
 --baseline：以哪一组的实体为基准计算其他组的实体召回（缺省 = 第一组）。
-每组先 scan（提取）再 compile_cards（整理卡片，取事实最多的 --max-candidates 个实体）。
+每组先 scan（逐章串行提取，--depth 档位）再 compile_cards（整理卡片，取事实最多的 --max-candidates 个实体）。--no-compile 只跑提取。
 输出：每组耗时（含其中的阅读耗时）、token、块数、事实核实通过 / 丢弃、实体数、卡片数、不实用数、剧情段数、相对基准的实体召回，
 并把基准里事实最多的 5 个实体在各组的卡片并排打印。会真实调用模型（大模型按 token 计费）。
 """
@@ -66,6 +66,8 @@ def main() -> None:
     ap.add_argument("--run", action="append", required=True)
     ap.add_argument("--baseline", default="")
     ap.add_argument("--chunk", type=int, default=3000)
+    ap.add_argument("--depth", default="standard", choices=["fast", "standard", "deep"])
+    ap.add_argument("--no-compile", action="store_true")
     ap.add_argument("--max-candidates", type=int, default=500)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -78,7 +80,7 @@ def main() -> None:
     results = {}
     for spec in args.run:
         run = parse_run(spec)
-        opts = MaterialOptions(enabled=True, rounds=run["rounds"], chunkChars=args.chunk)
+        opts = MaterialOptions(enabled=True, rounds=run["rounds"], chunkChars=args.chunk, depth=args.depth)
         usage = llm_client.new_usage(run["cfg"])
         call = extractor._chat_fn(run["cfg"], usage)
         start = time.monotonic()
@@ -89,12 +91,20 @@ def main() -> None:
                 last["t"] = time.monotonic()
                 print(f"  [{run['name']}] {p}% {msg}", flush=True)
 
+        small = llm_client.source_of(run["cfg"]) == "local"
         scanned = material_facts.scan(chapters, opts, call, run["cfg"].concurrency,
-                                      extract_checkpoint.Checkpoint(None, {}), progress, None, local=False)
+                                      extract_checkpoint.Checkpoint(None, {}), progress, None, local=small)
         scan_seconds = round(time.monotonic() - start, 1)
         rows = [{"title": c["title"], "summary": s["summary"]} for c, s in zip(chapters, scanned["chapters"])]
-        out = material_facts.compile_cards(scanned["entities"][:args.max_candidates], rows, call, run["cfg"].concurrency,
-                                           extract_checkpoint.Checkpoint(None, {}), progress, None, local=False)
+        out = {"materials": [], "stats": {"cards": 0, "notUseful": 0, "systems": 0, "arcs": 0}} if args.no_compile else \
+            material_facts.compile_cards(scanned["entities"][:args.max_candidates], rows, call, run["cfg"].concurrency,
+                                         extract_checkpoint.Checkpoint(None, {}), progress, None, local=False)
+        out["chapterCards"], out["threads"] = scanned["chapterCards"], scanned["threads"]
+        out["entities"] = scanned["entities"]
+        if args.no_compile:  # 只比提取：用实体档案算召回、打印
+            out["materials"] = [{"category": e["category"], "title": e["name"], "aliases": e["aliases"], "facts": e["facts"],
+                                 "attributes": {}, "summary": "；".join(f["fact"] for f in e["facts"][:3]), "subtype": ""}
+                                for e in scanned["entities"]]
         out["stats"] = {**scanned["stats"], **out["stats"], "entities": scanned["stats"]["entities"]}
         out["scanSeconds"] = scan_seconds
         out["seconds"] = round(time.monotonic() - start, 1)
@@ -114,6 +124,19 @@ def main() -> None:
         print(f"| {name} | {out['seconds']}（阅读 {out['scanSeconds']}） | {u['calls']} | {u['promptTokens']} | {u['completionTokens']} | "
               f"{st['factsVerified']} | {st['factsUnverified']} | {st['entities']} | {st['cards']} | {st['notUseful']} | "
               f"{st['systems']} | {st['arcs']} | {recall} |")
+
+    print("\n章节卡（逐章）：| 组 | 有一句话 | 有章末钩子 | 爽点/章 | 爽点原文核实 | 伏笔 埋/收 | 主角变化 | 关系 | 设定动态 | 金句 | 失败章 |")
+    for name, out in results.items():
+        cards = [c for c in out["chapterCards"] if c.get("status") != "empty"]
+        n = max(1, len(cards))
+        pays = [p for c in cards for p in c.get("payoffs") or []]
+        paid = sum(1 for t in out["threads"] if t["status"] == "paid")
+        cnt = lambda k: sum(len(c.get(k) or []) for c in cards)
+        print(f"| {name} | {sum(1 for c in cards if c.get('oneLine'))}/{len(cards)} | "
+              f"{sum(1 for c in cards if any(h['pos'] == 'end' for h in c.get('hooks') or []))}/{len(cards)} | "
+              f"{len(pays) / n:.2f} | {sum(1 for p in pays if p['verified'])}/{len(pays)} | {len(out['threads'])}/{paid} | "
+              f"{cnt('leadChanges')} | {cnt('relations')} | {cnt('entityMoves')} | {cnt('lines')} | "
+              f"{sum(1 for c in cards if c['status'] == 'failed')} |")
 
     top = sorted((m for m in results[base_name]["materials"] if m["category"] != "plot"),
                  key=lambda m: -len(m.get("facts", [])))[:5]

@@ -426,8 +426,8 @@ class PlanReq(BaseModel):
     settings: Optional[dict] = None                         # outline / review：设定草案
     outline: Optional[dict] = None                          # review：大纲草案
     count: int = Field(default=10, ge=1, le=10)             # outline：章数；idea：灵感个数（1~5）
-    # 故事优先（不依赖素材库）：mode = story；写作参数、选定的灵感、全书骨架；点睛时素材和检索对象的对应
-    mode: str = Field(default="material", max_length=20)
+    # 写作参数、选定的灵感、全书骨架；点睛时素材和检索对象的对应（mode 只为兼容旧请求保留，只有故事优先一条路线）
+    mode: str = Field(default="story", max_length=20)
     bookConfig: Optional[dict] = None
     directions: list[str] = Field(default_factory=list, max_length=12)
     idea: Optional[dict] = None
@@ -462,12 +462,6 @@ def _plan(fn, req: PlanReq):
         return ok(_guard(fn, data))
     except inspire.InspireError as e:
         raise LocalError(400, str(e)) from e
-
-
-@router.post("/plan/needs")
-def plan_needs(req: PlanReq):
-    """① 构思 → 检索需求（复用灵感墙的拆需求；开篇 = 阶段开篇、对手上限 2），经 Java"""
-    return _plan(planner.needs, req)
 
 
 @router.post("/plan/idea")

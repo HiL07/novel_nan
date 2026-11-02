@@ -75,13 +75,6 @@
       </div>
     </el-card>
 
-    <ExtractOptionsDialog
-      v-model="extractDlg.visible"
-      :file-name="extractDlg.item?.fileName"
-      :file-size="extractDlg.item?.fileSize || 0"
-      @confirm="doExtract"
-    />
-
     <!-- 预览弹窗 -->
     <el-dialog
       v-model="dialogVisible"
@@ -142,8 +135,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, fetchTextPage, listFiles, previewUrl } from '@/api/file'
-import { bookOf, isExtractable, listExtracts, submitExtract } from '@/api/novel'
-import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
+import { bookOf, isExtractable, listExtracts } from '@/api/novel'
 import { errorMessage } from '@/api/request'
 
 const router = useRouter()
@@ -320,26 +312,10 @@ async function copyPreview() {
   }
 }
 
-/** 选中小说文件 → 选择提取范围（含素材）→ 提交提取任务 → 跳转到提取结果页查看进度 */
-const extractDlg = reactive({ visible: false, item: null })
+/** 选中小说文件 → 打开提取工作区（左栏选章节范围、右栏设置、中间看原文，在那里开始提取） */
 function startExtract(item) {
-  Object.assign(extractDlg, { visible: true, item })
-}
-
-async function doExtract(options) {
-  const item = extractDlg.item
-  try {
-    const res = await submitExtract(item.id, options)
-    if (res.code !== 0) {
-      ElMessage.error(res.message || '提交失败')
-      return
-    }
-    ElMessage.success('已提交提取任务')
-    dialogVisible.value = false
-    router.push({ path: '/novel/extract', query: { id: res.data.id } })
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '提交提取任务失败'))
-  }
+  dialogVisible.value = false
+  router.push({ path: '/novel/extract/new', query: { fileId: item.id, name: item.fileName } })
 }
 
 /** 章节数：后端逐个数章节标题行得出（不看最后一章写的序号）；null = 非 txt/md 或尚未统计 */
@@ -370,7 +346,7 @@ onActivated(loadFiles)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -380,7 +356,7 @@ onActivated(loadFiles)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 /* 文件卡片网格 */
@@ -396,8 +372,8 @@ onActivated(loadFiles)
   height: 180px;
   display: flex;
   flex-direction: column;
-  background: #ffffff;
-  border: 1px solid #dcdfe6;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color);
   border-radius: 8px;
   overflow: hidden;
   transition: box-shadow 0.2s, border-color 0.2s;
@@ -415,7 +391,7 @@ onActivated(loadFiles)
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
 }
 .file-thumb {
   display: block;
@@ -425,7 +401,7 @@ onActivated(loadFiles)
 }
 .file-icon {
   font-size: 40px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .file-card-info {
   padding: 6px 8px;
@@ -434,16 +410,16 @@ onActivated(loadFiles)
   gap: 2px;
   text-align: center;
   font-size: 12px;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 .file-name {
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .file-size {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .file-download {
   position: absolute;
@@ -496,7 +472,7 @@ onActivated(loadFiles)
 .extract-hint {
   margin-left: 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 /* 预览弹窗 */
@@ -519,7 +495,7 @@ onActivated(loadFiles)
 .preview-iframe {
   width: 100%;
   height: 66vh;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
 }
 .preview-text {
@@ -527,19 +503,19 @@ onActivated(loadFiles)
   padding: 12px;
   max-height: 66vh;
   overflow: auto;
-  background: #f7f8fa;
-  border: 1px solid #e4e7ed;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   font-size: 13px;
   line-height: 1.6;
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .preview-more {
   margin-top: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .preview-actions {
   flex: 0 0 auto;

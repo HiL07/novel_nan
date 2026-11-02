@@ -84,6 +84,30 @@ export function getExtract(id) {
 }
 
 /**
+ * 提取前预览分章（和提取同一套规则，选章节范围用）→ {chars, total, chapters[{index (从 1 数), title, kind, chars}], warnings}
+ * GET /api/novel/extract/split/{fileId}
+ */
+export function splitPreview(fileId) {
+  return request.get(`/api/novel/extract/split/${fileId}`).then((res) => res.data)
+}
+
+/**
+ * 逐章查看（提取中）：since = 上次的 live.next → {status, progress, message, live?: {exists, range, chapters?, rows, next, current, running}, finished?}
+ * GET /api/novel/extract/{id}/live?since=N
+ */
+export function getExtractLive(id, since = 0) {
+  return request.get(`/api/novel/extract/${id}/live`, { params: { since } }).then((res) => res.data)
+}
+
+/**
+ * 按文件取全书第 index 章（从 0 数，和提取同一套分章）的原文 → {index, title, kind, text, total}（提取工作区，开始提取前也能看）
+ * GET /api/novel/extract/file/{fileId}/chapters/{index}/text
+ */
+export function getFileChapterText(fileId, index) {
+  return request.get(`/api/novel/extract/file/${fileId}/chapters/${index}/text`).then((res) => res.data)
+}
+
+/**
  * 保存手动修改后的提取结果（整体替换，须含 chapters）
  * POST /api/novel/extract/{id}/result
  */

@@ -6,6 +6,7 @@ import com.example.file.entity.MaterialCompile;
 import com.example.file.entity.NovelExtract;
 import com.example.file.service.MaterialCompileService;
 import com.example.file.service.NovelExtractService;
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -132,6 +134,26 @@ public class NovelExtractController {
     @GetMapping("/{id}")
     public ResponseEntity<Result<NovelExtract>> detail(@PathVariable Long id) {
         return ResultResponses.handle(() -> extractService.getById(id), log, "查询提取任务失败，id=" + id);
+    }
+
+    /** GET /api/novel/extract/{id}/live?since=N：逐章查看（提取中）→ {status, progress, message, live | finished} */
+    @GetMapping("/{id}/live")
+    public ResponseEntity<Result<Map<String, Object>>> live(@PathVariable Long id,
+                                                            @RequestParam(defaultValue = "0") int since) {
+        return ResultResponses.handle(() -> extractService.live(id, since), log, "读取逐章进度失败，id=" + id);
+    }
+
+    /** GET /api/novel/extract/file/{fileId}/chapters/{index}/text：按文件取全书第 index 章（从 0 数）的原文（提取工作区） */
+    @GetMapping("/file/{fileId}/chapters/{index}/text")
+    public ResponseEntity<Result<JsonNode>> fileChapterText(@PathVariable Long fileId, @PathVariable int index) {
+        return ResultResponses.handle(() -> extractService.fileChapterText(fileId, index), log,
+                "读取章节原文失败，fileId=" + fileId + " index=" + index);
+    }
+
+    /** GET /api/novel/extract/split/{fileId}：提取前预览分章（选章节范围用） */
+    @GetMapping("/split/{fileId}")
+    public ResponseEntity<Result<JsonNode>> split(@PathVariable Long fileId) {
+        return ResultResponses.handle(() -> extractService.splitPreview(fileId), log, "分章预览失败，fileId=" + fileId);
     }
 
     /**

@@ -318,7 +318,7 @@ function apply(none) {
 .vector-info {
   margin: -4px 0 10px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .chosen {
   display: flex;
@@ -338,7 +338,7 @@ function apply(none) {
   gap: 10px;
   padding: 10px 12px;
   margin-bottom: 8px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
 }
@@ -358,7 +358,7 @@ function apply(none) {
 .pick-summary {
   margin-top: 4px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .pick-tags {
   display: flex;
@@ -376,14 +376,14 @@ function apply(none) {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .source {
   margin-left: auto;
   white-space: nowrap;
 }
 .score.weak {
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .score {
   min-width: 28px;

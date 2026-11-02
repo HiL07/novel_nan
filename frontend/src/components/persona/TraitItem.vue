@@ -46,7 +46,7 @@ const prov = computed(() => PROVENANCE[props.trait.provenance] || PROVENANCE.inf
 .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .layer { width: 110px; }
 .spacer { flex: 1; }
-.ai-text { margin-top: 4px; font-size: 12px; color: #909399; }
-.evidence ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: #606266; }
-.evidence q { color: #67c23a; }
+.ai-text { margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary); }
+.evidence ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--el-text-color-regular); }
+.evidence q { color: var(--el-color-success); }
 </style>

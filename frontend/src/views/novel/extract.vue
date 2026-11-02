@@ -41,8 +41,9 @@
             </el-table-column>
             <el-table-column prop="message" label="说明" min-width="240" show-overflow-tooltip />
             <el-table-column prop="createTime" label="创建时间" width="170" />
-            <el-table-column label="操作" width="170" fixed="right">
+            <el-table-column label="操作" width="210" fixed="right">
               <template #default="{ row }">
+                <el-button link type="primary" title="打开提取工作区：章节 / 原文 / 每章提取出的内容" @click="openWorkspace(row)">工作区</el-button>
                 <template v-if="row.status === 'INTERRUPTED'">
                   <el-button link type="primary" :loading="busy[row.id] === 'resume'" @click="doResume(row)">继续</el-button>
                   <el-button link type="primary" @click="openDetail(row)">查看</el-button>
@@ -184,6 +185,7 @@
           <el-button type="danger" plain @click="doCancel(info).then(() => (infoVisible = false))">取消</el-button>
         </template>
         <el-button v-else-if="info?.status === 'FAILED'" type="danger" plain @click="doDelete([info.id]).then(() => (infoVisible = false))">删除</el-button>
+        <el-button @click="openWorkspace(info)">打开工作区</el-button>
         <el-button @click="infoVisible = false">关闭</el-button>
       </template>
     </el-dialog>
@@ -197,6 +199,7 @@
           <el-button type="primary" :icon="Download" :disabled="!!draft" @click="downloadJson">下载 JSON</el-button>
           <template v-if="!draft">
             <el-button :icon="EditPen" @click="startEdit">修改结果</el-button>
+            <el-button v-if="result.chapterCards" @click="openWorkspace(detailRow)">逐章查看</el-button>
             <span v-if="result.editedAt" class="chapter-meta">已手动修改 · {{ result.editedAt }}</span>
           </template>
           <template v-else>
@@ -643,6 +646,11 @@ async function saveEntities(entities) {
   }
 }
 
+/* 提取工作区（章节 / 原文 / 每章提取出的内容） */
+function openWorkspace(row) {
+  router.push(`/novel/extract/${row.id}`)
+}
+
 /* 中断 / 失败任务的查看 */
 const infoVisible = ref(false)
 const info = ref(null)
@@ -662,7 +670,9 @@ function modelText(m) {
 function materialText(mt) {
   if (!mt) return '只做章节分析（不记录设定实体）'
   if (mt.mode === 'v1') return `旧版，每段最多 ${mt.maxPerChunk} 条`
-  return `记录设定实体，读 ${mt.rounds ?? 2} 遍，每段 ${mt.chunkChars ?? 3000} 字`
+  const depth = { fast: '快速', standard: '标准', deep: '深拆' }[mt.depth]
+  const range = mt.fromChapter > 1 || mt.toChapter ? `，第 ${mt.fromChapter || 1}–${mt.toChapter || '最后'} 章` : ''
+  return `记录设定实体${depth ? `，${depth}档` : ''}，读 ${mt.rounds ?? 2} 遍${range}` + (depth ? '' : `，每段 ${mt.chunkChars ?? 3000} 字`)
 }
 
 async function loadTasks() {
@@ -752,7 +762,7 @@ onDeactivated(stopPoll)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -762,7 +772,7 @@ onDeactivated(stopPoll)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .section-tabs {
   margin-top: -8px;
@@ -770,7 +780,7 @@ onDeactivated(stopPoll)
 .section-tip {
   margin: 0 0 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .sub-filter {
   margin-bottom: 10px;
@@ -778,7 +788,7 @@ onDeactivated(stopPoll)
 .cell-msg {
   margin-top: 2px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -813,16 +823,17 @@ onDeactivated(stopPoll)
 .result-actions {
   margin-bottom: 12px;
 }
+
 .result h4 {
   margin: 18px 0 8px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .chapter-title {
   font-weight: 600;
 }
 .chapter-meta {
   margin-left: 8px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .result p,

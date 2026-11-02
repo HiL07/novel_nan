@@ -137,7 +137,8 @@ const SECTIONS = [
   { key: 'story', label: '经历与能力' },
   { key: 'other', label: '其他' }
 ]
-const AVATAR_COLORS = ['#5b8ff9', '#e8684a', '#5ad8a6', '#f6bd16', '#9270ca', '#ff9d4d', '#269a99', '#e86452']
+// 头像底色：压低饱和度，和墨色主题（styles/ink-theme.css）相配
+const AVATAR_COLORS = ['#b03a2e', '#4f7a52', '#3f5f7a', '#a67c3d', '#6b4f7a', '#8a5a44', '#2f6b6b', '#9b4a3c']
 
 const open = reactive(new Set())
 const tabOf = reactive({})
@@ -270,13 +271,13 @@ function addGroupField() {
 }
 .cc-card {
   margin-bottom: 10px;
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 10px;
   transition: box-shadow 0.15s, border-color 0.15s;
 }
 .cc-card:hover {
-  border-color: #c6e2ff;
+  border-color: var(--el-color-primary-light-7);
 }
 .cc-card.is-open {
   border-color: var(--el-color-primary-light-5);
@@ -314,17 +315,17 @@ function addGroupField() {
 .cc-name {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .cc-meta {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cc-tagline {
   margin-top: 3px;
   overflow: hidden;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -336,7 +337,7 @@ function addGroupField() {
 }
 .cc-arrow {
   margin-left: 4px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cc-preview {
   padding: 0 14px 12px 70px;
@@ -351,12 +352,12 @@ function addGroupField() {
   margin-top: 6px;
   font-size: 13px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .cc-progress {
   margin-top: 6px;
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .cc-tabs {
   padding: 0 14px 10px;
@@ -364,6 +365,6 @@ function addGroupField() {
 .cc-tab-count {
   margin-left: 4px;
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

@@ -539,7 +539,7 @@ onActivated(async () => {
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .lib-grid {
   display: grid;
@@ -557,7 +557,7 @@ onActivated(async () => {
   cursor: pointer;
 }
 .cat-item:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 .cat-item.is-active {
   color: var(--el-color-primary);
@@ -570,7 +570,7 @@ onActivated(async () => {
 .count {
   font-size: 12px;
   font-weight: normal;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .new-btn {
   width: 100%;
@@ -580,7 +580,7 @@ onActivated(async () => {
   margin: 18px 0 6px;
   padding-left: 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .source-name {
   overflow: hidden;
@@ -599,7 +599,7 @@ onActivated(async () => {
 }
 .pin {
   font-size: 16px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   cursor: pointer;
 }
 .pin:hover,
@@ -611,7 +611,7 @@ onActivated(async () => {
 }
 .muted-tip {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .search-bar {
   display: flex;
@@ -634,7 +634,7 @@ onActivated(async () => {
 .semantic-info {
   margin-top: 10px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .vector-index {
   display: flex;
@@ -657,7 +657,7 @@ onActivated(async () => {
 }
 .mat-card {
   padding: 12px 14px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -674,7 +674,7 @@ onActivated(async () => {
 .mat-title {
   flex: 1;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .score {
   min-width: 32px;
@@ -695,7 +695,7 @@ onActivated(async () => {
   margin-top: 6px;
   font-size: 13px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .mat-attrs {
   display: flex;
@@ -703,7 +703,7 @@ onActivated(async () => {
   gap: 2px;
   margin-top: 6px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .mat-foot {
   display: flex;
@@ -715,7 +715,7 @@ onActivated(async () => {
 .muted {
   margin-left: auto;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .pager {
   margin-top: 14px;
@@ -724,7 +724,7 @@ onActivated(async () => {
 .pending-tip {
   margin-bottom: 12px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .pending-badge {
   margin-left: 4px;

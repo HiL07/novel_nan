@@ -74,10 +74,10 @@ const STATUS = {
   word-break: break-all;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 </style>

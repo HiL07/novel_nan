@@ -68,6 +68,12 @@ const routes = [
     component: () => import('@/views/novel/crawl.vue')
   },
   {
+    // 提取工作区（不在侧边栏显示）：new?fileId=&name= = 开始前；数字 = 某次提取任务
+    path: '/novel/extract/:id',
+    name: 'extractWorkspace',
+    component: () => import('@/views/novel/extractWorkspace.vue')
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),

@@ -8,8 +8,8 @@
     </div>
     <el-alert v-if="error" type="error" :closable="false" show-icon :title="error" class="mt" />
 
-    <!-- 伏笔 -->
-    <div class="section-head">
+    <!-- 伏笔（data-anchor：书房左栏的目录项） -->
+    <div class="section-head" data-anchor="伏笔" :data-anchor-count="openCount">
       <span class="col-title">伏笔（未回收 {{ openCount }} / 共 {{ facts.foreshadows.length }}）</span>
       <el-radio-group v-model="fsFilter" size="small">
         <el-radio-button value="open">未回收</el-radio-button>
@@ -57,7 +57,7 @@
     </el-table>
 
     <!-- 角色状态 -->
-    <div class="section-head">
+    <div class="section-head" data-anchor="角色状态" :data-anchor-count="characterRows.length">
       <span class="col-title">角色状态（{{ characterRows.length }}）</span>
       <el-button size="small" :icon="Plus" :disabled="locked" @click="editCharacter(null)">新增角色状态</el-button>
     </div>
@@ -86,7 +86,7 @@
     </el-table>
 
     <!-- 时间线 -->
-    <div class="section-head">
+    <div class="section-head" data-anchor="时间线" :data-anchor-count="facts.timeline.length">
       <span class="col-title">时间线（{{ facts.timeline.length }}）</span>
       <el-button size="small" :icon="Plus" :disabled="locked" @click="editTimeline(null)">新增事件</el-button>
     </div>
@@ -295,16 +295,16 @@ defineExpose({ load })
 .col-title {
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .history-line {
   font-size: 12px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .mt {
   margin-top: 10px;

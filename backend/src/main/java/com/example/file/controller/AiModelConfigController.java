@@ -14,7 +14,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.List;
+import java.util.Map;
 
 /**
  * AI 模型配置接口（CORS 只放行 GET/POST，修改/删除也用 POST）。
@@ -42,6 +45,12 @@ public class AiModelConfigController {
     @PostMapping("/save")
     public ResponseEntity<Result<AiModelConfig>> save(@RequestBody AiModelConfig req) {
         return ResultResponses.handle(() -> modelService.save(req), log, "保存模型配置失败");
+    }
+
+    /** POST /api/ai/model/fetch-models {id?, baseUrl, protocol, apiKey?}：获取可用模型（apiKey 留空 + id = 用已保存的 Key） */
+    @PostMapping("/fetch-models")
+    public ResponseEntity<Result<JsonNode>> fetchModels(@RequestBody Map<String, Object> req) {
+        return ResultResponses.handle(() -> modelService.fetchModels(req), log, "获取可用模型失败");
     }
 
     /** POST /api/ai/model/{id}/verify，真实调用一次模型验证配置 */

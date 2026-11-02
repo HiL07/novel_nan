@@ -1,59 +1,210 @@
 /*
- * 墨色 + 赭红主题（小说工作区，设定页改版第 4 步）。
- * workspace.vue 打开时给 <html> 加 class="ink-theme"，离开时去掉——弹窗 / 下拉是挂在 body 下的，主题必须放在根上才能一起变。
- * 只改颜色变量，组件结构不动：Element Plus 的主色 / 文字 / 边框 / 填充色 + 我们自己的 --ws-*（SettingsEditor 等读它们）。
+ * 墨色 + 朱砂红主题（全站常驻）。
+ * 变量放在 :root 上：弹窗 / 下拉 / 消息框挂在 body 下，也一起变。
+ * 只改颜色 / 字体变量，组件结构不动：Element Plus 的主色 / 文字 / 边框 / 填充色 + 我们自己的 --ws-*。
+ * 页面里不要再写死 Element 默认色（#409eff / #303133 / #f5f7fa …），用下面的变量。
  */
-html.ink-theme {
+:root {
   /* 自己的设计变量 */
-  --ws-paper: #f4efe6;      /* 页面纸色 */
+  --ws-paper: #f8f5ef;      /* 页面纸色 */
   --ws-card: #fffdf9;       /* 卡片 */
-  --ws-soft: #f6f1e9;       /* 浅底（卡片里的小卡、标签底） */
+  --ws-soft: #f9f6f1;       /* 浅底（卡片里的小卡、标签底） */
   --ws-ink: #241f1b;        /* 正文墨色 */
   --ws-sub: #7a7068;        /* 次要文字 */
   --ws-line: #e6ddd1;       /* 细边框 */
-  --ws-accent: #7a3028;     /* 赭红点缀 */
+  --ws-accent: #b03a2e;     /* 朱砂红点缀 */
   --ws-radius: 10px;
+  --ws-glass: rgba(251, 249, 244, 0.86); /* 书房的顶栏 / 左栏 / 图标栏 / 状态栏：半透明宣纸，透出底下的水墨 */
 
-  /* Element Plus：主色换成赭红（浅色档按与白色混合算好） */
-  --el-color-primary: #7a3028;
-  --el-color-primary-light-3: #a26e69;
-  --el-color-primary-light-5: #bd9894;
-  --el-color-primary-light-7: #d7c1bf;
-  --el-color-primary-light-8: #e4d6d4;
-  --el-color-primary-light-9: #f2eae9;
-  --el-color-primary-dark-2: #622620;
+  /* 侧栏：宣纸白（比内容区的纸色略亮，右侧一条细线分开） */
+  --ws-side: #fbf8f2;
+  --ws-side-hover: #f1eadf;
+  --ws-side-text: #5c534b;
+  --ws-side-active-bg: #f7ebeb;
+
+  /* 字体：文楷只用于标题和正文；表单 / 表格 / 按钮用系统字体（小字号文楷辨识度差） */
+  --ws-font-ui: -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --ws-font-title: 'LXGW WenKai', 'Kaiti SC', 'KaiTi', serif;
+  --ws-font-prose: 'LXGW WenKai', 'Songti SC', 'SimSun', serif;
+
+  /* Element Plus：主色换成朱砂红（浅色档按与白色混合算好） */
+  --el-color-primary: #b03a2e;
+  --el-color-primary-light-3: #c8756d;
+  --el-color-primary-light-5: #d89d97;
+  --el-color-primary-light-7: #e7c4c0;
+  --el-color-primary-light-8: #efd8d5;
+  --el-color-primary-light-9: #f7ebeb;
+  --el-color-primary-dark-2: #8d2e25;
+
+  /* 成功色调成墨绿，和纸色更配（警告 / 危险保持默认语义色） */
+  --el-color-success: #4f7a52;
+  --el-color-success-light-3: #84a286;
+  --el-color-success-light-5: #a7bda9;
+  --el-color-success-light-7: #cad7cb;
+  --el-color-success-light-8: #dce4dc;
+  --el-color-success-light-9: #edf2ee;
+  --el-color-success-dark-2: #3f6242;
 
   --el-text-color-primary: #241f1b;
   --el-text-color-regular: #3d3630;
   --el-text-color-secondary: #7a7068;
   --el-text-color-placeholder: #aaa197;
+  --el-border-color-darker: #c9bcab;
+  --el-border-color-dark: #d3c7b8;
   --el-border-color: #ddd3c6;
   --el-border-color-light: #e6ddd1;
   --el-border-color-lighter: #ece5da;
   --el-border-color-extra-light: #f2ece3;
-  --el-fill-color: #f1ebe2;
-  --el-fill-color-light: #f6f1e9;
+  --el-fill-color: #f4f0e9;
+  --el-fill-color-light: #f9f6f1;
   --el-fill-color-lighter: #f9f5ef;
   --el-fill-color-blank: #fffdf9;
   --el-bg-color: #fffdf9;
   --el-bg-color-overlay: #fffdf9;
+  --el-bg-color-page: #f8f5ef;
   --el-border-radius-base: 6px;
+  --el-font-family: var(--ws-font-ui);
 }
 
-/* 工作区页面：纸色底、卡片暖白 */
-html.ink-theme .app-main {
+body {
+  font-family: var(--ws-font-ui);
+  color: var(--ws-ink);
   background: var(--ws-paper);
 }
-html.ink-theme .workspace-page .el-card {
+
+/* 内容区：纸色底 + 极淡的纸纹（纯 CSS，不用图片） */
+.app-main {
+  background-color: var(--ws-paper);
+  background-image:
+    radial-gradient(rgba(120, 96, 70, 0.035) 1px, transparent 1px),
+    radial-gradient(rgba(120, 96, 70, 0.025) 1px, transparent 1px);
+  background-size: 7px 7px, 11px 11px;
+  background-position: 0 0, 3px 5px;
+}
+
+/* 卡片：暖白、细边、不要阴影 */
+.el-card {
   background: var(--ws-card);
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius);
-  box-shadow: none;
 }
-/* 标签只留两三种颜色：默认 / 成功（来自素材库等）/ 警告，其余（info、danger 的浅色款）都收成墨色描边 */
-html.ink-theme .workspace-page .el-tag--info.is-plain,
-html.ink-theme .workspace-page .el-tag--info.el-tag--plain {
+.el-card.is-always-shadow,
+.el-card.is-hover-shadow:hover {
+  box-shadow: 0 1px 3px rgba(60, 40, 20, 0.05);
+}
+
+/* 标题用文楷：卡片头 / 弹窗 / 抽屉 / 页面大标题。文楷只引了常规字重，不让浏览器假加粗（发糊） */
+.el-card__header,
+.el-dialog__title,
+.el-drawer__title,
+.el-drawer__header > span,
+.el-message-box__title,
+.page-title,
+.app-main h1,
+.app-main h2,
+.app-main h3 {
+  font-family: var(--ws-font-title);
+  font-weight: 400;
+  font-synthesis: none;
+  letter-spacing: 0.02em;
+}
+.el-card__header {
+  font-size: 16px;
+}
+.page-title,
+.app-main h1,
+.app-main h2 {
+  color: var(--ws-ink);
+}
+/* 页面大标题下一条赭红短线 */
+.page-title::after,
+.app-main h1::after {
+  content: '';
+  display: block;
+  width: 28px;
+  height: 2px;
+  margin-top: 6px;
+  border-radius: 1px;
+  background: var(--ws-accent);
+  opacity: 0.75;
+}
+
+/* 标签只留两三种颜色：默认 / 成功（来自素材库等）/ 警告，info 的浅色款收成墨色描边 */
+.el-tag--info.is-plain,
+.el-tag--info.el-tag--plain {
   --el-tag-text-color: var(--ws-sub);
   --el-tag-border-color: var(--ws-line);
   --el-tag-bg-color: var(--ws-soft);
+}
+
+/* 表格表头：浅纸色 */
+.el-table {
+  --el-table-header-bg-color: var(--ws-soft);
+  --el-table-row-hover-bg-color: #faf5ee;
+}
+
+/* ============================================================
+ * 工作区「书房」（views/novel/workspace.vue）：全屏、自带顶栏 / 左栏 / 右侧图标栏 / 状态栏。
+ * 背景 = 纸色 + 纸纹 + 左下 / 右下两抹远山水墨（自己画的 SVG，模糊后极淡），只做氛围、不抢内容。
+ * ============================================================ */
+.study {
+  position: relative;
+  isolation: isolate; /* 两抹水墨（z-index:-1）压在内容下面、纸纹（.app-main 背景）上面 */
+}
+.study::before,
+.study::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  bottom: 0;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+/* 左下：两层远山 */
+.study::before {
+  left: 0;
+  width: min(62vw, 900px);
+  height: 46vh;
+  opacity: 0.4;
+  /* 右缘、上缘淡出，不留生硬的边 */
+  -webkit-mask-image: linear-gradient(to right, #000 55%, transparent), linear-gradient(to top, #000 70%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to right, #000 55%, transparent), linear-gradient(to top, #000 70%, transparent);
+  mask-composite: intersect;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 900 420' preserveAspectRatio='none'%3E%3Cdefs%3E%3Cfilter id='b' x='-10%25' y='-10%25' width='120%25' height='120%25'%3E%3CfeGaussianBlur stdDeviation='9'/%3E%3C/filter%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23241f1b' stop-opacity='.16'/%3E%3Cstop offset='1' stop-color='%23241f1b' stop-opacity='.02'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg filter='url(%23b)'%3E%3Cpath fill='url(%23g)' d='M0 190 C60 150 110 120 170 150 C220 175 250 120 310 110 C370 100 410 170 470 185 C540 205 600 160 660 190 C730 225 800 250 900 270 L900 420 L0 420Z'/%3E%3Cpath fill='%23241f1b' fill-opacity='.07' d='M0 270 C80 240 140 225 210 250 C280 275 330 230 400 238 C480 248 530 300 610 305 C700 310 780 330 900 350 L900 420 L0 420Z'/%3E%3C/g%3E%3C/svg%3E");
+}
+/* 右下：一抹淡山 + 几笔远水 */
+.study::after {
+  right: 0;
+  width: min(40vw, 560px);
+  height: 30vh;
+  opacity: 0.38;
+  -webkit-mask-image: linear-gradient(to left, #000 55%, transparent), linear-gradient(to top, #000 70%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to left, #000 55%, transparent), linear-gradient(to top, #000 70%, transparent);
+  mask-composite: intersect;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 560 260' preserveAspectRatio='none'%3E%3Cdefs%3E%3Cfilter id='b' x='-10%25' y='-10%25' width='120%25' height='120%25'%3E%3CfeGaussianBlur stdDeviation='7'/%3E%3C/filter%3E%3C/defs%3E%3Cg filter='url(%23b)'%3E%3Cpath fill='%23241f1b' fill-opacity='.08' d='M0 220 C70 200 120 150 190 130 C250 112 300 150 350 120 C410 85 470 110 560 90 L560 260 L0 260Z'/%3E%3Cpath fill='none' stroke='%23241f1b' stroke-opacity='.08' stroke-width='3' d='M120 238 L220 236 M260 246 L400 243 M300 228 L360 227'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* 书房左栏里的目录项（设定分类 / 小节 / 章节 / 规划步骤共用） */
+.study-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 1px 0;
+  font-size: 14px;
+  color: var(--ws-ink);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.study-nav-item:hover {
+  background: var(--ws-side-hover);
+}
+.study-nav-item.is-active {
+  color: var(--ws-accent);
+  background: var(--ws-side-active-bg);
+  font-weight: 600;
 }

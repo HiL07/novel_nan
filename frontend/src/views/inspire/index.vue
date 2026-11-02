@@ -899,7 +899,7 @@ onActivated(loadWalls)
 .main {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -909,7 +909,7 @@ onActivated(loadWalls)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .wall-item {
   padding: 8px 10px;
@@ -918,23 +918,23 @@ onActivated(loadWalls)
   cursor: pointer;
 }
 .wall-item:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 .wall-item.active {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
 }
 .wall-name {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .label {
   margin: 0 6px 0 14px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .composer .el-button {
   margin-left: 12px;
@@ -991,7 +991,7 @@ onActivated(loadWalls)
   display: flex;
   gap: 8px;
   padding: 8px;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
   border-radius: 6px;
   font-size: 13px;
 }
@@ -1010,7 +1010,7 @@ onActivated(loadWalls)
 .cand-summary {
   margin-top: 2px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .variant {
   width: 130px;

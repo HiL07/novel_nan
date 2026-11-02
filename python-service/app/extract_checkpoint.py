@@ -5,7 +5,10 @@
 - ``meta.json``：本次提取的指纹（文件 id、分块字数、读几遍、分类、块数）。指纹变了（换了参数）就清空重来，
   避免把不同切法的块结果拼在一起。
 - ``<阶段>.jsonl``：一行一条 ``{"k": 键, "data": ...}``，逐行追加并 fsync；最后一行写到一半被打断时读取跳过。
-  阶段：``pass1`` / ``pass2``（键 = 块序号）、``cards``（键 = 实体键）、``systems``、``arcs``（键 = 窗口序号）。
+  阶段：``pass1`` / ``pass2``（键 = 章序号 ci 或 ci:part）、``cards``（键 = 实体键）、``systems``、``arcs``（键 = 窗口序号）。
+- ``chapters.json``：逐章提取读的章节列表和范围（逐章查看用，``save_json`` / ``load_json``）。
+
+``READING[key]`` = 正在读的章序号（只在内存里，任务结束清掉），逐章查看显示「读取中」。
 
 Java 保存结果成功后调用 delete，断点随之删除；失败 / 取消时保留，供「继续提取」使用。
 """
@@ -22,6 +25,8 @@ from .config import DATA_DIR
 log = logging.getLogger(__name__)
 
 CACHE_DIR = (DATA_DIR / "extract-cache").resolve()
+READING: dict[str, int] = {}
+_line_cache: dict[tuple[str, str], tuple[tuple[int, float], list[tuple[str, Any]]]] = {}
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -88,10 +93,60 @@ class Checkpoint:
         fh.flush()
         os.fsync(fh.fileno())
 
+    def reading(self, ci: int | None) -> None:
+        if self.key:
+            if ci is None:
+                READING.pop(self.key, None)
+            else:
+                READING[self.key] = ci
+
+    def save_json(self, name: str, data) -> None:
+        if not self.key:
+            return
+        path = _dir(self.key) / f"{name}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+
     def close(self) -> None:
         for fh in self._files.values():
             fh.close()
         self._files.clear()
+        self.reading(None)
+
+
+def load_json(key: str, name: str):
+    path = _dir(key) / f"{name}.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_lines(key: str, stage: str) -> list[tuple[str, Any]]:
+    """该阶段按写入顺序的全部行 [(键, 数据)]（同一键可能出现多次，后面的覆盖前面的）。按文件大小 / 修改时间缓存。"""
+    path = _dir(key) / f"{stage}.jsonl"
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    sig = (st.st_size, st.st_mtime)
+    cached = _line_cache.get((key, stage))
+    if cached and cached[0] == sig:
+        return cached[1]
+    rows: list[tuple[str, Any]] = []
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and "k" in row:
+                rows.append((str(row["k"]), row.get("data")))
+    if len(_line_cache) > 8:
+        _line_cache.clear()
+    _line_cache[(key, stage)] = (sig, rows)
+    return rows
 
 
 def info(key: str) -> dict:
@@ -107,4 +162,6 @@ def info(key: str) -> dict:
 
 
 def remove(key: str) -> None:
+    for k in [k for k in _line_cache if k[0] == key]:
+        _line_cache.pop(k, None)
     shutil.rmtree(_dir(key), ignore_errors=True)

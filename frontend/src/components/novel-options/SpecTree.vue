@@ -23,7 +23,7 @@ defineProps({
   margin: 2px 0 0;
   padding-left: 14px;
   list-style: none;
-  border-left: 1px solid #ebeef5;
+  border-left: 1px solid var(--el-border-color-lighter);
 }
 .spec-tree.is-root {
   padding-left: 0;
@@ -35,13 +35,14 @@ li {
   line-height: 1.6;
 }
 .spec-label {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .spec-label::after {
   content: '：';
 }
 .spec-value {
-  color: #303133;
+  color: var(--el-text-color-primary);
+  font-family: var(--ws-font-prose);
   word-break: break-all;
   white-space: pre-wrap;
 }

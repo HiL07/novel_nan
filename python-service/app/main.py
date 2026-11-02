@@ -1,6 +1,7 @@
 """FastAPI 入口：小说提取异步任务。
 
 POST /api/models/verify       验证模型配置（真实发一次极小请求）
+POST /api/models/list         获取可用模型（模型目录）
 POST /api/extract/jobs        提交任务 → jobId（立即返回，后台执行；任务间串行，任务内按配置并发）
 GET  /api/extract/jobs/{id}   查询状态 queued/running/succeeded/failed/cancelled + 进度 + 结果
 POST /api/extract/jobs/{id}/cancel  取消提取任务（model = 大模型配置，local = 应用内本地模型，二选一）
@@ -160,6 +161,14 @@ def health() -> dict:
 def verify_model(cfg: ModelConfig) -> VerifyResult:
     result = VerifyResult(**llm_client.verify(cfg))
     log.info("模型验证 %s -> ok=%s %s", cfg, result.ok, result.message)
+    return result
+
+
+@app.post("/api/models/list")
+def list_models(req: llm_client.ListModelsRequest) -> dict:
+    """「获取可用模型」：模型目录（OpenAI 兼容 GET /models，Anthropic GET /v1/models）。不记录密钥 / 响应体。"""
+    result = llm_client.list_models(req)
+    log.info("获取模型目录 %s -> ok=%s %s", req, result["ok"], result["message"])
     return result
 
 
@@ -359,6 +368,44 @@ def extract_checkpoint_info(key: str) -> dict:
         return {**extract_checkpoint.info(key), "running": key in _active_keys}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/extract/checkpoints/{key}/chapters")
+def extract_checkpoint_chapters(key: str, since: int = 0) -> dict:
+    """逐章查看（提取中）：since = 上次的 next → {exists, range, chapters?, rows, next, current, running}"""
+    from . import chapter_scan
+    try:
+        return {**chapter_scan.live(key, max(0, since)), "running": key in _active_keys}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+class BookFileRequest(BaseModel):
+    fileId: int = Field(gt=0)
+    fileExt: str = Field(min_length=1, max_length=10)
+    index: int = Field(default=0, ge=0, le=100000)  # chapter-text：全书第几章（从 0 数）
+
+
+def _book_call(fn, req: BookFileRequest, *args) -> dict:
+    ext = req.fileExt.lower()
+    if ext not in config.SUPPORTED_EXTS:
+        raise HTTPException(400, f"不支持的文件类型：{ext}")
+    try:
+        return fn(req.fileId, ext, *args)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.post("/api/extract/split-preview")
+def extract_split_preview(req: BookFileRequest) -> dict:
+    """提取前选章节范围：和提取同一套分章 → {chars, total, chapters[{index (从 1 数), title, kind, chars, volume?}], prefaceChars, warnings}"""
+    return _book_call(extractor.split_preview, req)
+
+
+@app.post("/api/extract/chapter-text")
+def extract_chapter_text(req: BookFileRequest) -> dict:
+    """逐章查看的原文：全书第 index 章（从 0 数）→ {index, title, kind, text, total}"""
+    return _book_call(extractor.chapter_text, req, req.index)
 
 
 @app.post("/api/extract/checkpoints/{key}/delete")

@@ -51,10 +51,10 @@ function ruleText(rule) {
 
 <style scoped>
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .mono {
@@ -65,6 +65,6 @@ function ruleText(rule) {
   background: #fef6f6;
 }
 .attempt-table :deep(.ok-row) {
-  background: #f4fbf6;
+  background: var(--el-color-success-light-9);
 }
 </style>

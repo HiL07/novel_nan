@@ -168,12 +168,12 @@ defineExpose({ reload: load })
 .hint,
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cand-card {
   padding: 10px 12px;
   margin-bottom: 10px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
 }
 .cand-card.is-checked {
@@ -210,6 +210,6 @@ defineExpose({ reload: load })
   margin-top: 8px;
   font-size: 12px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 </style>

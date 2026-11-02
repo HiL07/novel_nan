@@ -196,13 +196,13 @@ async function confirm() {
   margin: 0 0 14px;
   font-size: 13px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .hint {
   margin-left: 10px;
   font-size: 12px;
   line-height: 1.5;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .hint.block {
   flex-basis: 100%;
@@ -210,12 +210,12 @@ async function confirm() {
   margin-top: 4px;
 }
 .hint.warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .opt-meta {
   margin-left: 8px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .top-n {
   margin-left: 8px;

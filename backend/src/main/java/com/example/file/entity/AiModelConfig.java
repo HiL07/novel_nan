@@ -1,31 +1,54 @@
 package com.example.file.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * AI 模型配置（OpenAI 兼容接口），对应 SQLite ai_model_config 表。
  * 只有验证通过（VERIFIED）的配置才能启用；同一时间只有一个启用（active）的配置用于小说提取。
  */
 @Data
-@TableName("ai_model_config")
+@TableName(value = "ai_model_config", autoResultMap = true)
 public class AiModelConfig {
 
     public static final String UNVERIFIED = "UNVERIFIED";
     public static final String VERIFIED = "VERIFIED";
     public static final String FAILED = "FAILED";
 
+    /** 添加方式：第三方模型提供商（预设，providerId = 预设键，如 deepseek）/ 自定义模型 API */
+    public static final String TYPE_PRESET = "preset";
+    public static final String TYPE_CUSTOM = "custom";
+    /** API 协议 */
+    public static final String PROTOCOL_OPENAI = "openai";
+    public static final String PROTOCOL_ANTHROPIC = "anthropic";
+
     @TableId(type = IdType.AUTO)
     private Long id;
 
     /** 显示名称，如「DeepSeek（默认）」 */
     private String name;
+
+    /** preset（第三方模型提供商）/ custom（自定义模型 API）；老数据为 null */
+    private String providerType;
+
+    /** 提供商 ID：preset = 预设键（deepseek / qwen …）；custom = 用户填的唯一 ID（字母数字 . _ -） */
+    private String providerId;
+
+    /** API 协议：openai（{baseUrl}/chat/completions）/ anthropic（{baseUrl}/v1/messages）；null 视为 openai */
+    private String protocol;
+
+    /** 模型目录：这个服务下可用的模型名（「获取可用模型」或手动添加），model 是其中当前使用的一个 */
+    @TableField(typeHandler = JacksonTypeHandler.class)
+    private List<String> models;
 
     /** OpenAI 兼容根地址，请求 {baseUrl}/chat/completions，如 https://api.deepseek.com */
     private String baseUrl;

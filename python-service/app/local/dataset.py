@@ -58,13 +58,17 @@ def strip_boilerplate(text: str) -> tuple[str, list[str]]:
 def build_groups(sources: list[dict]) -> list[dict]:
     groups = []
     for si, src in enumerate(sources):
-        chapters = [ch for ch in text_loader.split_chapters(src["text"]) if ch["content"].strip()]
+        # 训练不分段（segment=False）：没有标题时整个来源一组；书头文字（preface）也是样本，单独成组
+        book = text_loader.split_book(src["text"], segment=False)
+        chapters = [ch for ch in book["chapters"] if ch["content"].strip()]
+        if book["preface"]:
+            chapters.insert(0, {"title": "序/前言", "content": book["preface"], "kind": "opening"})
         if not chapters and src["text"].strip():  # 只有标题行、没有正文时：整个来源作为一组，不丢文本
-            chapters = [{"title": "全文", "content": src["text"]}]
+            chapters = [{"title": "全文", "content": src["text"], "kind": "whole"}]
         for ci, ch in enumerate(chapters):
             if ch["content"].strip():
-                # 章节标题行也是原文的一部分（与改动前整段训练的内容一致）；「全文 / 序」是切分器补的名字，不加
-                real_title = ch["title"] not in ("全文", "序/前言")
+                # 章节标题行也是原文的一部分（与改动前整段训练的内容一致）；「全文 / 开篇」是切分器补的名字，不加
+                real_title = ch.get("kind") in ("chapter", "special", "volume")
                 groups.append({"id": f"{si}:{ci}", "source": src.get("name") or src.get("type"), "title": ch["title"],
                                "text": f"{ch['title']}\n{ch['content']}" if real_title else ch["content"]})
     return groups

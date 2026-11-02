@@ -179,9 +179,9 @@ function remove(o) {
   padding: 4px 12px;
   font-size: 13px;
   line-height: 20px;
-  color: #606266;
-  background: #f4f4f5;
-  border: 1px solid #e4e7ed;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 14px;
   cursor: pointer;
   user-select: none;
@@ -215,7 +215,7 @@ function remove(o) {
 }
 .chip-add {
   color: var(--el-color-primary);
-  background: #fff;
+  background: var(--el-bg-color);
   border-style: dashed;
 }
 .custom-panel {
@@ -224,7 +224,7 @@ function remove(o) {
   gap: 6px;
   flex-basis: 100%;
   padding: 8px 10px;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
   border: 1px dashed var(--el-border-color);
   border-radius: 6px;
 }
@@ -243,10 +243,10 @@ function remove(o) {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .choice-hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

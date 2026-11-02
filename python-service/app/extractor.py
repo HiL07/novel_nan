@@ -65,56 +65,138 @@ def _chat_fn(cfg: ModelConfig, usage: dict) -> Callable[[list[dict], int], str]:
     return call
 
 
+_books: "dict[tuple[int, str], dict]" = {}   # 最近 2 个文件的分章结果（逐章查看取原文、提取前预览章节用）
+_books_lock = threading.Lock()
+
+
+def load_book(file_id: int, file_ext: str) -> dict:
+    """取文件 → 纯文本 → 分章（和提取时完全同一套流程）。→ {text, chapters, preface, warnings}，缓存最近 2 个文件。"""
+    key = (file_id, file_ext.lower())
+    with _books_lock:
+        if key in _books:
+            return _books[key]
+    text = text_loader.to_plain_text(text_loader.fetch_file(file_id), file_ext)
+    if not text:
+        raise ValueError("文件中没有可提取的文本")
+    book = text_loader.split_book(text)
+    out = {"text": text, "chapters": book["chapters"] or [{"title": "全文", "content": text, "kind": "whole"}],
+           "preface": book["preface"], "warnings": book["warnings"]}
+    with _books_lock:
+        while len(_books) >= 2:
+            _books.pop(next(iter(_books)))
+        _books[key] = out
+    return out
+
+
+def split_preview(file_id: int, file_ext: str) -> dict:
+    """提取前选章节范围用：→ {chars, total, chapters: [{index (从 1 数), title, kind, chars, volume?}], prefaceChars, warnings}"""
+    book = load_book(file_id, file_ext)
+    rows = []
+    for i, ch in enumerate(book["chapters"], 1):
+        row = {"index": i, "title": ch["title"], "kind": ch.get("kind", "chapter"), "chars": len(ch["content"])}
+        if ch.get("volume"):
+            row["volume"] = ch["volume"]
+        rows.append(row)
+    return {"chars": len(book["text"]), "total": len(rows), "chapters": rows,
+            "prefaceChars": len(book["preface"] or ""), "warnings": book["warnings"]}
+
+
+def chapter_text(file_id: int, file_ext: str, index: int) -> dict:
+    """第 index 章（从 0 数，全书下标）的原文 → {index, title, kind, text, total}。"""
+    chapters = load_book(file_id, file_ext)["chapters"]
+    if not 0 <= index < len(chapters):
+        raise ValueError(f"没有第 {index + 1} 章（共 {len(chapters)} 章）")
+    ch = chapters[index]
+    return {"index": index, "title": ch["title"], "kind": ch.get("kind", "chapter"), "text": ch["content"],
+            "total": len(chapters)}
+
+
+def chapter_range(total: int, opts) -> tuple[int, int]:
+    """MaterialOptions 的 fromChapter / toChapter（从 1 数，to = 0 到最后）→ 切片 [lo, hi)。"""
+    lo = max(1, opts.fromChapter) - 1
+    hi = min(total, opts.toChapter) if opts.toChapter else total
+    if lo >= total:
+        raise ValueError(f"起始章（第 {lo + 1} 章）超过了全书章数（{total} 章）")
+    if hi <= lo:
+        raise ValueError(f"章节范围不对：第 {lo + 1} 章到第 {hi} 章")
+    return lo, hi
+
+
 def _extract_facts(file_id: int, file_ext: str, on_progress: Callable[[int, str], None], opts, stop_event, *,
                    call, concurrency: int, model_name: str, source: str, resume_key: str | None,
                    usage: dict | None, in_app: bool) -> dict:
-    """读原文记实体和事实（material_facts.scan）：结果 = 章节列表（摘要来自第一遍）+ entities（实体档案），不出候选。"""
-    data = text_loader.fetch_file(file_id)
-    text = text_loader.to_plain_text(data, file_ext)
-    if not text:
-        raise ValueError("文件中没有可提取的文本")
-    chapters = text_loader.split_chapters(text)
-    blocks = material_facts.build_blocks(chapters, opts.chunkChars)
-    fingerprint = {"fileId": file_id, "chars": len(text), "chunkChars": opts.chunkChars, "blocks": len(blocks),
-                   "rounds": opts.rounds, "categories": sorted(opts.active_categories()), "focus": opts.focus.strip()}
+    """逐章读原文（chapter_scan）：结果 = 章节列表（摘要由章节卡拼成）+ entities（实体档案）+ chapterCards / threads / pacing，
+    不出候选。一次读的上限：大模型 2 万字；GGUF（本机服务）分段字数 × 2；应用内本地模型 = 分段字数（上下文窗口小）。"""
+    from . import breakdown, chapter_scan
+
+    book = load_book(file_id, file_ext)
+    text, all_chapters = book["text"], book["chapters"]
+    lo, hi = chapter_range(len(all_chapters), opts)
+    chapters = all_chapters[lo:hi]
+    rng = {"from": lo + 1, "to": hi, "total": len(all_chapters), "chars": sum(len(c["content"]) for c in chapters)}
+    golden = {ci - lo for ci in chapter_scan.golden_of(all_chapters) if lo <= ci < hi}
+    small = in_app or source == "local"
+    max_chars = opts.chunkChars if in_app else opts.chunkChars * 2 if small else chapter_scan.API_MAX_CHARS
+    jobs = chapter_scan.chapter_jobs(chapters, max_chars)
+    # 指纹不含读到哪一章：同一起点读得更远时，已读的章可以接着用
+    fingerprint = {"fileId": file_id, "chars": len(text), "chapters": len(all_chapters),
+                   **chapter_scan.fingerprint(opts, max_chars)}
     ckpt = extract_checkpoint.Checkpoint(resume_key, fingerprint)
+    parts = Counter(j["ci"] for j in jobs)
+    ckpt.save_json("chapters", {"range": rng, "chapters": [
+        {"ci": ci, "index": lo + ci, "title": ch["title"], "kind": ch.get("kind", "chapter"), "chars": len(ch["content"]),
+         "parts": parts.get(ci, 0)} for ci, ch in enumerate(chapters)]})
     resumed = sum(len(ckpt.done(s)) for s in ("pass1", "pass2"))
-    on_progress(0, f"共 {len(chapters)} 章，{len(blocks)} 块，每块读 {opts.rounds} 遍，模型 {model_name}"
-                   + (f"，从断点继续（已读完 {resumed} 块次）" if resumed else ""))
+    depth_label = {"fast": "快速", "standard": "标准", "deep": "深拆"}.get(opts.depth, opts.depth)
+    scope = f"第 {lo + 1}–{hi} 章（全书 {len(all_chapters)} 章）" if (lo, hi) != (0, len(all_chapters)) else f"共 {len(chapters)} 章"
+    on_progress(0, f"{scope}，{len(jobs)} 份，逐章读、{depth_label}档、读 {opts.rounds} 遍，模型 {model_name}"
+                   + (f"，从断点继续（已读完 {resumed} 份次）" if resumed else ""))
     try:
-        out = material_facts.scan(chapters, opts, call, concurrency, ckpt, on_progress, stop_event, local=in_app)
+        out = material_facts.scan(chapters, opts, call, concurrency, ckpt, on_progress, stop_event, local=small,
+                                  max_chars=max_chars, golden=golden)
     except material_facts.Cancelled as e:
         raise Cancelled(str(e)) from e
     finally:
         ckpt.close()
     stats = out["stats"]
-    if stats["failedChunks"] >= len(blocks) * opts.rounds:
-        raise LLMError("所有分块都解析失败，请检查模型配置或稍后重试")
+    if jobs and stats["failedChunks"] >= len(jobs) * opts.rounds:
+        raise LLMError("所有章节都解析失败，请检查模型配置或稍后重试")
 
     out_chapters, counts, first = [], Counter(), {}
-    for ch, info in zip(chapters, out["chapters"]):
-        out_chapters.append({"title": ch["title"], "wordCount": len(ch["content"]), "summary": info["summary"],
-                             "characters": info["characters"], "events": [], "foreshadowing": []})
+    for ch, info, card in zip(chapters, out["chapters"], out["chapterCards"]):
+        row = {"title": ch["title"], "wordCount": len(ch["content"]), "summary": info["summary"],
+               "characters": info["characters"], "events": [{"summary": e} for e in card.get("events") or []],
+               "foreshadowing": [], "kind": ch.get("kind", "chapter")}
+        if ch.get("volume"):
+            row["volume"] = ch["volume"]
+        out_chapters.append(row)
         counts.update(info["characters"])
         for n in info["characters"]:
             first.setdefault(n, ch["title"])
     result = {
         "wordCount": len(text),
         "chapterCount": len(chapters),
+        "range": rng,            # 读了哪几章（从 1 数，全书下标）；chapters / chapterCards 只含这几章，ci 从范围起点数
         "failedChunks": stats["failedChunks"],
         "characters": [{"name": n, "role": "", "firstAppear": first[n], "chapterCount": c}
                        for n, c in counts.most_common()],
-        "style": {"dialogRatio": dialog_ratio(text), "pace": "", "tones": []},
+        "style": {"dialogRatio": dialog_ratio("\n".join(c["content"] for c in chapters)), "pace": "", "tones": []},
         "chapters": out_chapters,
         "model": model_name,
         "source": source,
         "entities": out["entities"],
         "factStats": stats,
         "materialOptions": opts.model_dump(),
+        "preface": book["preface"][:2000],      # 书头（书名 / 作者 / 简介），不算章、不读
+        "splitWarnings": book["warnings"],
+        "chapterCards": out["chapterCards"],
+        "threads": out["threads"],
+        "lead": out["lead"],
+        "pacing": breakdown.pacing(out["chapterCards"], out["threads"]),
     }
     if usage:
         result["usage"] = usage
-    on_progress(100, f"完成：{stats['entities']} 个实体、{stats['factsVerified']} 条事实")
+    on_progress(100, f"完成：{stats['entities']} 个实体、{stats['factsVerified']} 条事实、{stats['cards']} 张章节卡")
     return result
 
 

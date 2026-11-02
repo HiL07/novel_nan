@@ -45,6 +45,13 @@ public class AiServiceClient {
         return client.post().uri("/api/models/verify").body(modelBody(cfg)).retrieve().body(JsonNode.class);
     }
 
+    /** POST /api/models/list：「获取可用模型」→ {ok, models[{id, name}], message}（密钥只在这次请求里） */
+    public JsonNode listModels(String baseUrl, String apiKey, String protocol) {
+        return client.post().uri("/api/models/list")
+                .body(Map.of("baseUrl", baseUrl, "apiKey", apiKey == null ? "" : apiKey, "protocol", protocol))
+                .retrieve().body(JsonNode.class);
+    }
+
     /** POST /api/extract/jobs → Job（含 jobId）。materials 为素材候选提取范围（null 表示不提取） */
     /**
      * resumeKey：断点键（e&lt;任务id&gt;，Python 续跑时跳过已完成的块）。
@@ -92,6 +99,24 @@ public class AiServiceClient {
     /** GET /api/extract/checkpoints/{key} → {exists, stages: {pass1, pass2, cards, systems, arcs}, running} */
     public JsonNode extractCheckpoint(String key) {
         return client.get().uri("/api/extract/checkpoints/{key}", key).retrieve().body(JsonNode.class);
+    }
+
+    /** GET /api/extract/checkpoints/{key}/chapters?since=N：逐章查看（提取中）→ {exists, range, chapters?, rows, next, current, running} */
+    public JsonNode extractLive(String key, int since) {
+        return client.get().uri("/api/extract/checkpoints/{key}/chapters?since={since}", key, since)
+                .retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/split-preview：提取前按同一套规则分章 → {chars, total, chapters[{index, title, kind, chars}], prefaceChars, warnings} */
+    public JsonNode extractSplitPreview(Long fileId, String fileExt) {
+        return slowClient.post().uri("/api/extract/split-preview")
+                .body(Map.of("fileId", fileId, "fileExt", fileExt)).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/chapter-text：全书第 index 章（从 0 数）的原文 → {index, title, kind, text, total} */
+    public JsonNode extractChapterText(Long fileId, String fileExt, int index) {
+        return slowClient.post().uri("/api/extract/chapter-text")
+                .body(Map.of("fileId", fileId, "fileExt", fileExt, "index", index)).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/materials/expand：语义检索第 1 步，需求 → {ok, keywords, tags, categories} */
@@ -311,7 +336,9 @@ public class AiServiceClient {
                 "baseUrl", cfg.getBaseUrl(),
                 "apiKey", cfg.getApiKey() == null ? "" : cfg.getApiKey(),
                 "model", cfg.getModel(),
-                "concurrency", cfg.getConcurrency() == null ? 1 : cfg.getConcurrency());
+                "concurrency", cfg.getConcurrency() == null ? 1 : cfg.getConcurrency(),
+                "protocol", AiModelConfig.PROTOCOL_ANTHROPIC.equals(cfg.getProtocol())
+                        ? AiModelConfig.PROTOCOL_ANTHROPIC : AiModelConfig.PROTOCOL_OPENAI);
     }
 
     // ------------------------------------------------------------------ 灵感墙

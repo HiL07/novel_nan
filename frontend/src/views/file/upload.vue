@@ -167,12 +167,12 @@ onBeforeUnmount(() => {
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .card-header {
   display: flex;
@@ -182,7 +182,7 @@ onBeforeUnmount(() => {
 
 .upload-icon {
   font-size: 48px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   margin-bottom: 8px;
 }
 
@@ -203,8 +203,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: #ffffff;
-  border: 1px solid #dcdfe6;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color);
   border-radius: 8px;
   text-align: center;
   word-break: break-all;
@@ -226,7 +226,7 @@ onBeforeUnmount(() => {
 }
 .file-icon {
   font-size: 36px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .file-meta {
   box-sizing: border-box;
@@ -241,10 +241,10 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .file-size {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .file-remove {
   position: absolute;
@@ -277,10 +277,10 @@ onBeforeUnmount(() => {
   font-size: 16px;
 }
 .result-icon.is-ok {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 .result-icon.is-fail {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .result-body {
   min-width: 0;
@@ -288,17 +288,17 @@ onBeforeUnmount(() => {
 }
 .result-name {
   font-size: 14px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   word-break: break-all;
 }
 .result-meta {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   word-break: break-all;
 }
 .result-error {
   font-size: 12px;
-  color: #f56c6c;
+  color: var(--el-color-danger);
   word-break: break-all;
 }
 </style>

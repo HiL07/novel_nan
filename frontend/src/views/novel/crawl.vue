@@ -549,12 +549,6 @@
       </template>
     </el-dialog>
 
-    <ExtractOptionsDialog
-      v-model="extractDlg.visible"
-      :file-name="extractDlg.fileName"
-      :char-count="extractDlg.charCount"
-      @confirm="doExtract"
-    />
   </div>
 </template>
 
@@ -584,9 +578,7 @@ import {
   submitCrawl,
   useSavedUrl
 } from '@/api/crawl'
-import { submitExtract } from '@/api/novel'
 import { errorMessage } from '@/api/request'
-import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
 import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import SiteMapView from '@/components/crawl/SiteMapView.vue'
 import HomeLinksView from '@/components/crawl/HomeLinksView.vue'
@@ -664,7 +656,6 @@ function preferAutoRule(id) {
 }
 const range = reactive({ start: 1, end: 1 })
 const submitting = ref(false)
-const extractDlg = reactive({ visible: false, fileId: null, fileName: '', charCount: 0 })
 const resumeDlg = reactive({ visible: false, task: null, info: null, loading: false, newOrigin: '', submitting: false })
 const ai = reactive({ url: '', maxAttempts: 5, hint: '', autoStart: false, useKnown: true })
 const aiJob = ref(null)
@@ -1448,21 +1439,7 @@ function reuseOptions(row) {
 
 function openExtract(row) {
   const name = row.bookName || '抓取小说'
-  Object.assign(extractDlg, { visible: true, fileId: row.fileId, fileName: `${name}.txt`, charCount: row.wordCount || 0 })
-}
-
-async function doExtract(options) {
-  try {
-    const res = await submitExtract(extractDlg.fileId, options)
-    if (res.code !== 0) {
-      ElMessage.error(res.message || '提交失败')
-      return
-    }
-    ElMessage.success('已提交提取任务')
-    router.push({ path: '/novel/extract', query: { id: res.data.id } })
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '提交提取任务失败'))
-  }
+  router.push({ path: '/novel/extract/new', query: { fileId: row.fileId, name: `${name}.txt` } })
 }
 
 // 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止任务列表轮询（AI 解析的轮询不停）
@@ -1478,7 +1455,7 @@ onActivated(async () => {
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .task-pager {
   margin-top: 12px;
@@ -1509,14 +1486,14 @@ onActivated(async () => {
   align-items: center;
   gap: 16px;
   padding: 16px 18px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  background: #fafbfc;
+  background: var(--el-fill-color-lighter);
 }
 .site-name {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin-bottom: 4px;
 }
 .site-home {
@@ -1557,7 +1534,7 @@ onActivated(async () => {
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .tip {
   margin-bottom: 16px;
@@ -1575,12 +1552,12 @@ onActivated(async () => {
 }
 .unit {
   margin-left: 6px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 .hint {
   margin-left: 10px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .hint.block {
@@ -1595,7 +1572,7 @@ onActivated(async () => {
 .preview {
   margin-top: 8px;
   padding-top: 16px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 .cat-chips {
   display: flex;
@@ -1618,14 +1595,14 @@ onActivated(async () => {
   gap: 8px;
   margin-bottom: 8px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .sample-text {
   max-height: 200px;
   overflow: auto;
   margin: 8px 0 0;
   padding: 10px 12px;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 4px;
   white-space: pre-wrap;
   font-family: inherit;
@@ -1647,7 +1624,7 @@ onActivated(async () => {
   margin-bottom: 10px;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .ml6 {
@@ -1662,7 +1639,7 @@ onActivated(async () => {
   margin-top: 12px;
 }
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .rule-line {
   font-family: Consolas, monospace;
@@ -1671,7 +1648,7 @@ onActivated(async () => {
 .rule-detail {
   padding: 4px 48px;
   line-height: 1.8;
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 .ai-strip {
@@ -1681,13 +1658,13 @@ onActivated(async () => {
   gap: 4px 10px;
   margin: 4px 0 8px;
   padding: 8px 12px;
-  background: #f4fbf6;
-  border: 1px solid #e1f3d8;
+  background: var(--el-color-success-light-9);
+  border: 1px solid var(--el-color-success-light-8);
   border-radius: 6px;
   font-size: 13px;
 }
 .ai-strip-msg {
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .ai-strip-usage {
   margin: 0;
@@ -1703,7 +1680,7 @@ onActivated(async () => {
   margin-left: 12px;
 }
 .count {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .bar-left {
   display: flex;
@@ -1716,7 +1693,7 @@ onActivated(async () => {
 .saved-form {
   margin-bottom: 8px;
   padding: 12px 12px 0;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 4px;
 }
 .rules-bar {
@@ -1744,7 +1721,7 @@ onActivated(async () => {
 .rule-site {
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .ellipsis {
   overflow: hidden;
@@ -1775,10 +1752,10 @@ onActivated(async () => {
   font-weight: 700;
 }
 .dot-ok {
-  background: #67c23a;
+  background: var(--el-color-success);
 }
 .dot-fail {
-  background: #f56c6c;
+  background: var(--el-color-danger);
 }
 .tab-badge {
   margin-left: 4px;

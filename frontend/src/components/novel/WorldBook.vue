@@ -18,7 +18,7 @@
         <el-button size="small" @click="showSnapshot = true">查看 AI 看到的局面</el-button>
       </div>
 
-      <div class="section-head"><span class="col-title">人物局面</span>
+      <div class="section-head" data-anchor="人物局面"><span class="col-title">人物局面</span>
         <span v-if="!hasGoals && characters.length" class="muted small">还没有人物的目标 / 关系：之后写的章节会自动记录，出走向时也会先整理一次</span>
       </div>
       <el-table :data="characters" size="small" empty-text="还没有人物">
@@ -63,7 +63,7 @@
       </el-alert>
 
       <template v-if="plannedThreads.length || plannedClocks.length">
-        <div class="section-head"><span class="col-title">计划中（自动规划 / 大纲里定好、还没写出来的）</span></div>
+        <div class="section-head" data-anchor="计划中"><span class="col-title">计划中（自动规划 / 大纲里定好、还没写出来的）</span></div>
         <div v-for="t in plannedThreads" :key="t.id" class="line" :class="{ overdue: t.plannedIn && t.plannedIn < wb.chapter }">
           <b>{{ t.id }}</b> {{ t.text }}
           <span class="muted small">计划第{{ t.plannedIn || '?' }}章埋<template v-if="t.payoffIn">，预计第{{ t.payoffIn }}章收</template></span>
@@ -75,7 +75,7 @@
         </div>
       </template>
 
-      <div class="section-head"><span class="col-title">未回收的伏笔 · 定时事件</span></div>
+      <div class="section-head" data-anchor="未回收伏笔 · 定时事件"><span class="col-title">未回收的伏笔 · 定时事件</span></div>
       <div class="two-col">
         <div>
           <div v-for="t in openThreads.slice(0, 30)" :key="t.id" class="line">
@@ -92,7 +92,7 @@
         </div>
       </div>
 
-      <div class="section-head"><span class="col-title">设定</span></div>
+      <div class="section-head" data-anchor="设定条目" :data-anchor-count="others.length"><span class="col-title">设定</span></div>
       <el-collapse>
         <el-collapse-item v-for="e in others" :key="e.id" :name="e.id">
           <template #title>

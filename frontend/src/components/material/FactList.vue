@@ -27,14 +27,14 @@ const open = ref(false)
 .fact-list {
   margin-top: 6px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .fact-head {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   cursor: pointer;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 .facts {
   margin: 4px 0 0;
@@ -48,6 +48,6 @@ const open = ref(false)
 }
 .quote {
   display: block;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

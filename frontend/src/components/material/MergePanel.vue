@@ -467,18 +467,18 @@ defineExpose({ reload: load })
 }
 .label {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .num {
   width: 32px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .tip {
   margin: 8px 0 14px;
   font-size: 12px;
   line-height: 1.6;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .draft-alert {
   margin-top: 10px;
@@ -486,11 +486,11 @@ defineExpose({ reload: load })
 .group {
   margin-top: 12px;
   padding: 10px 12px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 .group.checked {
-  border-color: #a0cfff;
+  border-color: var(--el-color-primary-light-5);
 }
 .group-head {
   display: flex;
@@ -502,11 +502,11 @@ defineExpose({ reload: load })
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .warn {
   font-size: 12px;
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .members {
   display: grid;
@@ -516,7 +516,7 @@ defineExpose({ reload: load })
 }
 .member {
   padding: 8px;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
   border-radius: 6px;
   font-size: 13px;
 }
@@ -529,20 +529,20 @@ defineExpose({ reload: load })
   gap: 6px;
 }
 .book {
-  color: #409eff;
+  color: var(--el-color-primary);
   font-size: 12px;
 }
 .member-summary {
   margin-top: 4px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .member-attrs {
   display: flex;
   flex-direction: column;
   margin-top: 4px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .variant-label {
   margin-bottom: 4px;
@@ -553,12 +553,12 @@ defineExpose({ reload: load })
 .master {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px dashed #dcdfe6;
+  border-top: 1px dashed var(--el-border-color);
 }
 .master-title {
   margin-bottom: 8px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .master-title .muted {
   margin-left: 8px;

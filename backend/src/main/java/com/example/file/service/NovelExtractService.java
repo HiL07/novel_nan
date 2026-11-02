@@ -406,6 +406,57 @@ public class NovelExtractService {
     }
 
     /**
+     * 逐章查看（提取中）：读 Python 断点里 since 行之后变化的章，加上任务状态。
+     * 已经有结果文件的任务返回 {finished: true}（前端直接用结果里的 chapterCards / entities）。
+     */
+    public Map<String, Object> live(Long id, int since) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("status", task.getStatus());
+        out.put("progress", task.getProgress());
+        out.put("message", task.getMessage());
+        if (task.getResultPath() != null) {
+            out.put("finished", true);
+            return out;
+        }
+        try {
+            out.put("live", aiClient.extractLive(checkpointKey(id), Math.max(0, since)));
+        } catch (RestClientResponseException e) {
+            throw new BizException(400, "读取逐章进度失败：" + rejectReason(e));
+        } catch (ResourceAccessException e) {
+            throw new BizException(503, "AI 服务未启动或无法连接");
+        }
+        return out;
+    }
+
+    /** 提取工作区看原文（开始前也能看）：文件的全书第 index 章（从 0 数，和提取同一套分章） */
+    public JsonNode fileChapterText(Long fileId, int index) {
+        FileInfo file = fileService.getById(fileId);
+        String ext = extOf(file);
+        return callBook(() -> aiClient.extractChapterText(fileId, ext, index));
+    }
+
+    /** 提取前选章节范围：按提取时的规则分章，返回章节列表 */
+    public JsonNode splitPreview(Long fileId) {
+        FileInfo file = fileService.getById(fileId);
+        String ext = extOf(file);
+        return callBook(() -> aiClient.extractSplitPreview(fileId, ext));
+    }
+
+    private JsonNode callBook(java.util.function.Supplier<JsonNode> call) {
+        try {
+            return call.get();
+        } catch (RestClientResponseException e) {
+            throw new BizException(400, rejectReason(e));
+        } catch (ResourceAccessException e) {
+            throw new BizException(503, "AI 服务未启动或无法连接");
+        }
+    }
+
+    /**
      * 手动修改提取结果（AI 生成的章节摘要 / 人物 / 事件等都可以改）：整体替换结果 JSON（须为对象且含 chapters 数组），
      * 重写结果文件并更新 SHA-256 / 大小 / 章节数，结果里记 editedAt。数据库更新失败时把原文件写回。
      */

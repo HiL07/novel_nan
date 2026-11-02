@@ -109,7 +109,7 @@ async function start() {
 </script>
 
 <style scoped>
-.muted { margin-left: 8px; font-size: 12px; color: #909399; }
+.muted { margin-left: 8px; font-size: 12px; color: var(--el-text-color-secondary); }
 .w240 { width: 240px; }
 .full { width: 100%; }
 </style>

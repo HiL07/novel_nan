@@ -145,7 +145,7 @@ async function confirm() {
 .muted {
   margin: 6px 0 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .targets {
   margin-bottom: 8px;
@@ -159,7 +159,7 @@ async function confirm() {
 }
 .idx {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   line-height: 24px;
 }
 .elements {

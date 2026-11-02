@@ -22,14 +22,20 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
 
 
 class MaterialOptions(BaseModel):
-    """提取时是否记录设定实体（只读原文：实体 + 核实过的事实，见 material_facts.scan）、记哪些分类、额外关注点、
-    每块读几遍（第二遍带着已知实体补漏）、分块字数（短章节会合并到一块）。整理卡片是之后单独的一步。"""
+    """提取时是否记录设定实体（逐章读原文：实体 + 核实过的事实 + 章节卡，见 chapter_scan）、记哪些分类、额外关注点、
+    读几遍（第 2 遍带着全书已知实体补漏）、档位 depth（fast 只要设定 + 一句话 + 事件；standard 再加钩子 / 爽点 / 伏笔 /
+    人物等；deep 再加情节节点，见 docs/素材提取改造方案.md §3.0.2）、chunkChars（本地 / GGUF 一次读的上限的一半，
+    超长章按段落切开）、章节范围 fromChapter / toChapter。整理卡片是之后单独的一步。"""
 
     enabled: bool = False
     categories: list[str] = Field(default_factory=lambda: list(CATEGORIES))
     focus: str = Field(default="", max_length=300)
-    rounds: int = Field(default=2, ge=1, le=2)
+    rounds: int = Field(default=1, ge=1, le=2)
+    depth: str = Field(default="standard", pattern="^(fast|standard|deep)$")
     chunkChars: int = Field(default=3000, ge=1500, le=6000)
+    # 章节范围（按 text_loader.split_book 分出的章，从 1 数）：fromChapter..toChapter，toChapter = 0 表示读到最后
+    fromChapter: int = Field(default=1, ge=1, le=100000)
+    toChapter: int = Field(default=0, ge=0, le=100000)
 
     def active_categories(self) -> list[str]:
         return [c for c in self.categories if c in CATEGORIES] or list(CATEGORIES)

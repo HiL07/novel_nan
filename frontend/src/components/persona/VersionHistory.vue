@@ -78,11 +78,11 @@ watch(() => [props.cardId, props.current], load, { immediate: true })
 </script>
 
 <style scoped>
-.muted { font-size: 12px; color: #909399; }
+.muted { font-size: 12px; color: var(--el-text-color-secondary); }
 .tbl { margin-top: 8px; }
 .cur { margin-left: 4px; }
-.preview { margin-top: 12px; padding: 10px; background: #f5f7fa; border-radius: 6px; font-size: 13px; }
-.diff .add { color: #67c23a; }
-.diff .del { color: #f56c6c; }
-.diff .chg { color: #e6a23c; }
+.preview { margin-top: 12px; padding: 10px; background: var(--el-fill-color-light); border-radius: 6px; font-size: 13px; }
+.diff .add { color: var(--el-color-success); }
+.diff .del { color: var(--el-color-danger); }
+.diff .chg { color: var(--el-color-warning); }
 </style>

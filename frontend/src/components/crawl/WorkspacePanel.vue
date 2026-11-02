@@ -462,13 +462,13 @@ defineExpose({ reloadAll })
 }
 .ws-list-title {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .ws-card {
   padding: 12px 14px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  background: #fafbfc;
+  background: var(--el-fill-color-lighter);
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
@@ -478,7 +478,7 @@ defineExpose({ reloadAll })
 .ws-card.active {
   border-color: var(--el-color-primary);
   box-shadow: 0 0 0 1px var(--el-color-primary) inset;
-  background: #fff;
+  background: var(--el-bg-color);
 }
 .ws-card.running {
   border-left: 3px solid var(--el-color-warning);
@@ -492,7 +492,7 @@ defineExpose({ reloadAll })
 }
 .ws-name {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -517,7 +517,7 @@ defineExpose({ reloadAll })
 .ws-title {
   font-size: 17px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin-bottom: 2px;
 }
 .ws-ops {
@@ -533,27 +533,27 @@ defineExpose({ reloadAll })
 }
 .ws-stat {
   padding: 10px 12px;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 8px;
   text-align: center;
 }
 .ws-stat-value {
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .ws-stat-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .ws-stat.ok .ws-stat-value {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 .ws-stat.warn .ws-stat-value {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .ws-stat.bad .ws-stat-value {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .ws-now {
   margin-bottom: 12px;
@@ -581,13 +581,13 @@ defineExpose({ reloadAll })
 }
 .book-name {
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .ws-detail :deep(.ws-row-RUNNING) {
   background: #fdf6ec;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .mono {
@@ -595,7 +595,7 @@ defineExpose({ reloadAll })
   word-break: break-all;
 }
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .ellipsis {
   overflow: hidden;

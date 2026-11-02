@@ -3,6 +3,7 @@ package com.example.file.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
+import com.example.file.common.DataPaths;
 import com.example.file.entity.FileInfo;
 import com.example.file.mapper.FileMapper;
 import org.slf4j.Logger;
@@ -46,10 +47,15 @@ public class FileService {
     @Value("${file.storage.path}")
     private String storagePath;
 
-    private final FileMapper fileMapper;
+    /** 章节规则版本（data/.defaults-applied 里的一行）：ChapterCounter 规则变了就换版本号，启动时把所有文本文件重数一遍 */
+    private static final String CHAPTER_RULES_MARK = "chapter-count-rules-v2";
 
-    public FileService(FileMapper fileMapper) {
+    private final FileMapper fileMapper;
+    private final DataPaths dataPaths;
+
+    public FileService(FileMapper fileMapper, DataPaths dataPaths) {
         this.fileMapper = fileMapper;
+        this.dataPaths = dataPaths;
     }
 
     /**
@@ -150,14 +156,30 @@ public class FileService {
         }
     }
 
-    /** 启动后在后台给还没统计过的 txt / md 补章节数（老文件），不拖慢启动 */
+    /**
+     * 启动后在后台给还没统计过的 txt / md 补章节数（老文件），不拖慢启动；
+     * 章节规则换了版本（{@link #CHAPTER_RULES_MARK} 不在标记文件里）时全部重数一遍，做完写入标记。
+     */
     @EventListener(ApplicationReadyEvent.class)
     public void backfillChapterCounts() {
         Thread t = new Thread(() -> {
-            List<FileInfo> pending = fileMapper.selectList(new LambdaQueryWrapper<FileInfo>()
-                    .isNull(FileInfo::getChapterCount)
-                    .in(FileInfo::getFileExt, "txt", "md"));
+            Path mark = dataPaths.root().resolve(".defaults-applied");
+            boolean recountAll;
+            try {
+                recountAll = !(Files.exists(mark) && Files.readAllLines(mark, StandardCharsets.UTF_8).contains(CHAPTER_RULES_MARK));
+            } catch (IOException e) {
+                log.warn("读取标记文件失败，按需补统计章节数：{}", e.getMessage());
+                recountAll = false;
+            }
+            LambdaQueryWrapper<FileInfo> query = new LambdaQueryWrapper<FileInfo>().in(FileInfo::getFileExt, "txt", "md");
+            if (!recountAll) {
+                query.isNull(FileInfo::getChapterCount);
+            }
+            List<FileInfo> pending = fileMapper.selectList(query);
             if (pending.isEmpty()) {
+                if (recountAll) {
+                    writeMark(mark);
+                }
                 return;
             }
             Path rootPath = Paths.get(storagePath).toAbsolutePath().normalize();
@@ -174,10 +196,22 @@ public class FileService {
                     log.warn("保存章节数失败，文件 id={}", f.getId(), e);
                 }
             }
-            log.info("已补统计 {} 个文本文件的章节数", n);
+            log.info(recountAll ? "章节规则已更新，已重新统计 {} 个文本文件的章节数" : "已补统计 {} 个文本文件的章节数", n);
+            if (recountAll) {
+                writeMark(mark);
+            }
         }, "chapter-count-backfill");
         t.setDaemon(true);
         t.start();
+    }
+
+    private void writeMark(Path mark) {
+        try {
+            Files.writeString(mark, CHAPTER_RULES_MARK + System.lineSeparator(), StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            log.warn("写入章节规则标记失败（下次启动会再重数一遍）：{}", e.getMessage());
+        }
     }
 
     /**

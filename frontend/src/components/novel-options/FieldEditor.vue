@@ -193,7 +193,7 @@ async function submitCustom() {
 .hint,
 .inline-hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .hint {
   margin: 0 0 10px;
@@ -203,7 +203,7 @@ async function submitCustom() {
 }
 .range-sep {
   margin: 0 8px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .suggest-grid {
   display: grid;
@@ -213,14 +213,14 @@ async function submitCustom() {
 .suggest-card {
   position: relative;
   padding: 10px 12px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .suggest-card:hover:not(.is-used) {
   border-color: var(--el-color-primary);
-  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.15);
+  box-shadow: 0 2px 8px rgba(176, 58, 46, 0.12);
 }
 .suggest-card.is-used {
   cursor: default;
@@ -233,11 +233,11 @@ async function submitCustom() {
 }
 .suggest-label {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .suggest-meta {
   margin-top: 4px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

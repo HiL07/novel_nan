@@ -194,7 +194,7 @@ function duplicateItem(i) {
   padding: 12px 0;
 }
 .option-field + .option-field {
-  border-top: 1px dashed #ebeef5;
+  border-top: 1px dashed var(--el-border-color-lighter);
 }
 .field-head {
   display: flex;
@@ -206,7 +206,7 @@ function duplicateItem(i) {
 .field-label {
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .depth-1 .field-label,
 .depth-2 .field-label,
@@ -215,7 +215,7 @@ function duplicateItem(i) {
 }
 .field-desc {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .field-remove {
   margin-left: auto;
@@ -234,7 +234,7 @@ function duplicateItem(i) {
 .sub-block {
   margin-top: 12px;
   padding: 4px 14px 8px;
-  background: #f8faff;
+  background: var(--el-color-primary-light-9);
   border-left: 3px solid var(--el-color-primary-light-5);
   border-radius: 0 6px 6px 0;
 }
@@ -246,8 +246,8 @@ function duplicateItem(i) {
 .group-item {
   margin-bottom: 12px;
   padding: 0 14px 4px;
-  background: #fafafa;
-  border: 1px solid #ebeef5;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 .group-item-head {
@@ -257,8 +257,8 @@ function duplicateItem(i) {
   padding: 8px 0;
   font-size: 13px;
   font-weight: 600;
-  color: #606266;
-  border-bottom: 1px solid #ebeef5;
+  color: var(--el-text-color-regular);
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 .from-material {
   margin-left: 6px;

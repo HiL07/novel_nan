@@ -87,6 +87,6 @@ function saveAsExample(chat) {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

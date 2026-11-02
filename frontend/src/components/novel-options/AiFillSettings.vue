@@ -128,7 +128,7 @@ function onPick(list) {
 .ref-hint {
   margin-left: 2px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .usage {
   line-height: 1.6;
@@ -142,7 +142,7 @@ function onPick(list) {
   margin-top: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .row,
 .chips {
@@ -153,7 +153,7 @@ function onPick(list) {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .suggestions {
   display: flex;
@@ -166,7 +166,7 @@ function onPick(list) {
   padding: 5px 8px;
   font-size: 12px;
   line-height: 1.5;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 4px;
   cursor: pointer;
 }

@@ -1,9 +1,8 @@
 """素材流程的前两步（分步进行，每步结果都可以先看、可以单独重做）：
 
-① 提取 ``scan``（读原文）：每块（默认 3000 字，短章节合并成一块）列出设定实体和本块里关于它的**具体事实**，
-   每条事实附原文摘抄 quote，由代码核对原文（对不上的丢弃 —— 不靠模型自查，专治小模型脑补）。
-   rounds=2 时每块再读一遍：提示里给出本块出现过的已知实体（名字是否出现由代码判断），只补新事实和漏掉的实体。
-   代码聚合（不用模型）：按 分类 + 规范化名称 / 别名归并实体，事实按字符重合去重。产出实体档案 + 章节摘要。
+① 提取 ``scan``（读原文）：逐章串行，实现在 ``chapter_scan``（一章一次调用 + 滚动上下文 + 章节卡）。本模块提供它用到的
+   原文核对 ``Source``（quote 对不上原文的不算已核实 —— 不靠模型自查，专治小模型脑补）、实体聚合 ``Book``
+   （按 分类 + 规范化名称 / 别名归并，事实按字符重合去重）和第 2 遍补漏的 ``scan_prompt``。
 ② 整理卡片 ``compile_cards``（只读实体档案和章节摘要，输入短，可换模型 / 换范围重做）：事实多的实体逐个整理，
    只有 1 条事实的 5 个一批；不实用的（只有空泛情绪 / 一次性动作）标 useful=false 不进候选箱。
    同一本书里同类世界观 ≥3 张再合成「体系卡」。剧情段：章节摘要每 20 章一窗，找跨章的完整剧情段，
@@ -20,15 +19,14 @@ import threading
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Callable
 
-from . import local_extract, text_loader
+from . import local_extract
 from .llm_client import LLMError
 from .materials import CATEGORIES, MaterialOptions, _norm_title
 
 log = logging.getLogger(__name__)
 
 SYSTEM = "你是小说设定整理助手，只输出 JSON，不要任何多余文字。"
-MERGE_CHAPTER_CHARS = 1500    # 短于这个字数的章节和相邻章节合成一块
-MAX_KNOWN = 15                # 第二遍提示里最多列出几个已知实体
+MAX_KNOWN = 15                # 提示里最多列出几个已知实体（逐章读的滚动上下文 / 第 2 遍补漏）
 MAX_FACTS = 40                # 每个实体最多保留 / 交给模型的事实数
 SINGLE_BATCH = 5              # 只有 1 条事实的实体，几个一批整理
 ARC_WINDOW, ARC_STEP = 20, 17  # 剧情段：每窗 20 章，相邻窗口重叠 3 章
@@ -46,46 +44,6 @@ Call = Callable[[list[dict], int], str]
 
 class Cancelled(RuntimeError):
     pass
-
-
-# ---------------------------------------------------------------- 分块
-
-def build_blocks(chapters: list[dict], limit: int) -> list[dict]:
-    """→ [{text, spans: [(块内起点, 章节下标)]}]。长章节按段落切；相邻短章节合成一块（每章前加【标题】）。"""
-    blocks: list[dict] = []
-    cur: dict | None = None
-    for ci, ch in enumerate(chapters):
-        content = ch["content"].strip()
-        if not content:
-            continue
-        head = f"【{ch['title']}】\n"
-        if len(content) >= MERGE_CHAPTER_CHARS:
-            if cur:
-                blocks.append(cur)
-                cur = None
-            for part in text_loader.split_chunks(content, limit):
-                blocks.append({"text": head + part, "spans": [(0, ci)]})
-            continue
-        piece = head + content
-        if cur and len(cur["text"]) + len(piece) + 1 > limit:
-            blocks.append(cur)
-            cur = None
-        if cur is None:
-            cur = {"text": piece, "spans": [(0, ci)]}
-        else:
-            cur["spans"].append((len(cur["text"]) + 1, ci))
-            cur["text"] += "\n" + piece
-    if cur:
-        blocks.append(cur)
-    return blocks
-
-
-def _chapter_at(block: dict, pos: int) -> int:
-    ci = block["spans"][0][1]
-    for start, idx in block["spans"]:
-        if start <= pos:
-            ci = idx
-    return ci
 
 
 # ---------------------------------------------------------------- 原文核对
@@ -164,32 +122,6 @@ def scan_prompt(text: str, cats: list[str], focus: str, known: list[dict] | None
             f"正文：\n{text}")
 
 
-def parse_scan(data: dict, block: dict, source: Source, cats: set[str]) -> tuple[list[dict], int, int]:
-    """核对模型给出的事实 → ([{category, name, aliases, facts: [{fact, quote, chapter}]}], 通过数, 丢弃数)"""
-    out, ok, bad = [], 0, 0
-    for e in data.get("entities") or []:
-        if not isinstance(e, dict):
-            continue
-        cat, name = str(e.get("category") or "").strip(), str(e.get("name") or "").strip()[:40]
-        if cat not in cats or not name:
-            continue
-        facts = []
-        for f in e.get("facts") or []:
-            if not isinstance(f, dict):
-                continue
-            fact, quote = str(f.get("fact") or "").strip()[:80], str(f.get("quote") or "").strip()[:80]
-            pos = source.locate(quote) if fact else None
-            if pos is None:
-                bad += 1 if fact else 0
-                continue
-            ok += 1
-            facts.append({"fact": fact, "quote": quote, "chapter": _chapter_at(block, pos)})
-        aliases = [str(a).strip()[:40] for a in e.get("aliases") or [] if str(a).strip()][:5]
-        if facts:
-            out.append({"category": cat, "name": name, "aliases": aliases, "facts": facts})
-    return out, ok, bad
-
-
 # ---------------------------------------------------------------- 聚合（代码）
 
 class Book:
@@ -206,7 +138,8 @@ class Book:
             key = next((self.index[f"{cat}:{_norm_title(n)}"] for n in names if f"{cat}:{_norm_title(n)}" in self.index), None)
             if key is None:
                 key = f"{cat}:{_norm_title(e['name'])}"
-                self.entities[key] = {"key": key, "category": cat, "name": e["name"], "aliases": [], "facts": []}
+                self.entities[key] = {"key": key, "category": cat, "name": e["name"], "aliases": [], "facts": [],
+                                      "unverified": []}
             ent = self.entities[key]
             for n in names:
                 nk = f"{cat}:{_norm_title(n)}"
@@ -217,6 +150,11 @@ class Book:
             for f in e["facts"]:
                 if len(ent["facts"]) < MAX_FACTS * 2 and not any(_similar(f["fact"], g["fact"]) for g in ent["facts"]):
                     ent["facts"].append(f)
+            # 对不上原文的事实（逐章提取保留下来供作者查看 / 改为已核实，整理卡片不用）
+            for u in e.get("unverified") or []:
+                pool = ent["facts"] + ent["unverified"]
+                if len(ent["unverified"]) < 10 and not any(_similar(u["fact"], g["fact"]) for g in pool):
+                    ent["unverified"].append(u)
 
     def known_in(self, text: str) -> list[dict]:
         """本块原文里出现过名字 / 别名的已知实体（事实多的优先），供第二遍提示。"""
@@ -451,73 +389,14 @@ def _parallel(keys: list, fn: Callable, *, workers: int, stop: threading.Event |
 # ---------------------------------------------------------------- ① 提取：只读原文
 
 def scan(chapters: list[dict], opts: MaterialOptions, call: Call, concurrency: int, ckpt,
-         on_progress: Callable[[int, str], None], stop: threading.Event | None, local: bool) -> dict:
-    """读原文 → {chapters: [{summary, characters}], entities: [实体档案], stats}。断点阶段 pass1 / pass2。
-    实体档案：[{key, category, name, aliases, facts: [{fact, quote, chapter: 章节标题, ci: 章节下标}]}]，事实多的在前。"""
-    cats = [c for c in opts.active_categories() if c != "plot"]
-    blocks = build_blocks(chapters, opts.chunkChars)
-    stats = {"rounds": opts.rounds, "chunks": len(blocks), "failedChunks": 0, "factsVerified": 0, "factsUnverified": 0,
-             "entities": 0}
-    scan_tokens = 1000 if local else 1500
-    lock = threading.Lock()
-    book = Book()
-    summaries: dict[int, str] = {}
+         on_progress: Callable[[int, str], None], stop: threading.Event | None, local: bool,
+         max_chars: int | None = None, golden: set[int] | None = None) -> dict:
+    """读原文（逐章串行，见 chapter_scan）→ {chapters: [{summary, characters}], entities, chapterCards, threads, lead, stats}。
+    concurrency 不再用于读原文（逐章串行，滚动上下文要按顺序）；max_chars = 一次读的最多字数（超长章按段落切开）。"""
+    from . import chapter_scan  # 延迟导入：chapter_scan 依赖本模块
 
-    spans = [(0, 98)] if opts.rounds == 1 else [(0, 55), (55, 43)]
-    for rnd in range(1, opts.rounds + 1):
-        stage = f"pass{rnd}"
-        done = ckpt.done(stage)
-        for k in sorted(done, key=int):   # 断点里已有的块按顺序并入（第二遍的已知实体要用）
-            book.add(done[k]["entities"])
-            if rnd == 1 and done[k].get("summary"):
-                summaries[int(k)] = done[k]["summary"]
-        todo = [i for i in range(len(blocks)) if str(i) not in done]
-
-        def read(i: int, rnd=rnd, stage=stage):
-            if rnd == 2:
-                with lock:  # 其他线程可能正在往 book 里加实体
-                    known = book.known_in(blocks[i]["text"])
-            else:
-                known = None
-            text = call([{"role": "system", "content": SYSTEM},
-                         {"role": "user", "content": scan_prompt(blocks[i]["text"], cats, opts.focus.strip(), known)}],
-                        scan_tokens)
-            data = _parse(text)
-            ents, ok, bad = parse_scan(data, blocks[i], Source(blocks[i]["text"]), set(cats))
-            row = {"entities": ents, "summary": _text(data.get("summary"), 200) if rnd == 1 else "", "ok": ok, "bad": bad}
-            with lock:
-                ckpt.append(stage, i, row)
-                book.add(ents)
-                if row["summary"]:
-                    summaries[i] = row["summary"]
-
-        base, span = spans[rnd - 1]
-        # 第二遍要看全书已知实体，所以等第一遍全部完成再开始；同一遍里的块可以并发
-        _parallel(todo, read, workers=concurrency, stop=stop, lock=lock, on_progress=on_progress,
-                  label=f"第{rnd}遍阅读", base=base, span=span, total=len(blocks), failed=stats, fail_key="failedChunks")
-        for row in ckpt.done(stage).values():
-            stats["factsVerified"] += row.get("ok", 0)
-            stats["factsUnverified"] += row.get("bad", 0)
-
-    chap_summary: dict[int, list[str]] = {}
-    for i, s in sorted(summaries.items()):
-        for _, ci in blocks[i]["spans"]:  # 合并成一块的短章节共用这块的摘要
-            chap_summary.setdefault(ci, []).append(s)
-    chap_chars: dict[int, list[str]] = {}
-    for ent in book.entities.values():
-        if ent["category"] == "character":
-            for ci in sorted({f["chapter"] for f in ent["facts"]}):
-                chap_chars.setdefault(ci, []).append(ent["name"])
-    out_chapters = [{"summary": " ".join(chap_summary.get(ci, [])), "characters": chap_chars.get(ci, [])}
-                    for ci in range(len(chapters))]
-    entities = []
-    for ent in sorted(book.entities.values(), key=lambda e: -len(e["facts"])):
-        entities.append({"key": ent["key"], "category": ent["category"], "name": ent["name"], "aliases": ent["aliases"],
-                         "facts": [{"fact": f["fact"], "quote": f["quote"], "chapter": chapters[f["chapter"]]["title"],
-                                    "ci": f["chapter"]} for f in ent["facts"]]})
-    stats["entities"] = len(entities)
-    return {"chapters": out_chapters, "entities": entities, "stats": stats}
-
+    limit = max_chars or (opts.chunkChars * 2 if local else chapter_scan.API_MAX_CHARS)
+    return chapter_scan.scan(chapters, opts, call, ckpt, on_progress, stop, local=local, max_chars=limit, golden=golden)
 
 # ---------------------------------------------------------------- ② 整理卡片
 

@@ -174,7 +174,7 @@ async function save() {
 
 <style scoped>
 h4 { margin: 18px 0 8px; }
-.muted { font-size: 12px; font-weight: normal; color: #909399; }
+.muted { font-size: 12px; font-weight: normal; color: var(--el-text-color-secondary); }
 .warn { color: var(--el-color-warning); margin-bottom: 6px; }
 .block { margin-bottom: 12px; }
 .plain { margin: 0; padding-left: 18px; }
@@ -187,7 +187,7 @@ h4 { margin: 18px 0 8px; }
 .full { width: 100%; }
 .col { display: flex; flex-direction: column; gap: 6px; width: 100%; }
 .mem { margin-bottom: 6px; }
-.lines q { display: inline-block; margin: 4px 8px 0 0; padding: 2px 8px; font-size: 13px; background: #f0f9eb; border-radius: 4px; }
-.save { position: sticky; bottom: 0; margin-top: 20px; padding: 10px 0; background: #fff; border-top: 1px solid var(--el-border-color-lighter); }
+.lines q { display: inline-block; margin: 4px 8px 0 0; padding: 2px 8px; font-size: 13px; background: var(--el-color-success-light-9); border-radius: 4px; }
+.save { position: sticky; bottom: 0; margin-top: 20px; padding: 10px 0; background: var(--el-bg-color); border-top: 1px solid var(--el-border-color-lighter); }
 .note { width: 260px; }
 </style>

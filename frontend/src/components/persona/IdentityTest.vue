@@ -134,7 +134,7 @@ onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <style scoped>
-.muted { font-size: 12px; color: #909399; }
+.muted { font-size: 12px; color: var(--el-text-color-secondary); }
 .err { font-size: 12px; color: var(--el-color-danger); }
 .ops { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .judge { width: 180px; }
@@ -143,7 +143,7 @@ onBeforeUnmount(() => clearInterval(timer))
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 8px; }
 .detail { margin-top: 12px; }
 .t { margin-left: 8px; }
-.scene { color: #606266; }
+.scene { color: var(--el-text-color-regular); }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .pair p { white-space: pre-wrap; font-size: 13px; }
 .prot { margin-bottom: 10px; font-size: 13px; }

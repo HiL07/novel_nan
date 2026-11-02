@@ -1,11 +1,10 @@
-"""自动规划（设计见 docs/自动规划.md），两条路线：
-
-- 故事优先（默认，不依赖素材库）：写作参数 + 灵感（idea）→ 全书骨架（book：卷 / 阶段）→ 设定（从骨架推出）
-  → 素材点睛（enrich，可跳过）→ 当前阶段的 10 章大纲 → 审稿。
-- 素材优先：一句构思 → 选素材 → 设定草案（素材改编）→ 10 章大纲 + 伏笔计划 → 审稿。
+"""自动规划（设计见 docs/自动规划.md），故事优先（不依赖素材库）：
+写作参数 + 灵感（idea）→ 设定（世界 + 主角）→ 全书骨架（book：卷 / 阶段）+ 配角 / 元素（cast）
+→ 写进工作区；素材点睛（enrich）/ 当前阶段的 10 章大纲 / 审稿的接口还在，暂不在界面流程里。
+（原来的「素材优先」路线 2026-11-02 删掉了，素材怎么融入故事优先另行设计。）
 
 只产出「用来写小说的内容」：设定（世界观 / 角色 / 元素 / 阶段表 / 出场条件）、大纲、故事账本里的计划伏笔与定时事件。
-不生成正文，不改写作流程。每一步都是单独的接口（作者可以看、改、重来），Java 负责选素材（本地检索）和带模型配置。
+不生成正文，不改写作流程。每一步都是单独的接口（作者可以看、改、重来），Java 负责带模型配置（点睛时也负责本地检索素材）。
 
 开篇（工作区还没写章节）：设定 / 大纲 / 审稿都套 OPENING_RULES，代码再数前 3 章的新人物、新名词，查章末钩子。
 已写过章节：从世界书的局面出发规划接下来 10 章，只补新元素，不套开篇规则；有全书骨架时按骨架找到当前阶段。
@@ -123,10 +122,6 @@ def _situation(req: dict) -> str:
     if not _written(req.get("novelId")):
         return ""
     return worldbook.snapshot(worldbook.compile(req["novelId"]), max_chars=5000)
-
-
-def _story_mode(req: dict) -> bool:
-    return req.get("mode") == "story"
 
 
 # ---------------------------------------------------------------- 故事优先 ① 灵感（不依赖素材库）
@@ -554,28 +549,7 @@ def book(req: dict) -> dict:
             "regenerated": i if mode == "regen" else None, "usage": usage, "model": model}
 
 
-# ---------------------------------------------------------------- ① 拆需求
-
-def needs(req: dict) -> dict:
-    """{novelId, premise, tone?, conditions?, api|local} → inspire.plan 的结果 + opening + stage"""
-    if not _clip(req.get("premise"), 500):
-        raise InspireError("请先写一句构思，比如「法师喜欢冒险」")
-    opening = not _written(req.get("novelId"))
-    stage = _stage(req)
-    if opening:
-        want = ("这是开一本新书，需要从素材库给它选配：主角原型、世界观规则（力量 / 魔法体系和它的代价）、2~3 个重要配角、"
-                "前 10 章的对手（主角现在打得过或需要智取的）、1~2 个势力、冒险会去的地点、关键物品 / 金手指、可以作长线伏笔的传说。")
-    else:
-        want = "这本书已经写了一些章节，需要为接下来 10 章补充素材：新的对手 / 遭遇、新地点、新物品，以及能推进伏笔的东西。"
-    plan_req = {**req, "target": "free", "request": f"{_clip(req.get('premise'), 500)}\n{want}",
-                "conditions": "；".join(x for x in (_clip(req.get("tone"), 200) and f"基调：{_clip(req.get('tone'), 200)}",
-                                                    _clip(req.get("conditions"), 500)) if x),
-                "stage": stage}
-    out = inspire.plan(plan_req)
-    return {**out, "opening": opening, "stage": stage, "startIndex": _written(req.get("novelId")) + 1}
-
-
-# ---------------------------------------------------------------- ② 设定草案（素材改编）
+# ---------------------------------------------------------------- 设定（世界 + 主角）
 
 def _element_schema() -> str:
     return "\n".join(f"  {cat}：" + "；".join(f"{k} = {v}" for k, v in fields.items()) for cat, fields in ELEMENT_FIELDS.items())
@@ -716,47 +690,10 @@ def story_issues(draft: dict, bk: dict | None, opening: bool) -> list[dict]:
 
 
 def settings(req: dict) -> dict:
-    """{novelId, premise, tone?, materials[], stage?, mode?, book?, idea?, bookConfig?, api|local} → {draft, issues, usage, model}
-    draft = {title, world{rules[], note, cards?, power?, abilities?, mechanics?, resources?}, characters[], elements[], stages[]}；
-    每条带 sources（素材 id）和 adapted（改编说明）。mode = story 走故事优先（不需要素材）。"""
-    opening = not _written(req.get("novelId"))
-    stage = _stage(req)
-    if _story_mode(req):
-        return _settings_story(req, opening, stage)
-    block, refs = inspire._material_block(req.get("materials") or [])
-    parts = [_premise(req)]
-    situation = _situation(req)
-    if situation:
-        parts.append(f"【这本书现在的局面】（已有的设定不要重复，只补接下来 10 章需要的新东西）\n{situation}")
-    st = inspire._stage_text({**stage, "chapter": _written(req.get("novelId")) + 1})
-    if st:
-        parts.append(st)
-    parts.append("【可用的素材】（编号 S1…；用到哪条就在 sources 里写它的编号）\n" + (block or "（没有选素材，自己构思）"))
-    if opening:
-        parts.append(OPENING_RULES)
-    parts.append(
-        "【任务】把素材改编成这本书的设定。\n"
-        "- **改编，不照抄**：保留素材的骨架（能力、代价、冲突、关系），名字、地名、组织名都换成适合这本书的新名字，"
-        "细节适配这本书的世界观；adapted 写清楚「保留了什么、改了什么」（30 字内）；不用素材的也可以，sources 留空\n"
-        "- 主角：必须有欲望（goal）、缺陷 / 恐惧（fear）、秘密，能力要有代价；role 填「主角」\n"
-        f"- 配角 2~5 个，role 只能是 {' / '.join(ROLE_LABELS[1:])}；appearFrom = 第几章登场（主角和第 1 章就出场的填 1）\n"
-        "- 元素（势力 / 地点 / 物品 / 怪物）3~8 个，fields 按下面的字段写；tier = 量级 1~5"
-        "（1 个人 / 街头，2 地方，3 一国 / 大宗门，4 大陆，5 神明）；appearFrom 同上\n"
-        f"{_element_schema()}\n"
-        "- 前 10 章的对手量级不能超过【故事阶段】的上限；更强的存在可以有，但 appearFrom 要晚于第 10 章，或者只作传说\n"
-        "- 阶段表 stages：按章节划分主角的成长（range 如「1-10」，power 主角实力，tierMax 对手上限 1~5）\n"
-        '输出 {"title": "建议书名", "world": {"rules": ["这个世界独有的规则（每条 30 字内，3~6 条）"], "note": "世界观补充（200 字内）"},'
-        ' "characters": [{"name": "…", "role": "主角", "tagline": "一句话人设", "personality": ["性格词，≤4 个"], "goal": "…",'
-        ' "fear": "…", "secret": "…", "abilities": ["…"], "background": "…（100 字内）", "arc": "成长弧光（60 字内）",'
-        ' "relationToLead": "与主角的关系", "appearFrom": 1, "sources": ["S1"], "adapted": "…"}],'
-        ' "elements": [{"category": "faction", "name": "…", "fields": {"stance": "敌对", "feature": "…"}, "tier": 2,'
-        ' "appearFrom": 1, "sources": ["S2"], "adapted": "…"}],'
-        ' "stages": [{"range": "1-10", "power": "…", "tierMax": 2, "note": "…"}]}')
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
-    data, usage, model = _call(req, messages, 4000, 0.8)
-    draft = _clean_settings(data, refs, opening)
-    issues = settings_issues(draft, req.get("materials") or [], stage, _written(req.get("novelId")) + 1)
-    return {"draft": draft, "issues": issues, "opening": opening, "stage": stage, "usage": usage, "model": model}
+    """{novelId, premise, tone?, materials[], stage?, book?, idea?, bookConfig?, api|local} → {draft, issues, usage, model}
+    draft = {world{rules[], note, power, abilities, mechanics, resources}, characters[主角], elements[], stages[]}。
+    （素材优先路线 2026-11-02 删掉了，只剩故事优先）"""
+    return _settings_story(req, not _written(req.get("novelId")), _stage(req))
 
 
 # ---------------------------------------------------------------- 设定的单个模块重新生成（四种方式：给不给方向 × 参考不参考已有）

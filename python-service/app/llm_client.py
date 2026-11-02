@@ -1,9 +1,11 @@
-"""OpenAI 兼容的大模型调用（DeepSeek / 通义千问 / Kimi / OpenAI / 本地 llama.cpp 等）。
+"""大模型调用：OpenAI 兼容接口（DeepSeek / 通义千问 / Kimi / OpenAI / 本地 llama.cpp 等）
+和 Anthropic Messages 接口（protocol = anthropic，在 _post_chat 里转换请求 / 响应，调用方都按 OpenAI 格式用）。
 
 模型配置（地址、模型名、API Key）由 Java 后端随请求传入，本服务不保存密钥。
 """
 import json
 import time
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -32,12 +34,14 @@ VERIFY_TIMEOUT = 30.0
 
 
 class ModelConfig(BaseModel):
-    """一次调用所需的模型配置。baseUrl 为 OpenAI 兼容根地址（请求 {baseUrl}/chat/completions）。"""
+    """一次调用所需的模型配置。protocol = openai：请求 {baseUrl}/chat/completions；
+    anthropic：请求 {baseUrl}/v1/messages（baseUrl 已以 /v1 结尾则 {baseUrl}/messages）。"""
 
     baseUrl: str = Field(min_length=8)
     apiKey: str = ""
     model: str = Field(min_length=1)
     concurrency: int = Field(default=1, ge=1, le=8)
+    protocol: Literal["openai", "anthropic"] = "openai"
 
     def __repr__(self) -> str:  # 日志/异常里不出现密钥
         return f"ModelConfig(baseUrl={self.baseUrl!r}, model={self.model!r})"
@@ -53,13 +57,69 @@ class LLMError(RuntimeError):
         self.fatal = fatal
 
 
+ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _anthropic_base(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return base if base.endswith("/v1") else base + "/v1"
+
+
 def _endpoint(cfg: ModelConfig) -> str:
+    if cfg.protocol == "anthropic":
+        return _anthropic_base(cfg.baseUrl) + "/messages"
     return cfg.baseUrl.rstrip("/") + "/chat/completions"
 
 
-def _trust_env(cfg: ModelConfig) -> bool:
+def _headers(protocol: str, api_key: str) -> dict:
+    if protocol == "anthropic":
+        h = {"anthropic-version": ANTHROPIC_VERSION}
+        if api_key:
+            h["x-api-key"] = api_key
+        return h
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def _trust_env(cfg) -> bool:
     # 本机服务不走系统代理（Clash 等会把 localhost 请求转成 502）；远程服务沿用系统代理设置
-    return urlparse(cfg.baseUrl).hostname not in _LOCAL_HOSTS
+    url = cfg if isinstance(cfg, str) else cfg.baseUrl
+    return urlparse(url).hostname not in _LOCAL_HOSTS
+
+
+def _to_anthropic(payload: dict) -> dict:
+    """OpenAI chat 请求 → Anthropic Messages 请求：system 消息合并成 system 字段，相邻同角色消息合并；
+    没有 JSON 模式（靠 prompt 约束）；temperature 限在 0–1；不带 top_p（新模型不许和 temperature 同时给）。"""
+    system, messages = [], []
+    for m in payload.get("messages") or []:
+        role, text = m.get("role"), m.get("content") or ""
+        if role == "system":
+            system.append(text)
+            continue
+        role = "assistant" if role == "assistant" else "user"
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"] += "\n\n" + text
+        else:
+            messages.append({"role": role, "content": text})
+    if not messages or messages[0]["role"] != "user":
+        messages.insert(0, {"role": "user", "content": "请继续。"})
+    out = {"model": payload["model"], "messages": messages, "max_tokens": int(payload.get("max_tokens") or 1024)}
+    if system:
+        out["system"] = "\n\n".join(system)
+    if payload.get("temperature") is not None:
+        out["temperature"] = max(0.0, min(1.0, float(payload["temperature"])))
+    return out
+
+
+def _from_anthropic(data: dict) -> dict:
+    """Anthropic Messages 响应 → OpenAI 形状（choices[0].message.content / finish_reason / usage）。"""
+    text = "".join(b.get("text") or "" for b in data["content"] if b.get("type") == "text")
+    usage = data.get("usage") or {}
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    prompt = int(usage.get("input_tokens") or 0) + cache_read + int(usage.get("cache_creation_input_tokens") or 0)
+    return {"choices": [{"message": {"role": "assistant", "content": text},
+                         "finish_reason": "length" if data.get("stop_reason") == "max_tokens" else "stop"}],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": int(usage.get("output_tokens") or 0),
+                      "prompt_tokens_details": {"cached_tokens": cache_read}}}
 
 
 def _error_detail(resp: httpx.Response) -> str:
@@ -90,9 +150,13 @@ def _raise_for_status(resp: httpx.Response) -> None:
 
 
 def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | None) -> dict:
-    """POST /chat/completions，返回响应 JSON。429/5xx/超时自动重试；不支持 json_object 的服务自动降级。"""
-    headers = {"Authorization": f"Bearer {cfg.apiKey}"} if cfg.apiKey else {}
+    """POST /chat/completions（或 Anthropic /v1/messages，转换后返回 OpenAI 形状），返回响应 JSON。
+    429/5xx/超时自动重试；不支持 json_object 的服务自动降级。"""
+    headers = _headers(cfg.protocol, cfg.apiKey)
     timeout = timeout or config.LLM_TIMEOUT
+    anthropic = cfg.protocol == "anthropic"
+    if anthropic:
+        payload = _to_anthropic(payload)
 
     for attempt in range(retries + 1):
         try:
@@ -105,6 +169,8 @@ def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | N
                                   timeout=timeout, trust_env=_trust_env(cfg))
             _raise_for_status(resp)
             data = resp.json()
+            if anthropic:
+                data = _from_anthropic(data)
             data["choices"][0]["message"]  # 校验结构
             return data
         except LLMError as e:
@@ -117,7 +183,8 @@ def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | N
             if attempt == retries:
                 raise LLMError(f"无法连接模型服务：{e.__class__.__name__}")
         except (ValueError, KeyError, IndexError, TypeError):
-            raise LLMError("模型返回格式不符合 OpenAI 兼容接口", fatal=True)
+            raise LLMError("模型返回格式不符合 " + ("Anthropic Messages" if anthropic else "OpenAI 兼容") + " 接口",
+                           fatal=True)
         time.sleep(2 * (attempt + 1))
     raise LLMError("模型调用失败")
 
@@ -193,6 +260,57 @@ def verify(cfg: ModelConfig) -> dict:
     if not reply.strip():
         return {"ok": False, "latencyMs": latency, "message": "模型返回为空", "reply": ""}
     return {"ok": True, "latencyMs": latency, "message": f"验证通过，耗时 {latency} ms", "reply": reply[:100]}
+
+
+class ListModelsRequest(BaseModel):
+    """「获取可用模型」：列出服务端的模型目录（不需要模型名）。"""
+
+    baseUrl: str = Field(min_length=8)
+    apiKey: str = ""
+    protocol: Literal["openai", "anthropic"] = "openai"
+
+    def __repr__(self) -> str:
+        return f"ListModelsRequest(baseUrl={self.baseUrl!r}, protocol={self.protocol!r})"
+
+    __str__ = __repr__
+
+
+def list_models(req: ListModelsRequest) -> dict:
+    """GET {baseUrl}/models（OpenAI 兼容）或 {baseUrl}/v1/models（Anthropic）→ {ok, models[{id, name}], message}。
+    不少兼容服务没有这个接口（404），那时只能手动填模型名。"""
+    if req.protocol == "anthropic":
+        url = _anthropic_base(req.baseUrl) + "/models?limit=1000"
+    else:
+        url = req.baseUrl.rstrip("/") + "/models"
+    try:
+        resp = httpx.get(url, headers=_headers(req.protocol, req.apiKey), timeout=VERIFY_TIMEOUT,
+                         trust_env=_trust_env(req.baseUrl))
+        if resp.status_code == 404:
+            return {"ok": False, "models": [], "message": "这个服务没有提供模型列表接口（404），请手动添加模型名"}
+        _raise_for_status(resp)
+        data = resp.json()
+    except LLMError as e:
+        return {"ok": False, "models": [], "message": str(e)}
+    except httpx.TimeoutException:
+        return {"ok": False, "models": [], "message": f"请求超时（{VERIFY_TIMEOUT:.0f}s）"}
+    except httpx.HTTPError as e:
+        return {"ok": False, "models": [], "message": f"无法连接模型服务：{e.__class__.__name__}"}
+    except ValueError:
+        return {"ok": False, "models": [], "message": "模型列表不是 JSON"}
+    rows = data.get("data") if isinstance(data, dict) else data
+    if isinstance(data, dict) and rows is None:
+        rows = data.get("models")
+    models, seen = [], set()
+    for r in rows or []:
+        mid = (r.get("id") or r.get("name") or r.get("model")) if isinstance(r, dict) else r
+        if not isinstance(mid, str) or not mid.strip() or mid.strip() in seen:
+            continue
+        mid = mid.strip()[:200]
+        seen.add(mid)
+        name = r.get("display_name") if isinstance(r, dict) else None
+        models.append({"id": mid, "name": str(name or "")[:200]})
+    models.sort(key=lambda m: m["id"].lower())
+    return {"ok": True, "models": models[:1000], "message": f"获取到 {len(models)} 个模型"}
 
 
 def build_chunk_prompt(title: str, content: str, extra: str = "") -> str:

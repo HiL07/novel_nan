@@ -225,7 +225,7 @@ onActivated(load)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -235,7 +235,7 @@ onActivated(load)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .model-alert {
   margin-bottom: 14px;
@@ -246,7 +246,7 @@ onActivated(load)
 .model-ok {
   margin-bottom: 14px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 code {
   font-family: Consolas, monospace;
@@ -254,7 +254,7 @@ code {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .api-info {
   display: flex;
@@ -272,7 +272,7 @@ code {
 }
 .novel-card {
   padding: 14px 16px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -284,7 +284,7 @@ code {
 .novel-title {
   font-size: 16px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .novel-meta {
   display: flex;
@@ -292,7 +292,7 @@ code {
   justify-content: space-between;
   margin-top: 6px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .novel-foot {
   display: flex;

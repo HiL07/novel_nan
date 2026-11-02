@@ -254,20 +254,20 @@ defineExpose({ chat })
 .hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 6px; }
 .drift { margin-top: 8px; }
 .boost { margin-left: 12px; }
-.messages { height: 380px; margin-top: 10px; padding: 12px; overflow-y: auto; background: #f5f7fa; border-radius: 8px; }
-.empty { margin-top: 140px; text-align: center; color: #909399; font-size: 13px; }
+.messages { height: 380px; margin-top: 10px; padding: 12px; overflow-y: auto; background: var(--el-fill-color-light); border-radius: 8px; }
+.empty { margin-top: 140px; text-align: center; color: var(--el-text-color-secondary); font-size: 13px; }
 .msg { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
 .msg.user { justify-content: flex-end; }
 .avatar { display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 32px; height: 32px;
   font-weight: 600; color: #fff; background: var(--el-color-primary); border-radius: 50%; }
 .bubble-wrap { max-width: 78%; }
-.bubble { padding: 8px 12px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; background: #fff; border-radius: 10px;
+.bubble { padding: 8px 12px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; background: var(--el-bg-color); border-radius: 10px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }
 .msg.user .bubble { color: #fff; background: var(--el-color-primary); }
-.inner { margin-top: 4px; font-size: 12px; color: #909399; font-style: italic; }
+.inner { margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary); font-style: italic; }
 .rate { display: flex; align-items: center; gap: 4px; }
 .reason { font-size: 12px; color: var(--el-color-danger); }
-.typing { color: #909399; }
+.typing { color: var(--el-text-color-secondary); }
 .composer { margin-top: 10px; }
 .ops { margin-top: 8px; }
 </style>

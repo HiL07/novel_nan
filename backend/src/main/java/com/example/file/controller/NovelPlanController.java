@@ -15,8 +15,8 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 
 /**
- * 自动规划：构思 → 拆需求 → 选素材 → 设定草案 → 10 章大纲 + 伏笔计划 → 审稿（只产出规划，不写正文）。
- * 写进工作区（大纲 + 账本里的计划伏笔）由前端直接调 Python /api/gen/novels/{id}/plan/apply。
+ * 自动规划（故事优先）：写作参数 + 灵感 → 设定 → 全书骨架 + 人物 / 元素（只产出规划，不写正文）；
+ * 素材点睛 / 10 章大纲 / 审稿的接口保留。写进工作区由前端直接调 Python /api/gen/novels/{id}/plan/apply。
  */
 @RestController
 @RequestMapping("/api/novel/plan/{novelId}")
@@ -28,12 +28,6 @@ public class NovelPlanController {
 
     public NovelPlanController(NovelPlanService service) {
         this.service = service;
-    }
-
-    /** POST /api/novel/plan/{novelId}/needs {premise, tone?, conditions?, stage?, model} */
-    @PostMapping("/needs")
-    public ResponseEntity<Result<Map<String, Object>>> needs(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
-        return ResultResponses.handle(() -> service.needs(novelId, body), log, "拆解构思失败");
     }
 
     /** POST /api/novel/plan/{novelId}/idea {premise?, directions?, bookConfig?, tone?, conditions?, count?, model}（故事优先 ① 灵感） */
@@ -72,13 +66,7 @@ public class NovelPlanController {
         return ResultResponses.handle(() -> service.enrich(novelId, body), log, "素材点睛失败");
     }
 
-    /** POST /api/novel/plan/{novelId}/retrieve {needs, excludeBooks?, stage?}（本地检索，不花 token） */
-    @PostMapping("/retrieve")
-    public ResponseEntity<Result<Map<String, Object>>> retrieve(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
-        return ResultResponses.handle(() -> service.retrieve(novelId, body), log, "检索素材失败");
-    }
-
-    /** POST /api/novel/plan/{novelId}/settings {premise, tone?, conditions?, stage?, materialIds, materialVariants?, model} */
+    /** POST /api/novel/plan/{novelId}/settings {premise?, idea?, bookConfig?, book?, tone?, conditions?, materialIds?, materialVariants?, model}（世界 + 主角） */
     @PostMapping("/settings")
     public ResponseEntity<Result<Map<String, Object>>> settings(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
         return ResultResponses.handle(() -> service.settings(novelId, body), log, "生成设定草案失败");

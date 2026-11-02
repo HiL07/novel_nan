@@ -1087,12 +1087,12 @@ onBeforeUnmount(stopPoll)
 .section {
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 .section-title {
   margin-bottom: 10px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .section-title .meta {
   font-weight: normal;
@@ -1111,7 +1111,7 @@ onBeforeUnmount(stopPoll)
   margin-bottom: 10px;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .meta.block {
@@ -1123,13 +1123,13 @@ onBeforeUnmount(stopPoll)
   word-break: break-all;
 }
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .ml6 {
   margin-left: 6px;
 }
 .unit {
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 .filter,
@@ -1154,7 +1154,7 @@ onBeforeUnmount(stopPoll)
   gap: 3px;
 }
 .help-label :deep(.help-icon) {
-  color: #a8abb2;
+  color: var(--el-text-color-placeholder);
   cursor: help;
 }
 .help-label :deep(.help-icon:hover) {
@@ -1189,7 +1189,7 @@ onBeforeUnmount(stopPoll)
   padding: 4px 48px;
   line-height: 1.7;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .book-detail .intro {
   white-space: pre-wrap;

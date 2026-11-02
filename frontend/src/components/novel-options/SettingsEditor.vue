@@ -39,9 +39,9 @@
       </div>
     </div>
 
-    <div v-loading="loading" class="create-body">
-      <!-- 分类导航 -->
-      <el-card class="box-card nav-card" shadow="never">
+    <div v-loading="loading" class="create-body" :class="{ 'is-external-nav': externalNav }">
+      <!-- 分类导航（externalNav：工作区书房把它放到最左栏，用 expose 的 nav 渲染） -->
+      <el-card v-if="!externalNav" class="box-card nav-card" shadow="never">
         <div class="nav-group-title">基础设定</div>
         <div
           v-for="cat in builtinCategories"
@@ -274,7 +274,9 @@ import { buildSpec, clone, initValues, isFilled, newGroupItem, specToJson, summa
 const props = defineProps({
   config: { type: Object, default: null },
   novelId: { type: String, default: '' },
-  ai: { type: Object, default: null }
+  ai: { type: Object, default: null },
+  /** 分类导航由外面渲染（工作区书房的左栏，见 components/novel/study/SettingsNav.vue），这里只留内容卡片 */
+  externalNav: { type: Boolean, default: false }
 })
 const emit = defineEmits(['change'])
 
@@ -313,9 +315,11 @@ const filled = (field) => isFilled(field, values[activeKey.value])
 const isOpen = (field) => openFields.has(fieldId(field)) || (field.type === 'group' && filled(field))
 const shownFields = computed(() => (activeCategory.value?.fields || []).filter((f) => filled(f) || openFields.has(fieldId(f))))
 const emptyFields = computed(() => (activeCategory.value?.fields || []).filter((f) => !filled(f) && !openFields.has(fieldId(f))))
-// 长文本、分组、带细分选项的选择项占满一行，其余两列排
+// 长文本、分组、长句标签、带细分选项的选择项占满一行，其余两列排
 const isWide = (field) => {
   if (['textarea', 'group'].includes(field.type)) return true
+  // 标签里有长句（世界规则这种，显示成列表）也占满一行，半宽的列表右边空一大块
+  if (field.type === 'tags' && (values[activeKey.value]?.[field.key] || []).some((t) => String(t).length > 14)) return true
   const picked = values[activeKey.value]?.[field.key]?.selected || []
   return (field.options || []).some((o) => o.children?.length && picked.includes(o.value))
 }
@@ -384,7 +388,57 @@ async function loadSchema(useSaved = true) {
 
 watch([categories, values], () => ready && emit('change'), { deep: true })
 
+/** 给外部导航用：分类列表 / 当前分类 / 进度点 / 切换 / 新增元素（reactive 里的 computed 访问时自动解包） */
+const nav = reactive({
+  builtin: builtinCategories,
+  custom: customCategories,
+  activeKey,
+  filledCount,
+  progressOf,
+  select: (key) => { activeKey.value = key },
+  add: () => openCategoryEditor(null),
+  // 书房的素材库栏（components/material/MaterialDock.vue）用：
+  materialCategory: computed(() => {
+    const cat = activeCategory.value
+    return (cat && MATERIAL_OF[cat.custom ? cat.templateKey : cat.key]) || ''
+  }),
+  allCategories: categories,
+  contextQuery: computed(() => contextQueryOf(activeCategory.value)),
+  usedMaterialIds: computed(() => usedMaterialIds()),
+  applyMaterials: (list) => onApplyMaterials(list)
+})
+
+/** 「按当前设定找相关素材」的检索文本：分类名 + 已填内容（拍平成一行行，≤300 字） */
+function contextQueryOf(cat) {
+  if (!cat) return ''
+  const lines = []
+  const walk = (nodes) => {
+    for (const n of nodes) {
+      if (n.type === 'groupItem') lines.push(n.name || '')
+      else if (n.display) lines.push(`${n.label}：${n.display}`)
+      if (n.children?.length) walk(n.children)
+    }
+  }
+  walk(summarizeFields(cat.fields, values[cat.key]))
+  return [cat.label, ...lines].filter(Boolean).join('\n').slice(0, 300)
+}
+
+/** 已经加进设定的素材 id（分组项上的 _fromMaterial，任意深度） */
+function usedMaterialIds() {
+  const ids = new Set()
+  const walk = (v) => {
+    if (Array.isArray(v)) v.forEach(walk)
+    else if (v && typeof v === 'object') {
+      if (v._fromMaterial != null) ids.add(v._fromMaterial)
+      Object.values(v).forEach(walk)
+    }
+  }
+  walk(values)
+  return ids
+}
+
 defineExpose({
+  nav,
   getConfig: () => clone({ schemaVersion: schemaVersion.value, categories: categories.value, values }),
   getSpec: () => clone(spec.value),
   // 灵感墙「写进工作区 → 加进设定」：思路里的元素当作素材应用（id 为空：不标「来自素材库」、不计使用次数）
@@ -914,7 +968,7 @@ onMounted(() => loadSchema(true))
 <style scoped>
 /* 设定页的几个设计变量（之后整个工作区统一时再提到外层） */
 .settings-editor {
-  /* 工作区打开时取墨色主题的 --ws-*（styles/ink-theme.css），否则用默认值 */
+  /* 取全站墨色主题的 --ws-*（styles/ink-theme.css），括号里是兜底值 */
   --se-ink: var(--ws-ink, #303133);
   --se-sub: var(--ws-sub, #909399);
   --se-line: var(--ws-line, #e8e9ed);
@@ -970,6 +1024,9 @@ onMounted(() => loadSchema(true))
   gap: 16px;
   align-items: start;
 }
+.create-body.is-external-nav {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 /* 导航 */
 .nav-card {
@@ -1020,7 +1077,7 @@ onMounted(() => loadSchema(true))
   border: 1.5px solid var(--el-color-primary);
 }
 .nav-dot.is-empty {
-  border-color: #c8cad0;
+  border-color: var(--el-border-color-darker);
 }
 .nav-dot.is-part {
   background: linear-gradient(90deg, var(--el-color-primary) 50%, transparent 50%);

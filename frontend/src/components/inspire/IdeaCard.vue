@@ -179,9 +179,9 @@ const SourceChips = defineComponent({
 <style scoped>
 .idea-card {
   padding: 12px 14px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  background: #fff;
+  background: var(--el-bg-color);
 }
 .idea-card.uncited {
   border-color: #f3d19e;
@@ -193,11 +193,11 @@ const SourceChips = defineComponent({
 }
 .idea-title {
   font-size: 15px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .pitch {
   margin: 4px 0 8px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .section {
   margin-top: 6px;
@@ -210,14 +210,15 @@ const SourceChips = defineComponent({
 }
 .section-text {
   margin-top: 2px;
-  line-height: 1.7;
-  color: #303133;
+  line-height: 1.75;
+  color: var(--el-text-color-primary);
+  font-family: var(--ws-font-prose);
   white-space: pre-wrap;
 }
 .elements {
   margin-top: 8px;
   padding: 6px 8px;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
   border-radius: 6px;
 }
 .element {
@@ -232,12 +233,12 @@ const SourceChips = defineComponent({
 .questions {
   margin-top: 6px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .detail {
   margin-top: 8px;
   padding-top: 6px;
-  border-top: 1px dashed #dcdfe6;
+  border-top: 1px dashed var(--el-border-color);
 }
 .detail-head {
   display: flex;
@@ -271,7 +272,7 @@ const SourceChips = defineComponent({
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 :deep(.chips) {
   display: inline-flex;

@@ -1,77 +1,176 @@
 <template>
-  <div class="workspace-page">
-    <!-- 工作区头部：模型 / 适配器 / 上下文窗口 -->
-    <el-card class="box-card head-card" shadow="never">
-      <div v-if="novel" class="head-row">
-        <el-button :icon="Back" link @click="router.push('/novel/create')">工作区</el-button>
-        <el-input v-model="titleDraft" class="title-input" maxlength="100" @change="saveTitle" />
-        <span class="head-item">
-          模型
-          <el-select :model-value="novel.model.source" size="small" style="width: 200px" :disabled="busy" @change="changeSource">
-            <el-option label="大模型（API）" value="api" />
-            <el-option label="本地模型（safetensors · 可训练）" value="local" :disabled="!localModels.length" />
-            <el-option :label="llama ? 'GGUF（llama.cpp）' : 'GGUF（llama.cpp · 未启动）'" value="gguf" :disabled="!llama" />
-            <el-option label="远程模型（即将支持）" value="remote" disabled />
-          </el-select>
-          <template v-if="isApi">{{ apiModel ? `${apiModel.name} · ${apiModel.model}` : novel.model.apiName || '当前启用的模型' }}</template>
-          <template v-else-if="isGguf">{{ llama ? llama.name : '—' }}</template>
-          <el-select v-else :model-value="novel.model.baseId" size="small" style="width: 200px" :disabled="busy" @change="changeBase">
-            <el-option v-for="m in localModels" :key="m.id" :label="m.name" :value="m.id" />
-          </el-select>
-        </span>
-        <el-tooltip v-if="isLocal" content="LoRA 风格适配器：章节正文用它生成，章节摘要始终用基础模型。切换后点击「加载模型」生效（同一基础模型只切换适配器，不重载）" placement="bottom">
-          <el-select
-            :model-value="novel.model.adapterId || ''"
-            size="small"
-            style="width: 180px"
-            :disabled="busy || novel.model.source !== 'local'"
-            @change="saveAdapter"
-          >
-            <el-option label="适配器：不使用" value="" />
-            <el-option v-for="a in baseAdapters" :key="a.id" :label="`适配器：${a.name}`" :value="a.id" />
-          </el-select>
-        </el-tooltip>
-        <span class="head-item">
-          上下文窗口
-          <el-select v-model="novel.contextWindow" size="small" style="width: 130px" :disabled="busy" @change="saveWindow">
-            <el-option v-for="w in CONTEXT_WINDOWS" :key="w" :label="`${w} tokens`" :value="w" />
-          </el-select>
-        </span>
-        <span v-if="isApi" class="head-item model-state">
-          <el-tag :type="apiModel ? 'success' : 'warning'" size="small">{{ apiModel ? '大模型可用' : '没有可用的大模型' }}</el-tag>
-          <el-button v-if="!apiModel" size="small" type="primary" @click="router.push('/ai/model')">去配置模型</el-button>
-          <el-button v-if="!apiModel" size="small" @click="detectApi">重新检测</el-button>
-        </span>
-        <span v-else-if="isGguf" class="head-item model-state">
-          <el-tag :type="llama ? 'success' : 'warning'" size="small">{{ llama ? 'llama.cpp 运行中' : 'llama.cpp 未启动' }}</el-tag>
-          <el-button v-if="!llama" size="small" type="primary" @click="router.push('/ai/llama')">去启动</el-button>
-          <el-button v-if="!llama" size="small" @click="detectLlama">重新检测</el-button>
-        </span>
-        <span v-else class="head-item model-state">
-          <el-tag :type="modelReady ? 'success' : inferState?.status === 'loading' ? 'warning' : 'info'" size="small">
-            {{ modelReady ? '模型已加载' : inferState?.status === 'loading' ? '加载中…' : '模型未加载' }}
-          </el-tag>
-          <el-button v-if="!modelReady" size="small" type="primary" :loading="inferState?.status === 'loading'" :disabled="busy" @click="onLoadModel">加载模型</el-button>
-        </span>
-      </div>
+  <div class="workspace-page study">
+    <!-- 工作区「书房」：顶栏（书名 / 作品定位 / 模型 / 字数）· 左栏（当前分区的子目录）· 中间内容卡片 · 右侧分区图标栏 · 底部状态栏 -->
+    <StudyHeader
+      v-if="novel"
+      v-model:title="titleDraft"
+      :chips="positionChips"
+      :detail="positioningText"
+      :chapter-words="chapterWords"
+      :total-words="totalWords"
+      @exit="router.push('/novel/create')"
+      @rename="saveTitle"
+      @positioning="openBookConfig"
+    >
+      <!-- 模型：一个小标签，点开是原来头部的那些设置（来源 / 基础模型 / 适配器 / 上下文窗口 / 加载） -->
+      <el-popover placement="bottom-end" :width="560" trigger="click">
+        <template #reference>
+          <button class="model-chip" type="button" :title="modelStateText">
+            <span class="state-dot" :class="`is-${modelState}`" />
+            <span class="model-chip-text">{{ modelChipText }}</span>
+            <el-icon><ArrowDown /></el-icon>
+          </button>
+        </template>
+        <div class="model-pop">
+          <div class="pop-title">本工作区的模型</div>
+          <div class="pop-row">
+            <span class="pop-label">来源</span>
+            <el-select :model-value="novel.model.source" size="small" style="width: 230px" :disabled="busy" @change="changeSource">
+              <el-option label="大模型（API）" value="api" />
+              <el-option label="本地模型（safetensors · 可训练）" value="local" :disabled="!localModels.length" />
+              <el-option :label="llama ? 'GGUF（llama.cpp）' : 'GGUF（llama.cpp · 未启动）'" value="gguf" :disabled="!llama" />
+              <el-option label="远程模型（即将支持）" value="remote" disabled />
+            </el-select>
+          </div>
+          <div class="pop-row">
+            <span class="pop-label">模型</span>
+            <span v-if="isApi" class="pop-value">{{ apiModel ? `${apiModel.name} · ${apiModel.model}` : novel.model.apiName || '当前启用的模型' }}</span>
+            <span v-else-if="isGguf" class="pop-value">{{ llama ? llama.name : '—' }}</span>
+            <el-select v-else :model-value="novel.model.baseId" size="small" style="width: 230px" :disabled="busy" @change="changeBase">
+              <el-option v-for="m in localModels" :key="m.id" :label="m.name" :value="m.id" />
+            </el-select>
+          </div>
+          <div v-if="isLocal" class="pop-row">
+            <span class="pop-label">适配器</span>
+            <el-select
+              :model-value="novel.model.adapterId || ''"
+              size="small"
+              style="width: 230px"
+              :disabled="busy || novel.model.source !== 'local'"
+              @change="saveAdapter"
+            >
+              <el-option label="不使用" value="" />
+              <el-option v-for="a in baseAdapters" :key="a.id" :label="a.name" :value="a.id" />
+            </el-select>
+          </div>
+          <div v-if="isLocal" class="pop-note muted">LoRA 风格适配器：章节正文用它生成，章节摘要始终用基础模型；切换后点「加载模型」生效（同一基础模型只切换适配器，不重载）</div>
+          <div class="pop-row">
+            <span class="pop-label">上下文窗口</span>
+            <el-select v-model="novel.contextWindow" size="small" style="width: 230px" :disabled="busy" @change="saveWindow">
+              <el-option v-for="w in CONTEXT_WINDOWS" :key="w" :label="`${w} tokens`" :value="w" />
+            </el-select>
+          </div>
+          <div class="pop-row">
+            <span class="pop-label">状态</span>
+            <template v-if="isApi">
+              <el-tag :type="apiModel ? 'success' : 'warning'" size="small">{{ apiModel ? '大模型可用' : '没有可用的大模型' }}</el-tag>
+              <el-button v-if="!apiModel" size="small" type="primary" @click="router.push('/ai/model')">去配置模型</el-button>
+              <el-button v-if="!apiModel" size="small" @click="detectApi">重新检测</el-button>
+            </template>
+            <template v-else-if="isGguf">
+              <el-tag :type="llama ? 'success' : 'warning'" size="small">{{ llama ? 'llama.cpp 运行中' : 'llama.cpp 未启动' }}</el-tag>
+              <el-button v-if="!llama" size="small" type="primary" @click="router.push('/ai/llama')">去启动</el-button>
+              <el-button v-if="!llama" size="small" @click="detectLlama">重新检测</el-button>
+            </template>
+            <template v-else>
+              <el-tag :type="modelReady ? 'success' : inferState?.status === 'loading' ? 'warning' : 'info'" size="small">
+                {{ modelReady ? '模型已加载' : inferState?.status === 'loading' ? '加载中…' : '模型未加载' }}
+              </el-tag>
+              <el-button v-if="!modelReady" size="small" type="primary" :loading="inferState?.status === 'loading'" :disabled="busy" @click="onLoadModel">加载模型</el-button>
+            </template>
+          </div>
+        </div>
+      </el-popover>
+    </StudyHeader>
+
+    <div v-if="loadError || inferState?.status === 'error' || (isApi && apiError) || modelMismatch" class="study-alerts">
       <el-alert v-if="loadError" type="error" :closable="false" show-icon :title="loadError" />
-      <el-alert v-if="inferState?.status === 'error'" type="error" :closable="false" show-icon :title="`模型加载失败：${inferState.error}`" class="mt" />
-      <el-alert v-if="isApi && apiError" type="warning" :closable="false" show-icon :title="apiError" class="mt" />
+      <el-alert v-if="inferState?.status === 'error'" type="error" :closable="false" show-icon :title="`模型加载失败：${inferState.error}`" />
+      <el-alert v-if="isApi && apiError" type="warning" :closable="false" show-icon :title="apiError" />
       <el-alert
-        v-if="isLocal && inferState?.status === 'loaded' && !modelReady"
+        v-if="modelMismatch"
         type="info"
         :closable="false"
         show-icon
-        class="mt"
-        :title="`当前加载的模型${inferState.baseId === novel.model.baseId ? '适配器设置' : ''}与本工作区不一致，点击「加载模型」切换${inferState.baseId === novel.model.baseId ? '（只切换适配器，不重载基础模型）' : ''}`"
+        :title="`当前加载的模型${inferState.baseId === novel.model.baseId ? '适配器设置' : ''}与本工作区不一致：点顶栏的模型标签，再点「加载模型」切换${inferState.baseId === novel.model.baseId ? '（只切换适配器，不重载基础模型）' : ''}`"
       />
-    </el-card>
+    </div>
 
-    <el-card v-if="novel" class="box-card" shadow="never">
-      <!-- 新工作区：规划期间只显示「自动规划」（其他标签头藏起来，面板不卸载——写进时要用设定编辑器）；写进后自动规划消失 -->
-      <el-alert v-if="planning" type="info" show-icon :closable="false" class="frame-tip"
-                title="新工作区：先在「自动规划」里搭好框架（参数 · 灵感 → 设定 → 全书骨架），写进工作区后，设定 / AI 构思 / 写作 / 故事账本 / 世界书会出现" />
-      <el-tabs v-model="tab" :class="{ 'planning-tabs': planning }">
+    <div v-if="novel" class="study-body">
+      <!-- 左栏：当前分区的子目录 -->
+      <aside class="study-left" :class="{ 'is-folded': leftFolded }">
+        <div class="left-inner">
+          <div class="left-head">
+            <div class="left-title">{{ SECTIONS[tab]?.label }}</div>
+            <div class="left-sub">{{ SECTIONS[tab]?.sub }}</div>
+          </div>
+          <el-scrollbar class="left-scroll">
+            <!-- 自动规划：竖排步骤（PlanWizard expose 的 nav） -->
+            <template v-if="tab === 'plan'">
+              <template v-if="planRef?.nav">
+                <div
+                  v-for="(s, i) in planRef.nav.steps"
+                  :key="s.key"
+                  class="study-nav-item step-item"
+                  :class="{ 'is-active': i === planRef.nav.stepIndex, 'is-done': i < planRef.nav.stepIndex, 'is-busy': !!planRef.nav.busy }"
+                  @click="planRef.nav.goStep(s.key)"
+                >
+                  <span class="step-no">{{ i < planRef.nav.stepIndex ? '✓' : i + 1 }}</span>
+                  <span>{{ s.title }}</span>
+                </div>
+              </template>
+              <p class="left-tip">先搭框架：参数 · 灵感 → 设定 → 全书骨架。写进工作区后，设定 / AI 构思 / 写作 / 故事账本 / 世界书会出现在右侧</p>
+            </template>
+
+            <!-- 设定：分类目录（SettingsEditor expose 的 nav） -->
+            <SettingsNav v-else-if="tab === 'settings'" :nav="editorRef?.nav" />
+
+            <!-- 写作：章节目录 -->
+            <template v-else-if="tab === 'write'">
+              <div class="chapter-item new-item" :class="{ 'is-active': view === 'new' }" @click="view = 'new'">
+                <el-icon><EditPen /></el-icon> 写下一章（第{{ nextIndex }}章）
+              </div>
+              <div class="chapter-count">已写 {{ novel.chapters.length }} 章</div>
+              <div
+                v-for="c in novel.chapters"
+                :key="c.index"
+                class="chapter-item"
+                :class="{ 'is-active': view === c.index }"
+                @click="openChapter(c.index)"
+              >
+                <div class="chapter-line">
+                  <span class="chapter-name">第{{ c.index }}章 {{ c.title }}</span>
+                  <span class="chapter-tags">
+                    <el-tooltip v-if="c.reviewIssues" :content="`一致性检查发现 ${c.reviewIssues} 个问题`" placement="top">
+                      <el-tag size="small" type="danger" effect="plain">{{ c.reviewIssues }}</el-tag>
+                    </el-tooltip>
+                    <el-tag v-if="c.status !== 'done'" size="small" :type="CH_STATUS[c.status]?.type">{{ CH_STATUS[c.status]?.label || c.status }}</el-tag>
+                  </span>
+                </div>
+                <div class="muted">{{ c.chars }} 字<template v-if="c.totals"> · {{ c.totals.promptTokens + c.totals.completionTokens }} tokens</template></div>
+              </div>
+              <div v-if="novel.arcSummary" class="totals">
+                <div class="col-title">
+                  前情概要（已合并至第 {{ novel.arcUpTo }} 章）
+                  <el-button link type="primary" size="small" :icon="EditPen" :disabled="busy" @click="openArcEdit">修改</el-button>
+                </div>
+                <div class="muted arc-text">{{ novel.arcSummary }}</div>
+              </div>
+            </template>
+
+            <!-- AI 构思 / 故事账本 / 世界书：内容里带 data-anchor 的小节 -->
+            <AnchorNav v-else :root="anchorRoot" :scroller="centerEl" :empty="SECTIONS[tab]?.empty" />
+          </el-scrollbar>
+        </div>
+        <button class="fold-handle" type="button" :title="leftFolded ? '展开左栏' : '收起左栏'" @click="toggleLeft">
+          <el-icon><component :is="leftFolded ? 'ArrowRight' : 'ArrowLeft'" /></el-icon>
+        </button>
+      </aside>
+
+      <!-- 中间：左 = 内容卡片（分区面板都常驻、标签头藏起来：写进工作区时要用设定编辑器）；右 = 设定页的素材库 -->
+      <div class="study-center">
+      <main ref="centerEl" class="center-main">
+      <el-tabs v-model="tab" class="ws-tabs">
         <!-- ===================== 设定 ===================== -->
         <el-tab-pane name="settings">
           <template #label><span>设定</span><el-badge v-if="settingsDirty" is-dot class="dirty-dot" /></template>
@@ -88,13 +187,9 @@
             :config="novel.settings.config"
             :novel-id="novel.id"
             :ai="{ apiModel, localModels, adapters, llama, model: novel.model }"
+            external-nav
             @change="settingsDirty = true"
           >
-            <template #lead>
-              <span class="muted">作品定位</span>
-              <span class="positioning-text">{{ positioningText || '未填（平台 / 题材 / 读者 / 卖点…，写正文时会带上）' }}</span>
-              <el-button link type="primary" @click="openBookConfig">修改</el-button>
-            </template>
             <template #actions>
               <el-button type="primary" :icon="Check" :loading="savingSettings" @click="saveSettings()">保存设定</el-button>
             </template>
@@ -104,8 +199,13 @@
         <!-- ===================== 自动规划 ===================== -->
         <el-tab-pane v-if="planning" label="自动规划" name="plan" lazy>
           <!-- :key = 工作区 id：页面是 keep-alive 复用的，切换工作区时必须整个重建，否则会带着上一个工作区的草稿（还会存进新工作区） -->
+          <div class="study-card">
+          <el-alert type="info" show-icon :closable="false" class="frame-tip"
+                    title="新工作区：先在「自动规划」里搭好框架（参数 · 灵感 → 设定 → 全书骨架），写进工作区后，设定 / AI 构思 / 写作 / 故事账本 / 世界书会出现" />
           <PlanWizard
             :key="novel.id"
+            ref="planRef"
+            external-steps
             :novel-id="novel.id"
             :chapter-count="novel.chapters.length ? Math.max(...novel.chapters.map((c) => c.index)) : 0"
             :initial-premise="String(route.query.plan || '')"
@@ -114,12 +214,14 @@
             :book-config="novel.bookConfig || null"
             @applied="onPlanApplied"
           />
+          </div>
         </el-tab-pane>
 
         <!-- ===================== 构思 ===================== -->
         <el-tab-pane name="ideas" lazy>
           <template #label><span>AI 构思</span></template>
           <!-- 同上：构思结果、大纲草稿、勾选记录都是按工作区的，切换工作区要重建 -->
+          <div ref="ideasBox" class="study-card">
           <IdeaPanel
             :key="novel.id"
             ref="ideaRef"
@@ -134,49 +236,13 @@
             @use-chapter="useChapterIdea"
             @detect-api="detectApi"
           />
+          </div>
         </el-tab-pane>
 
         <!-- ===================== 写作 ===================== -->
         <el-tab-pane name="write">
           <template #label><span>写作</span></template>
-          <div class="write-grid">
-            <!-- 章节列表 -->
-            <div class="chapter-col">
-              <div class="col-title">章节（{{ novel.chapters.length }}）</div>
-              <div class="chapter-item" :class="{ 'is-active': view === 'new' }" @click="view = 'new'">
-                <el-icon><EditPen /></el-icon> 写下一章
-              </div>
-              <div
-                v-for="c in novel.chapters"
-                :key="c.index"
-                class="chapter-item"
-                :class="{ 'is-active': view === c.index }"
-                @click="openChapter(c.index)"
-              >
-                <div class="chapter-line">
-                  <span>第{{ c.index }}章 {{ c.title }}</span>
-                  <span class="chapter-tags">
-                    <el-tooltip v-if="c.reviewIssues" :content="`一致性检查发现 ${c.reviewIssues} 个问题`" placement="top">
-                      <el-tag size="small" type="danger" effect="plain">{{ c.reviewIssues }}</el-tag>
-                    </el-tooltip>
-                    <el-tag size="small" :type="CH_STATUS[c.status]?.type">{{ CH_STATUS[c.status]?.label || c.status }}</el-tag>
-                  </span>
-                </div>
-                <div class="muted">{{ c.chars }} 字<template v-if="c.totals"> · {{ c.totals.promptTokens + c.totals.completionTokens }} tokens</template></div>
-              </div>
-              <div class="totals">
-                <div class="col-title">本工作区 token 累计</div>
-                <div>输入 {{ novel.tokenTotals.promptTokens }} · 输出 {{ novel.tokenTotals.completionTokens }} · 调用 {{ novel.tokenTotals.calls }} 次</div>
-                <template v-if="novel.arcSummary">
-                  <div class="col-title">
-                    前情概要（已合并至第 {{ novel.arcUpTo }} 章）
-                    <el-button link type="primary" size="small" :icon="EditPen" :disabled="busy" @click="openArcEdit">修改</el-button>
-                  </div>
-                  <div class="muted">{{ novel.arcSummary }}</div>
-                </template>
-              </div>
-            </div>
-
+          <div class="study-card write-card">
             <!-- 写下一章 -->
             <div v-if="view === 'new'" class="main-col">
               <el-form label-width="90px" class="chapter-form">
@@ -350,16 +416,53 @@
           <template #label>
             <span>故事账本</span><el-badge v-if="openForeshadows" :value="openForeshadows" type="warning" class="facts-badge" />
           </template>
-          <FactsPanel :novel-id="novel.id" :locked="!!busy" :reload-key="factsKey" @open-count="(n) => (openForeshadows = n)" />
+          <div ref="factsBox" class="study-card">
+            <FactsPanel :novel-id="novel.id" :locked="!!busy" :reload-key="factsKey" @open-count="(n) => (openForeshadows = n)" />
+          </div>
         </el-tab-pane>
 
         <!-- ===================== 世界书 ===================== -->
         <el-tab-pane name="worldbook" lazy>
           <template #label><span>世界书</span></template>
-          <WorldBook :novel-id="novel.id" :reload-key="factsKey" />
+          <div ref="worldBox" class="study-card">
+            <WorldBook :novel-id="novel.id" :reload-key="factsKey" />
+          </div>
         </el-tab-pane>
       </el-tabs>
-    </el-card>
+      </main>
+      <MaterialDock
+        v-if="tab === 'settings' && editorRef?.nav"
+        :novel-id="novel.id"
+        :category="editorRef.nav.materialCategory"
+        :categories="editorRef.nav.allCategories"
+        :context-query="editorRef.nav.contextQuery"
+        :used-ids="editorRef.nav.usedMaterialIds"
+        :apply="editorRef.nav.applyMaterials"
+      />
+      </div>
+
+      <!-- 右侧：分区图标栏 -->
+      <StudyRail v-model="tab" :items="navTabs" />
+    </div>
+
+    <!-- 底部状态栏 -->
+    <footer v-if="novel" class="study-status">
+      <span class="status-item">
+        <span class="state-dot" :class="`is-${modelState}`" />{{ modelStateText }}
+      </span>
+      <span class="status-item">上下文 {{ novel.contextWindow }} tokens</span>
+      <span v-if="busy && job" class="status-item is-job">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        {{ job.kind === 'polish' ? '润色' : job.kind === 'recheck' ? '重新检查' : `第${job.chapterIndex}章` }} · {{ phaseText(job) }}
+        <template v-if="job.kind === 'chapter' && job.phase !== 'polish'"> · {{ pct(liveChapter?.text.length || 0, liveChapter?.targetChars || form.targetChars) }}%</template>
+        <el-button link type="primary" size="small" @click="goJob">查看</el-button>
+      </span>
+      <span class="status-spacer" />
+      <span v-if="settingsDirty" class="status-item is-dirty">
+        设定未保存 <el-button link type="primary" size="small" :loading="savingSettings" @click="saveSettings()">保存</el-button>
+      </span>
+      <span class="status-item">累计 token：输入 {{ novel.tokenTotals.promptTokens }} · 输出 {{ novel.tokenTotals.completionTokens }} · {{ novel.tokenTotals.calls }} 次调用</span>
+    </footer>
 
     <!-- 前情概要：手动修改 -->
     <el-dialog v-model="arcEdit.visible" title="修改前情概要" width="640px">
@@ -390,10 +493,10 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onActivated, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElTable, ElTableColumn, ElTag } from 'element-plus'
-import { Back, Check, CopyDocument, Delete, EditPen, MagicStick, VideoPause, VideoPlay, View } from '@element-plus/icons-vue'
+import { ArrowDown, Check, CopyDocument, Delete, EditPen, Loading, MagicStick, VideoPause, VideoPlay, View } from '@element-plus/icons-vue'
 import SettingsEditor from '@/components/novel-options/SettingsEditor.vue'
 import IdeaPanel from '@/components/novel/IdeaPanel.vue'
 import FactsPanel from '@/components/novel/FactsPanel.vue'
@@ -402,6 +505,11 @@ import PlanWizard from '@/components/novel/PlanWizard.vue'
 import BookConfigForm from '@/components/novel/BookConfigForm.vue'
 import { blankBookConfig } from '@/api/novelPlan'
 import ChapterInsight from '@/components/novel/ChapterInsight.vue'
+import StudyHeader from '@/components/novel/study/StudyHeader.vue'
+import StudyRail from '@/components/novel/study/StudyRail.vue'
+import SettingsNav from '@/components/novel/study/SettingsNav.vue'
+import AnchorNav from '@/components/novel/study/AnchorNav.vue'
+import MaterialDock from '@/components/material/MaterialDock.vue'
 import {
   CONTEXT_WINDOWS, cancelGenJob, deleteChapter, editChapter, getChapter, getGenJob, getGenStatus, getNovel, ignoreReview,
   loadNovelModel, polishChapter, previewContext, recheckChapter, revertPolish, startChapter, updateNovel
@@ -1075,44 +1183,377 @@ watch(() => route.query.plan, (p) => { if (p) tab.value = 'plan' }, { immediate:
 onActivated(() => loadNovel().then(applyInspire).then(schedule))
 onDeactivated(() => clearTimeout(timer))
 
-// 墨色 + 赭红主题（styles/ink-theme.css）：只在工作区打开时挂到 <html> 上（弹窗 / 下拉挂在 body 下，也要一起变）
-const themeOn = () => document.documentElement.classList.add('ink-theme')
-const themeOff = () => document.documentElement.classList.remove('ink-theme')
-onMounted(themeOn)
-onActivated(themeOn)
-onDeactivated(themeOff)
-onBeforeUnmount(themeOff)
+/* ---------------- 书房布局：右侧图标栏 / 左栏 / 顶栏 / 状态栏 ---------------- */
+
+/** 左栏标题 + 一句说明；empty = 小节目录为空时的提示 */
+const SECTIONS = {
+  plan: { label: '自动规划', sub: '一句构思 → 设定 → 全书骨架' },
+  settings: { label: '设定', sub: '只有填过 / 选过的内容才会写进提示词' },
+  ideas: { label: 'AI 构思', sub: '书名、大纲、章节方案、后续走向', empty: '还没有构思结果' },
+  write: { label: '写作', sub: '写下一章，或打开已写的章节' },
+  facts: { label: '故事账本', sub: '伏笔 / 角色状态 / 时间线', empty: '账本还是空的' },
+  worldbook: { label: '世界书', sub: 'AI 写作时看到的人物局面和设定', empty: '世界书还是空的' }
+}
+
+// 图标栏：分区 + 角标（写作 = 未读的一致性问题，账本 = 未回收伏笔，设定 = 未保存）
+const navTabs = computed(() => {
+  if (!novel.value) return []
+  if (planning.value) return [{ name: 'plan', label: '自动规划', icon: 'Guide' }]
+  const issues = (novel.value.chapters || []).reduce((n, c) => n + (c.reviewIssues || 0), 0)
+  return [
+    { name: 'settings', label: '设定', icon: 'Tickets', dot: settingsDirty.value },
+    { name: 'ideas', label: 'AI 构思', icon: 'MagicStick' },
+    { name: 'write', label: '写作', icon: 'EditPen', badge: issues },
+    { name: 'facts', label: '故事账本', icon: 'Notebook', badge: openForeshadows.value },
+    { name: 'worldbook', label: '世界书', icon: 'Collection' }
+  ]
+})
+
+// 左栏：AI 构思 / 账本 / 世界书的小节目录在各自内容里找 [data-anchor]
+const centerEl = ref()
+const planRef = ref()
+const ideasBox = ref()
+const factsBox = ref()
+const worldBox = ref()
+const anchorRoot = computed(() => ({ ideas: ideasBox.value, facts: factsBox.value, worldbook: worldBox.value })[tab.value] || null)
+// 换分区回到顶部（各分区内容长短不一，停在上一个分区的滚动位置没有意义）
+watch(tab, () => nextTick(() => centerEl.value?.scrollTo({ top: 0 })))
+
+const LEFT_KEY = 'nan_novel.study.leftFolded'
+const leftFolded = ref(false)
+try {
+  leftFolded.value = localStorage.getItem(LEFT_KEY) === '1'
+} catch {
+  // 读不到就默认展开
+}
+function toggleLeft() {
+  leftFolded.value = !leftFolded.value
+  try {
+    localStorage.setItem(LEFT_KEY, leftFolded.value ? '1' : '0')
+  } catch {
+    // 存不了只是下次不记得
+  }
+}
+
+// 顶栏：作品定位短标签、字数
+const positionChips = computed(() => {
+  const c = novel.value?.bookConfig
+  if (!c) return []
+  return [c.platform, c.genre, c.audience, ...(c.tags || [])].filter(Boolean)
+})
+const totalWords = computed(() => (novel.value?.chapters || []).reduce((n, c) => n + (c.chars || 0), 0))
+const chapterWords = computed(() => {
+  if (tab.value !== 'write') return null
+  if (view.value === 'new') return busy.value && job.value?.kind === 'chapter' ? liveChapter.value?.text?.length || 0 : null
+  return viewChapter.value?.text?.length ?? null
+})
+
+// 模型标签 / 状态栏：ok 可以生成，busy 加载中，off 不可用
+const modelMismatch = computed(() => isLocal.value && inferState.value?.status === 'loaded' && !modelReady.value)
+const modelState = computed(() => {
+  if (canGenerate.value) return 'ok'
+  if (isLocal.value && inferState.value?.status === 'loading') return 'busy'
+  return 'off'
+})
+const modelChipText = computed(() => {
+  const m = novel.value?.model
+  if (!m) return ''
+  if (m.source === 'api') return `大模型 · ${apiModel.value?.model || '未配置'}`
+  if (m.source === 'gguf') return `GGUF · ${llama.value?.name || '未启动'}`
+  const a = adapters.value.find((x) => x.id === m.adapterId)
+  return `本地 · ${modelName.value || '未选择'}${a ? ` + ${a.name}` : ''}`
+})
+const modelStateText = computed(() => {
+  if (isApi.value) return apiModel.value ? `大模型可用：${apiModel.value.name} · ${apiModel.value.model}` : '没有可用的大模型'
+  if (isGguf.value) return llama.value ? `llama.cpp 运行中：${llama.value.name}` : 'llama.cpp 未启动'
+  if (modelReady.value) return `本地模型已加载：${modelChipText.value.replace(/^本地 · /, '')}`
+  return inferState.value?.status === 'loading' ? '本地模型加载中…' : modelMismatch.value ? '已加载的模型与本工作区不一致' : '本地模型未加载'
+})
+
+/** 状态栏「查看」：回到正在跑的任务 */
+function goJob() {
+  tab.value = 'write'
+  const j = job.value
+  if (!j) return
+  if (j.kind === 'chapter') view.value = 'new'
+  else if (j.chapterIndex) openChapter(j.chapterIndex)
+}
+
 </script>
 
 <style scoped>
-.box-card {
-  margin-bottom: 16px;
-  border: none;
-  border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+
+/* ================= 书房布局（背景水墨 / 毛玻璃变量在 styles/ink-theme.css） ================= */
+.study {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
-.head-row {
+.study-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px 0;
+}
+.study-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* 左栏 */
+.study-left {
+  position: relative;
+  width: 248px;
+  flex: 0 0 248px;
+  background: var(--ws-glass);
+  border-right: 1px solid var(--ws-line);
+  backdrop-filter: blur(6px);
+  transition: width 0.2s, flex-basis 0.2s;
+}
+.study-left.is-folded {
+  width: 0;
+  flex-basis: 0;
+  border-right-color: transparent;
+}
+.left-inner {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.study-left.is-folded .left-inner {
+  visibility: hidden;
+}
+.left-head {
+  flex: 0 0 auto;
+  padding: 16px 16px 10px;
+  border-bottom: 1px dashed var(--ws-line);
+}
+.left-title {
+  font-family: var(--ws-font-title);
+  font-size: 18px;
+  color: var(--ws-ink);
+}
+.left-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ws-sub);
+}
+.left-scroll {
+  flex: 1;
+  min-height: 0;
+}
+.left-scroll :deep(.el-scrollbar__view) {
+  padding: 10px 8px 16px;
+}
+.left-tip {
+  margin: 12px 10px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ws-sub);
+}
+/* 左栏右缘的收起把手（参考 EasyWriting 书房） */
+.fold-handle {
+  position: absolute;
+  top: 50%;
+  right: -13px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 40px;
+  padding: 0;
+  color: var(--ws-sub);
+  background: var(--ws-card);
+  border: 1px solid var(--ws-line);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.fold-handle:hover {
+  color: var(--ws-accent);
+}
+
+/* 自动规划的竖排步骤 */
+.step-item.is-busy {
+  cursor: progress;
+}
+.step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ws-sub);
+  border: 1px solid var(--el-border-color-darker);
+  border-radius: 50%;
+}
+.step-item.is-active .step-no {
+  color: var(--el-color-white);
+  background: var(--ws-accent);
+  border-color: var(--ws-accent);
+}
+.step-item.is-done .step-no {
+  color: var(--el-color-success);
+  border-color: var(--el-color-success-light-5);
+}
+
+/* 中间栏：左边内容（只有它滚动，内容放在纸色卡片里）+ 右边素材库（设定页，自己滚动） */
+.study-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.center-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 24px 28px;
+}
+.study-card {
+  padding: 18px 20px;
+  background: var(--ws-card);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+  box-shadow: 0 1px 3px rgba(60, 40, 20, 0.04);
+}
+.ws-tabs :deep(.el-tabs__content) {
+  overflow: visible;
+}
+
+/* 顶栏的模型标签 + 弹出的设置 */
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 300px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--ws-side-text);
+  background: var(--ws-card);
+  border: 1px solid var(--ws-line);
+  border-radius: 14px;
+  cursor: pointer;
+}
+.model-chip:hover {
+  color: var(--ws-ink);
+  border-color: var(--el-color-primary-light-7);
+}
+.model-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.state-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--el-text-color-placeholder);
+}
+.state-dot.is-ok {
+  background: var(--el-color-success);
+}
+.state-dot.is-busy {
+  background: var(--el-color-warning);
+}
+.model-pop .pop-title {
+  margin-bottom: 10px;
+  font-family: var(--ws-font-title);
+  font-size: 15px;
+}
+.pop-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 8px;
+  margin-bottom: 10px;
   font-size: 13px;
-  color: #606266;
 }
-.title-input {
-  width: 240px;
+.pop-label {
+  width: 72px;
+  flex-shrink: 0;
+  color: var(--ws-sub);
 }
-.title-input :deep(.el-input__inner) {
-  font-size: 15px;
-  font-weight: 600;
+.pop-value {
+  color: var(--ws-ink);
 }
-.head-item {
+.pop-note {
+  margin: -4px 0 10px 80px;
+  line-height: 1.5;
+}
+
+/* 底部状态栏 */
+.study-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 30px;
+  flex: 0 0 30px;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--ws-sub);
+  background: var(--ws-glass);
+  border-top: 1px solid var(--ws-line);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.status-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
-.model-state {
-  margin-left: auto;
+.status-item.is-job {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ws-accent);
+}
+.status-item.is-dirty {
+  color: var(--el-color-warning);
+}
+.status-spacer {
+  flex: 1;
+}
+
+/* 写作：左栏章节目录 */
+.new-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.chapter-count {
+  margin: 10px 10px 4px;
+  font-size: 12px;
+  color: var(--ws-sub);
+}
+.chapter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.arc-text {
+  line-height: 1.6;
+}
+
+@media (max-width: 1200px) {
+  .study-left:not(.is-folded) {
+    width: 210px;
+    flex-basis: 210px;
+  }
+  .center-main {
+    padding: 14px 16px 24px;
+  }
 }
 .mt {
   margin-top: 10px;
@@ -1120,7 +1561,6 @@ onBeforeUnmount(themeOff)
 .chapter-edit {
   margin-top: 10px;
 }
-.positioning-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .outline-hint {
   display: flex;
   align-items: center;
@@ -1140,28 +1580,23 @@ onBeforeUnmount(themeOff)
   font-size: 12px;
 }
 .frame-tip { margin-bottom: 10px; }
-/* 规划中：只露出「自动规划」标签头，其他面板留着不卸载（写进工作区要用设定编辑器） */
-.planning-tabs :deep(.el-tabs__item:not(#tab-plan)) { display: none; }
+/* 分页头在右侧图标栏；规划中只给「自动规划」，其他面板留着不卸载（写进工作区要用设定编辑器） */
+.ws-tabs > :deep(.el-tabs__header) { display: none; }
 .dirty-dot {
   margin-left: 4px;
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .hint {
   margin-left: 10px;
-}
-.write-grid {
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 18px;
 }
 .col-title {
   margin: 8px 0 6px;
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .chapter-item {
   padding: 8px 10px;
@@ -1171,11 +1606,11 @@ onBeforeUnmount(themeOff)
   cursor: pointer;
 }
 .chapter-item:hover {
-  background: #f5f7fa;
+  background: var(--ws-side-hover);
 }
 .chapter-item.is-active {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
+  background: var(--ws-side-active-bg);
+  color: var(--ws-accent);
 }
 .chapter-line {
   display: flex;
@@ -1200,8 +1635,8 @@ onBeforeUnmount(themeOff)
   margin-top: 14px;
   padding-top: 8px;
   font-size: 12px;
-  color: #606266;
-  border-top: 1px solid #ebeef5;
+  color: var(--el-text-color-regular);
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 .chapter-form {
   max-width: 820px;
@@ -1224,7 +1659,7 @@ onBeforeUnmount(themeOff)
 .chapter-title {
   font-size: 16px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .goal {
   margin-top: 6px;
@@ -1234,7 +1669,7 @@ onBeforeUnmount(themeOff)
   padding: 8px 12px;
   font-size: 13px;
   line-height: 1.7;
-  background: #f8faff;
+  background: var(--el-color-primary-light-9);
   border-left: 3px solid var(--el-color-primary-light-5);
 }
 .chapter-text {
@@ -1242,13 +1677,13 @@ onBeforeUnmount(themeOff)
   margin: 12px 0 0;
   padding: 14px 16px;
   overflow: auto;
-  font-family: inherit;
-  font-size: 15px;
-  line-height: 1.9;
+  font-family: var(--ws-font-prose);
+  font-size: 16px;
+  line-height: 1.95;
   white-space: pre-wrap;
   word-break: break-word;
-  background: #fffdf7;
-  border: 1px solid #f0e9d8;
+  background: var(--ws-card);
+  border: 1px solid var(--ws-line);
   border-radius: 6px;
 }
 :deep(.ctx-report) {
@@ -1265,8 +1700,8 @@ onBeforeUnmount(themeOff)
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
-  background: #f7f8fa;
-  border: 1px solid #e4e7ed;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
 }
 </style>

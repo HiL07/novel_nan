@@ -11,13 +11,9 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 自动规划（设计见 docs/自动规划.md），两条路线：
- * <ul>
- *   <li>故事优先（mode = story，不依赖素材库）：写作参数 + 灵感（模型）→ 全书骨架（模型）→ 设定（模型，从骨架推出）
- *       → 素材点睛（可选：按设定里的人物 / 元素本地检索 + 模型给建议）→ 10 章大纲 → 审稿；</li>
- *   <li>素材优先：一句构思 → 拆需求（模型）→ 选素材（本地检索，不花 token）→ 设定草案（模型，素材改编）
- *       → 10 章大纲 + 伏笔计划（模型）→ 审稿（模型）。</li>
- * </ul>
+ * 自动规划（设计见 docs/自动规划.md），故事优先（不依赖素材库）：写作参数 + 灵感（模型）→ 设定（世界 + 主角）
+ * → 全书骨架 + 按骨架配人物 / 元素 → 写进工作区；素材点睛（按设定里的人物 / 元素本地检索 + 模型给建议）、
+ * 10 章大纲、审稿的接口保留，暂不在界面流程里。原来的「素材优先」路线 2026-11-02 删掉了。
  * 只产出设定 / 大纲 / 计划伏笔，不写正文。
  * 模型调用在 Python（/api/gen/plan/**）；这里负责带模型配置、检索素材（复用灵感墙 {@link InspirationService#retrieveNeeds}）、
  * 组装素材条目（含多版本与量级，复用 {@link NovelGenService#materialItems}）。写进工作区的那一步不用模型，前端直接调 Python。
@@ -40,11 +36,6 @@ public class NovelPlanService {
     public NovelPlanService(InspirationService inspireService, NovelGenService genService) {
         this.inspireService = inspireService;
         this.genService = genService;
-    }
-
-    /** ① {premise, tone?, conditions?, stage?, model} → {summary, needs[], stage, opening, startIndex, usage, model} */
-    public Map<String, Object> needs(String novelId, Map<String, Object> req) {
-        return python("needs", novelId, base(req), req.get("model"));
     }
 
     /** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, model} → {ideas[], usage, model} */
@@ -230,29 +221,16 @@ public class NovelPlanService {
         return n;
     }
 
-    /** ② {needs, excludeBooks?, stage?} → 同灵感墙 retrieve 的 {groups, total, reranked, stage}（本地，不花 token） */
-    public Map<String, Object> retrieve(String novelId, Map<String, Object> req) {
-        NovelGenService.checkNovelId(novelId);
-        Map<String, Object> r = new LinkedHashMap<>();
-        r.put("needs", req.get("needs"));
-        r.put("stage", req.get("stage"));
-        r.put("explore", false);
-        r.put("relaxEmpty", true);   // 规划时一条需求没素材过阈值，就给最相关的 2 条（标「相关度低」）
-        return inspireService.retrieveNeeds(strings(req.get("excludeBooks")), List.of(), r);
-    }
-
-    /** ③ {premise, tone?, conditions?, stage?, materialIds, materialVariants?, model} → {draft, issues, …} */
+    /** 设定（世界 + 主角）{premise?, idea?, bookConfig?, book?, tone?, conditions?, materialIds?, materialVariants?, model} → {draft, issues, …} */
     public Map<String, Object> settings(String novelId, Map<String, Object> req) {
-        Map<String, Object> body = base(req);
-        storyFields(req, body);
+        Map<String, Object> body = story(req, true);
         body.put("materials", materials(req));
         return python("settings", novelId, body, req.get("model"));
     }
 
-    /** ④ {premise, tone?, settings, materialIds?, stage?, count?, model} → {outline, issues, …} */
+    /** 10 章大纲 {premise?, idea?, bookConfig?, book?, settings, materialIds?, count?, model} → {outline, issues, bookStage, …} */
     public Map<String, Object> outline(String novelId, Map<String, Object> req) {
-        Map<String, Object> body = base(req);
-        storyFields(req, body);
+        Map<String, Object> body = story(req, true);
         body.put("settings", requireMap(req.get("settings"), "缺少设定草案"));
         body.put("materials", materials(req));
         if (req.get("count") instanceof Number n) {
@@ -261,10 +239,9 @@ public class NovelPlanService {
         return python("outline", novelId, body, req.get("model"));
     }
 
-    /** ⑤ {premise, tone?, settings, outline, stage?, model} → {chapters[{index, problems, revised}], overall, codeIssues, …} */
+    /** 审稿 {premise?, idea?, bookConfig?, book?, settings, outline, model} → {chapters[{index, problems, revised}], overall, codeIssues, …} */
     public Map<String, Object> review(String novelId, Map<String, Object> req) {
-        Map<String, Object> body = base(req);
-        storyFields(req, body);
+        Map<String, Object> body = story(req, true);
         body.put("settings", requireMap(req.get("settings"), "缺少设定草案"));
         body.put("outline", requireMap(req.get("outline"), "缺少大纲"));
         return python("review", novelId, body, req.get("model"));
@@ -276,11 +253,8 @@ public class NovelPlanService {
         return inspireService.callGen("/api/gen/plan/" + action, body, model);
     }
 
-    /** 故事优先的字段（mode / 写作参数 / 选定的灵感 / 全书骨架）原样转给 Python，Python 端清洗 */
+    /** 写作参数 / 选定的灵感 / 全书骨架原样转给 Python，Python 端清洗 */
     private static void storyFields(Map<String, Object> req, Map<String, Object> body) {
-        if ("story".equals(req.get("mode"))) {
-            body.put("mode", "story");
-        }
         for (String k : List.of("bookConfig", "idea", "book")) {
             if (req.get(k) instanceof Map<?, ?> m && !m.isEmpty()) {
                 body.put(k, m);
@@ -288,7 +262,7 @@ public class NovelPlanService {
         }
     }
 
-    /** 故事优先：构思可以为空；requirePremise = 要么有构思、要么有选定的灵感 */
+    /** 构思可以为空；requirePremise = 构思、选定的灵感、全书骨架（续规划）至少有一个 */
     private static Map<String, Object> story(Map<String, Object> req, boolean requirePremise) {
         Map<String, Object> body = new LinkedHashMap<>();
         String premise = trim(req.get("premise"), PREMISE_CHARS);
@@ -309,26 +283,6 @@ public class NovelPlanService {
 
     private static String joined(Object v) {
         return v instanceof List<?> l ? String.join("、", l.stream().map(String::valueOf).toList()) : trim(v, 120);
-    }
-
-    /** 构思 / 基调 / 补充要求 / 阶段 + 故事优先字段；故事优先且选了灵感时构思可以为空 */
-    private static Map<String, Object> base(Map<String, Object> req) {
-        String premise = trim(req.get("premise"), PREMISE_CHARS);
-        // 故事优先：选了灵感或已有全书骨架（续规划）时可以不写构思
-        boolean storyBase = "story".equals(req.get("mode"))
-                && (req.get("idea") instanceof Map<?, ?> i && !i.isEmpty() || req.get("book") instanceof Map<?, ?> b && !b.isEmpty());
-        if (premise.isEmpty() && !storyBase) {
-            throw new BizException(400, "请先写一句构思，比如「法师喜欢冒险」");
-        }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("premise", premise);
-        body.put("tone", trim(req.get("tone"), 200));
-        body.put("conditions", trim(req.get("conditions"), PREMISE_CHARS));
-        Map<String, Object> stage = InspirationService.stageBody(req.get("stage"));
-        if (stage != null) {
-            body.put("stage", stage);
-        }
-        return body;
     }
 
     /** 选中的素材 → Python 素材条目（多版本 + 量级 / 阶段适配） */

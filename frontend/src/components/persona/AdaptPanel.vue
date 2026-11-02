@@ -263,7 +263,7 @@ async function remove() {
 
 <style scoped>
 h4 { margin: 16px 0 8px; }
-.muted { font-size: 12px; font-weight: normal; color: #909399; }
+.muted { font-size: 12px; font-weight: normal; color: var(--el-text-color-secondary); }
 .block { margin-bottom: 10px; }
 .tabs { margin-top: 16px; }
 .w300 { width: 300px; }
@@ -278,5 +278,5 @@ h4 { margin: 16px 0 8px; }
 .row, .save { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .save { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--el-border-color-lighter); }
 .spacer { flex: 1; }
-.brief { white-space: pre-wrap; font-size: 12px; background: #f5f7fa; padding: 8px; border-radius: 4px; }
+.brief { white-space: pre-wrap; font-size: 12px; background: var(--el-fill-color-light); padding: 8px; border-radius: 4px; }
 </style>

@@ -17,8 +17,13 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * AI 模型配置：增删改查 + 验证 + 启用。
@@ -29,6 +34,9 @@ import java.util.Objects;
 public class AiModelConfigService {
 
     private static final Logger log = LoggerFactory.getLogger(AiModelConfigService.class);
+
+    private static final Pattern PROVIDER_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+    private static final int MAX_MODELS = 1000;
 
     private final AiModelConfigMapper mapper;
     private final AiServiceClient aiClient;
@@ -62,8 +70,12 @@ public class AiModelConfigService {
         }
         AiModelConfig cfg = new AiModelConfig();
         cfg.setName(defaultName);
+        cfg.setProviderType(AiModelConfig.TYPE_PRESET);
+        cfg.setProviderId("deepseek");
+        cfg.setProtocol(AiModelConfig.PROTOCOL_OPENAI);
         cfg.setBaseUrl(defaultBaseUrl);
         cfg.setModel(defaultModel);
+        cfg.setModels(List.of(defaultModel));
         cfg.setApiKey(defaultApiKey.trim());
         cfg.setConcurrency(4);
         cfg.setStatus(AiModelConfig.UNVERIFIED);
@@ -131,11 +143,34 @@ public class AiModelConfigService {
             throw new BizException(400, "并发数需在 1~8 之间");
         }
         baseUrl = baseUrl.replaceAll("/+$", "");
+        String type = AiModelConfig.TYPE_CUSTOM.equals(req.getProviderType()) ? AiModelConfig.TYPE_CUSTOM
+                : AiModelConfig.TYPE_PRESET.equals(req.getProviderType()) ? AiModelConfig.TYPE_PRESET : null;
+        String providerId = trim(req.getProviderId());
+        String protocol = normProtocol(req.getProtocol());
+        if (AiModelConfig.TYPE_CUSTOM.equals(type)) {
+            if (!PROVIDER_ID.matcher(providerId).matches()) {
+                throw new BizException(400, "Provider ID 只能用字母、数字、点、下划线、短横线，1~64 位，且以字母或数字开头");
+            }
+            boolean taken = mapper.selectCount(new LambdaQueryWrapper<AiModelConfig>()
+                    .eq(AiModelConfig::getProviderType, AiModelConfig.TYPE_CUSTOM)
+                    .eq(AiModelConfig::getProviderId, providerId)
+                    .ne(req.getId() != null, AiModelConfig::getId, req.getId())) > 0;
+            if (taken) {
+                throw new BizException(400, "Provider ID「" + providerId + "」已被其他自定义模型使用");
+            }
+        } else if (providerId.length() > 64) {
+            providerId = providerId.substring(0, 64);
+        }
+        List<String> models = normModels(req.getModels(), model);
         LocalDateTime now = LocalDateTime.now();
 
         if (req.getId() == null) {
             AiModelConfig cfg = new AiModelConfig();
             cfg.setName(name);
+            cfg.setProviderType(type);
+            cfg.setProviderId(providerId.isEmpty() ? null : providerId);
+            cfg.setProtocol(protocol);
+            cfg.setModels(models);
             cfg.setBaseUrl(baseUrl);
             cfg.setModel(model);
             cfg.setApiKey(apiKey);
@@ -153,8 +188,15 @@ public class AiModelConfigService {
         boolean keyChanged = !apiKey.isEmpty() && !apiKey.equals(cfg.getApiKey());
         boolean needVerify = keyChanged
                 || !baseUrl.equals(cfg.getBaseUrl())
-                || !model.equals(cfg.getModel());
+                || !model.equals(cfg.getModel())
+                || !protocol.equals(normProtocol(cfg.getProtocol()));
         cfg.setName(name);
+        if (type != null) {
+            cfg.setProviderType(type);
+            cfg.setProviderId(providerId.isEmpty() ? null : providerId);
+        }
+        cfg.setProtocol(protocol);
+        cfg.setModels(models);
         cfg.setBaseUrl(baseUrl);
         cfg.setModel(model);
         if (keyChanged) {
@@ -169,6 +211,31 @@ public class AiModelConfigService {
         cfg.setUpdateTime(now);
         mapper.updateById(cfg);
         return cfg;
+    }
+
+    /**
+     * 「获取可用模型」：由 Python 请求服务的模型列表接口。apiKey 留空且给了 id 时用已保存的 Key（编辑时 Key 不回显）。
+     * 返回 {ok, models[{id, name}], message}；AI 服务不可达抛 503。
+     */
+    public JsonNode fetchModels(Map<String, Object> req) {
+        String baseUrl = trim(str(req.get("baseUrl"))).replaceAll("/+$", "");
+        if (!baseUrl.matches("(?i)https?://\\S+")) {
+            throw new BizException(400, "API 地址需以 http:// 或 https:// 开头");
+        }
+        String apiKey = trim(str(req.get("apiKey")));
+        Object id = req.get("id");
+        if (apiKey.isEmpty() && id != null && !String.valueOf(id).isBlank()) {
+            apiKey = Objects.requireNonNullElse(getById(Long.valueOf(String.valueOf(id))).getApiKey(), "");
+        }
+        try {
+            return aiClient.listModels(baseUrl, apiKey, normProtocol(str(req.get("protocol"))));
+        } catch (ResourceAccessException e) {
+            throw new BizException(503, "AI 服务不可达，请确认 python-service 已启动");
+        } catch (RestClientResponseException e) {
+            // 不记录响应体：校验错误的回显里可能带有 API Key
+            log.warn("获取模型目录被 AI 服务拒绝，HTTP {}", e.getStatusCode().value());
+            throw new BizException(400, "AI 服务拒绝了请求（HTTP " + e.getStatusCode().value() + "）");
+        }
     }
 
     /**
@@ -262,6 +329,29 @@ public class AiModelConfigService {
                 .eq(AiModelConfig::getActive, true)
                 .eq(AiModelConfig::getStatus, AiModelConfig.VERIFIED)
                 .last("LIMIT 1"));
+    }
+
+    private static String normProtocol(String p) {
+        return AiModelConfig.PROTOCOL_ANTHROPIC.equals(p) ? AiModelConfig.PROTOCOL_ANTHROPIC : AiModelConfig.PROTOCOL_OPENAI;
+    }
+
+    /** 模型目录：去空、去重、每个 ≤200 字、最多 1000 个；当前使用的模型一定在里面（放最前） */
+    private static List<String> normModels(List<String> list, String model) {
+        Set<String> out = new LinkedHashSet<>();
+        out.add(model);
+        if (list != null) {
+            for (String m : list) {
+                String t = trim(m);
+                if (!t.isEmpty() && t.length() <= 200 && out.size() < MAX_MODELS) {
+                    out.add(t);
+                }
+            }
+        }
+        return new ArrayList<>(out);
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o);
     }
 
     private static String trim(String s) {
