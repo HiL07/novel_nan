@@ -36,6 +36,20 @@ DEPTHS = ("fast", "standard", "deep")
 
 TOKENS = {"fast": (1500, 1000), "standard": (3000, 2000), "deep": (3600, 2400)}  # (大模型, 本地 / GGUF)
 SUPPLEMENT_TOKENS = (1500, 1000)
+# 大模型按本章字数给输出上限：底数 + 每字多少 token（2c 实测，deepseek-v4.1-flash 关思考，2026-11-03：
+# 每千字原文输出 快速 ≈460、标准 ≈690–770、第 2 遍补漏 ≈450；固定上限在长章 / 事实多的章被截断——补漏 1500 截了 4 次，快速 1500 截了 1 次）。
+# 本地 / GGUF 受上下文窗口限制，仍用上面的固定值。
+API_TOKENS = {"fast": (800, 0.9), "standard": (1200, 1.3), "deep": (1500, 1.6), "supplement": (800, 0.9)}
+API_TOKEN_CAP = 8000
+
+
+def max_tokens(kind: str, chars: int, local: bool) -> int:
+    """kind = fast / standard / deep / supplement → 这一份的输出上限。"""
+    if local:
+        return SUPPLEMENT_TOKENS[1] if kind == "supplement" else TOKENS[kind][1]
+    base, per = API_TOKENS[kind]
+    floor = SUPPLEMENT_TOKENS[0] if kind == "supplement" else TOKENS[kind][0]
+    return min(API_TOKEN_CAP, max(floor, int(base + per * chars)))
 API_MAX_CHARS = 20000          # 大模型一次读的最多字数；本地 / GGUF 由调用方按上下文窗口给
 GOLDEN_CHAPTERS = 3
 PREV_LINES = 2
@@ -295,9 +309,14 @@ def parse_card(data: dict, src: "mf.Source", job: dict, depth: str, golden: bool
     def items(key):
         return [x for x in data.get(key) or [] if isinstance(x, dict)]
 
+    def dropped(n=1):  # 枚举外 / 缺字段被丢掉的条目（只计数，评测「类型合法率」用）
+        stats["cardItemsDropped"] = stats.get("cardItemsDropped", 0) + n
+
     hooks = []
     for h in items("hooks"):
         pos, typ = _enum(h.get("pos"), HOOK_POS), _enum(h.get("type"), HOOK_TYPES)
+        if not (pos and typ):
+            dropped()
         if pos and typ:
             hooks.append({"pos": pos, "type": typ, "text": _t(h.get("text"), 60), "strength": _strength(h.get("strength")),
                           **_quote(src, h.get("quote"), off, stats)})
@@ -305,6 +324,8 @@ def parse_card(data: dict, src: "mf.Source", job: dict, depth: str, golden: bool
     pays = []
     for p in items("payoffs"):
         typ = _enum(p.get("type"), PAYOFF_TYPES)
+        if not typ:
+            dropped()
         if typ:
             pays.append({"type": typ, "strength": _strength(p.get("strength")), "amplified": p.get("amplified") is True,
                          "setup": _t(p.get("setup"), 60), **_quote(src, p.get("quote"), off, stats)})
@@ -313,8 +334,11 @@ def parse_card(data: dict, src: "mf.Source", job: dict, depth: str, golden: bool
         act = _enum(t.get("act"), THREAD_ACTS)
         text = _t(t.get("text"), 60)
         if not act or not text:
+            dropped()
             continue
         tid = str(t.get("id") or "").strip().upper()
+        if act != "plant" and tid not in open_ids:  # 推进 / 回收没引用到已有编号（串不上）
+            stats["threadUnlinked"] = stats.get("threadUnlinked", 0) + 1
         ops.append({"op": act, "id": tid if act != "plant" and tid in open_ids else None,
                     "kind": _enum(t.get("kind"), THREAD_KINDS) or "伏笔", "text": text,
                     **_quote(src, t.get("quote"), off, stats)})
@@ -451,10 +475,9 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
     cats = [c for c in opts.active_categories() if c != "plot"]
     jobs = chapter_jobs(chapters, max_chars)
     golden_cis = golden if golden is not None else golden_of(chapters)
-    tokens = TOKENS[depth][1 if local else 0]
     stats = {"rounds": opts.rounds, "depth": depth, "chunks": len(jobs), "chapters": len(chapters), "failedChunks": 0,
              "factsVerified": 0, "factsUnverified": 0, "entities": 0, "cards": 0, "cardsFailed": 0,
-             "cardQuotesUnverified": 0, "threadLinks": 0}
+             "cardQuotesUnverified": 0, "threadLinks": 0, "cardItemsDropped": 0, "threadUnlinked": 0}
     book, threads, lead = mf.Book(), Threads(), Lead()
     prev: list[str] = []
     part_cards: dict[int, dict[int, dict]] = {}
@@ -472,18 +495,20 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
                                 prev=prev[-PREV_LINES:], lead=lead.line(), known=book.known_in(job["text"]),
                                 threads=ctx_threads)
         try:
-            data = mf._parse(call([{"role": "system", "content": mf.SYSTEM}, {"role": "user", "content": prompt}], tokens))
+            data = mf._parse(call([{"role": "system", "content": mf.SYSTEM}, {"role": "user", "content": prompt}],
+                                  max_tokens(depth, len(job["text"]), local)))
         except LLMError as e:
             if e.fatal or (stop and stop.is_set()):
                 raise
             return {"ci": job["ci"], "part": job["part"], "failed": True, "error": str(e)[:200]}
         src = mf.Source(job["text"])
-        local_stats = {"cardQuotesUnverified": 0}
+        local_stats = {"cardQuotesUnverified": 0, "cardItemsDropped": 0, "threadUnlinked": 0}
         ents, ok, bad = parse_entities(data, src, job["offset"], job["ci"], set(cats))
         card, ops = parse_card(data, src, job, depth, golden, {t["id"] for t in ctx_threads}, local_stats)
         threads.assign(ops)
         return {"ci": job["ci"], "part": job["part"], "entities": ents, "card": card, "ops": ops, "ok": ok, "bad": bad,
-                "cardQuotesUnverified": local_stats["cardQuotesUnverified"]}
+                "cardQuotesUnverified": local_stats["cardQuotesUnverified"],
+                "cardItemsDropped": local_stats["cardItemsDropped"], "threadUnlinked": local_stats["threadUnlinked"]}
 
     def apply(row: dict) -> None:
         ci = row["ci"]
@@ -498,12 +523,29 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
         if row["card"].get("oneLine"):
             prev.append(row["card"]["oneLine"])
 
+    # 重读这几章：断点里属于 cis、还没带上这次标记 rr 的行当作没读（读到这一章时的滚动上下文 = 前面各章，正确）。
+    # 重读章新埋的伏笔从全书已用的最大编号之后开始编号，不和后面章节已有的编号撞；
+    # 后面章节对这几章旧伏笔的推进会对不上而被跳过（Threads.apply 只认存在的编号）。
+    rr_id = opts.reread.id if opts.reread else ""
+    rr_cis = set(opts.reread.cis) if opts.reread else set()
+
+    def stale(row: dict | None, ci: int) -> bool:
+        return row is None or (bool(rr_id) and ci in rr_cis and row.get("rr") != rr_id)
+
+    max_t = max((int(m.group(1)) for r in done.values() if isinstance(r, dict) for op in r.get("ops") or []
+                 if op.get("op") == "plant" and (m := re.fullmatch(r"T(\d+)", str(op.get("id") or "")))), default=0)
+
     streak = 0
     for n, job in enumerate(jobs, 1):
         row = done.get(job["key"])
-        if row is None:
+        if stale(row, job["ci"]):
             ckpt.reading(job["ci"])
+            if row is not None:  # 重读：新伏笔编号接在全书最大编号后面
+                threads.next = max(threads.next, max_t + 1)
             row = read(job)
+            max_t = max(max_t, threads.next - 1)
+            if rr_id and job["ci"] in rr_cis:
+                row["rr"] = rr_id
             ckpt.append("pass1", job["key"], row)
             streak = streak + 1 if row.get("failed") else 0
             if streak >= MAX_FAIL_STREAK:
@@ -528,7 +570,7 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
     if opts.rounds == 2:
         done2 = ckpt.done("pass2")
         for n, job in enumerate(jobs, 1):
-            if job["key"] not in done2:
+            if stale(done2.get(job["key"]), job["ci"]):
                 if stop and stop.is_set():
                     raise mf.Cancelled("已取消")
                 title = chapters[job["ci"]]["title"]
@@ -537,14 +579,14 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
                     data = mf._parse(call([{"role": "system", "content": mf.SYSTEM},
                                            {"role": "user", "content": mf.scan_prompt(text, cats, opts.focus.strip(),
                                                                                       book.known_in(job["text"]))}],
-                                          SUPPLEMENT_TOKENS[1 if local else 0]))
+                                          max_tokens("supplement", len(job["text"]), local)))
                     src = mf.Source(job["text"])
                     ents, ok, bad = parse_entities(data, src, job["offset"], job["ci"], set(cats))
-                    ckpt.append("pass2", job["key"], {"entities": ents, "ok": ok, "bad": bad})
+                    ckpt.append("pass2", job["key"], {"entities": ents, "ok": ok, "bad": bad, "rr": rr_id})
                 except LLMError as e:
                     if e.fatal or (stop and stop.is_set()):
                         raise
-                    ckpt.append("pass2", job["key"], {"failed": True, "error": str(e)[:200]})
+                    ckpt.append("pass2", job["key"], {"failed": True, "error": str(e)[:200], "rr": rr_id})
             row2 = done2.get(job["key"]) or {}
             if not row2.get("failed"):
                 book.add(row2.get("entities") or [])
@@ -558,18 +600,12 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
             stats["factsVerified"] += row.get("ok", 0)
             stats["factsUnverified"] += row.get("bad", 0)
             stats["cardQuotesUnverified"] += row.get("cardQuotesUnverified", 0)
+            stats["cardItemsDropped"] += row.get("cardItemsDropped", 0)
+            stats["threadUnlinked"] += row.get("threadUnlinked", 0)
             stats["threadLinks"] += sum(1 for op in row.get("ops") or [] if op["op"] != "plant" and op.get("id"))
 
     # ---- 输出
-    entities = []
-    for ent in sorted(book.entities.values(), key=lambda e: -len(e["facts"])):
-        if not ent["facts"]:
-            continue  # 只有未核实事实的实体不进档案
-        entities.append({"key": ent["key"], "category": ent["category"], "name": ent["name"], "aliases": ent["aliases"],
-                         "facts": [{"fact": f["fact"], "quote": f["quote"], "chapter": chapters[f["chapter"]]["title"],
-                                    "ci": f["chapter"], "at": f.get("at")} for f in ent["facts"]],
-                         "unverified": [{"fact": u["fact"], "quote": u["quote"], "chapter": chapters[u["chapter"]]["title"],
-                                         "ci": u["chapter"]} for u in ent.get("unverified", [])]})
+    entities = export_entities(book, [ch["title"] for ch in chapters])
     stats["entities"] = len(entities)
     seen_at = appearances(chapters, entities)
     first_ci = {e["key"]: min(f["ci"] for f in e["facts"]) for e in entities}
@@ -597,7 +633,7 @@ def scan(chapters: list[dict], opts: MaterialOptions, call: Callable[[list[dict]
 
 # ---------------------------------------------------------------- 逐章查看（提取中读断点）
 
-def live(key: str, since: int = 0) -> dict:
+def live(key: str, since: int = 0, book_text: list[str] | None = None) -> dict:
     """断点 → 逐章查看的增量数据（docs/素材提取改造方案.md §E）。
     since = 上次拿到的 pass1 行数；返回这之后有变化的章（整章重算：超长章的几份合成一张卡）。
     → {exists, range, chapters (since=0 时才带：[{ci, index, title, kind, chars, parts}]), rows: [{ci, status done|failed|partial,
@@ -637,6 +673,50 @@ def live(key: str, since: int = 0) -> dict:
            "current": ec.READING.get(key)}
     if since == 0:
         out["chapters"] = meta.get("chapters") or []
+    if since == 0 or touched:  # 有新读完的章：用已读的章现算实体档案、节奏统计和伏笔表（拆书视图边提取边看）
+        out["pacing"], out["threads"] = _live_breakdown(lines, latest)
+        book = mf.Book()
+        for row in [r for r in latest.values() if isinstance(r, dict) and not r.get("failed")] +                 [r for _, r in ec.read_lines(key, "pass2") if isinstance(r, dict) and not r.get("failed")]:
+            book.add(row.get("entities") or [])
+        out["entities"] = export_entities(book, [c["title"] for c in meta.get("chapters") or []])
+        if book_text is not None:  # 出场 = 名字 / 别名在原文出现（和提取结束时 chapter_stats 的 appear 同一口径），只算已读的章
+            done = sorted({r["ci"] for r in latest.values() if isinstance(r, dict) and not r.get("failed")})
+            seen = appearances([{"content": book_text[ci] if ci < len(book_text) else ""} for ci in done], out["entities"])
+            out["appear"] = {ci: [a["key"] for a in s] for ci, s in zip(done, seen)}
+    return out
+
+
+def _live_breakdown(lines: list, latest: dict[str, dict]) -> tuple[dict, list[dict]]:
+    """按断点行的写入顺序重放伏笔操作（编号在写断点前已分配），已读完的章合成章节卡 → breakdown.pacing。"""
+    from . import breakdown
+
+    threads, seen, by_ci = Threads(), set(), {}
+    for k, _ in lines:
+        row = latest.get(k)
+        if k in seen or not isinstance(row, dict) or row.get("failed"):
+            continue
+        seen.add(k)
+        threads.apply(row["ci"], row.get("ops") or [])
+        by_ci.setdefault(row["ci"], []).append(row)
+    cards = []
+    for ci in sorted(by_ci):
+        parts = sorted(by_ci[ci], key=lambda r: r.get("part", 0))
+        cards.append({"ci": ci, "status": "done", **merge_parts([r["card"] for r in parts])})
+    return breakdown.pacing(cards, threads.items), threads.items
+
+
+def export_entities(book: "mf.Book", titles: list[str]) -> list[dict]:
+    """实体档案 → 结果里的 entities（事实多的在前；只有未核实事实的实体不进档案）。titles[ci] = 章名。"""
+    title = lambda ci: titles[ci] if isinstance(ci, int) and 0 <= ci < len(titles) else ""
+    out = []
+    for ent in sorted(book.entities.values(), key=lambda e: -len(e["facts"])):
+        if not ent["facts"]:
+            continue
+        out.append({"key": ent["key"], "category": ent["category"], "name": ent["name"], "aliases": ent["aliases"],
+                    "facts": [{"fact": f["fact"], "quote": f["quote"], "chapter": title(f["chapter"]),
+                               "ci": f["chapter"], "at": f.get("at")} for f in ent["facts"]],
+                    "unverified": [{"fact": u["fact"], "quote": u["quote"], "chapter": title(u["chapter"]),
+                                    "ci": u["chapter"]} for u in ent.get("unverified", [])]})
     return out
 
 

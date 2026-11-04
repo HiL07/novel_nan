@@ -102,9 +102,9 @@ public class AiServiceClient {
     }
 
     /** GET /api/extract/checkpoints/{key}/chapters?since=N：逐章查看（提取中）→ {exists, range, chapters?, rows, next, current, running} */
-    public JsonNode extractLive(String key, int since) {
-        return client.get().uri("/api/extract/checkpoints/{key}/chapters?since={since}", key, since)
-                .retrieve().body(JsonNode.class);
+    public JsonNode extractLive(String key, int since, Long fileId, String fileExt) {
+        return slowClient.get().uri("/api/extract/checkpoints/{key}/chapters?since={since}&fileId={fileId}&fileExt={ext}",
+                        key, since, fileId, fileExt).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/extract/split-preview：提取前按同一套规则分章 → {chars, total, chapters[{index, title, kind, chars}], prefaceChars, warnings} */
@@ -179,6 +179,39 @@ public class AiServiceClient {
             body.put("model", modelBody(cfg));
         }
         return slowClient.post().uri("/api/materials/merge/draft").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/entity-groups：全书实体 AI 归并建议 → {ok, groups[{keys, category, type, name, reason}], usage}；cfg 为 null 时用 GGUF */
+    public JsonNode entityGroups(List<Map<String, Object>> entities, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>(Map.of("entities", entities));
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/extract/entity-groups").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/world-groups：世界观分组提议 → {ok, groups[{name, members[实体键], reason}], usage}；cfg 为 null 时用 GGUF */
+    public JsonNode worldGroups(List<JsonNode> entities, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>(Map.of("entities", entities));
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/extract/world-groups").body(body).retrieve().body(JsonNode.class);
+    }
+
+    /** POST /api/extract/resonance-groups：共鸣素材分组提议 → {ok, groups[{name, cardIds, reason}], usage}；cfg 为 null 时用 GGUF */
+    public JsonNode resonanceGroups(List<Map<String, Object>> cards, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>(Map.of("cards", cards));
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/extract/resonance-groups").body(body).retrieve().body(JsonNode.class);
     }
 
     /** POST /api/materials/profile：一批素材（≤20）→ 量级 {ok, tiers: {id: {tier, reason}}, skipped, usage}；cfg 为 null 时用 GGUF */

@@ -23,6 +23,8 @@ public class NovelExtract {
     public static final String FAILED = "FAILED";
     /** 中断（服务重启 / 出错 / 用户暂停）：仍算「提取中」，可从断点继续，或取消后变为 FAILED */
     public static final String INTERRUPTED = "INTERRUPTED";
+    /** 未开始：打开了提取工作区但还没点「开始提取」（options 里存着草稿设置），在「提取中」列出，可开始或删除 */
+    public static final String DRAFT = "DRAFT";
 
     /** 主键（自增） */
     @TableId(type = IdType.AUTO)
@@ -33,6 +35,9 @@ public class NovelExtract {
 
     /** 源文件名（冗余，便于列表展示） */
     private String fileName;
+
+    /** 工作区名（可空，同一本书多个提取工作区时区分用；空 = 显示书名） */
+    private String title;
 
     /** 状态：QUEUED / RUNNING / INTERRUPTED / SUCCEEDED / FAILED */
     private String status;

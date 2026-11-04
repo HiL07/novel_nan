@@ -55,6 +55,8 @@ public class MaterialService {
         CATEGORIES.put("location", "地点");
         CATEGORIES.put("item", "物品功法");
         CATEGORIES.put("plot", "情节");
+        CATEGORIES.put("craft", "写法"); // 卡片整理的写法卡（不是设定实体，提取时不读）
+        CATEGORIES.put("resonance", "共鸣"); // 共鸣素材：同一主题的卡片关联成整体（节点 / 关系 / 联动规则 / 融入指南）
     }
 
     private static final int SEMANTIC_POOL = 150;
@@ -754,6 +756,28 @@ public class MaterialService {
      * 按来源书删除：删除该书所有<b>未保留</b>的素材；withCandidates = true 时同时忽略该书的待确认候选。
      * → {deleted, kept（保留而未删的）, candidatesIgnored}
      */
+    /** 删除提取工作区用：这次提取的素材候选数（不分状态） */
+    public long countCandidatesOfExtract(Long extractId) {
+        return candidateMapper.selectCount(new LambdaQueryWrapper<MaterialCandidate>().eq(MaterialCandidate::getExtractId, extractId));
+    }
+
+    /** 删除提取工作区：删掉这次提取的全部素材候选（已保存进素材库的素材不动），返回删除条数 */
+    @Transactional
+    public int deleteCandidatesOfExtract(Long extractId) {
+        return candidateMapper.delete(new LambdaQueryWrapper<MaterialCandidate>().eq(MaterialCandidate::getExtractId, extractId));
+    }
+
+    /** 某本来源书的素材数 → [全部, 其中标记保留的] */
+    public long[] countBySource(String book) {
+        if (book == null || book.isBlank()) {
+            return new long[]{0, 0};
+        }
+        long total = materialMapper.selectCount(new LambdaQueryWrapper<Material>().eq(Material::getSourceBook, book));
+        long pinned = materialMapper.selectCount(new LambdaQueryWrapper<Material>().eq(Material::getSourceBook, book)
+                .eq(Material::getPinned, true));
+        return new long[]{total, pinned};
+    }
+
     @Transactional
     public Map<String, Object> deleteBySource(String book, boolean withCandidates) {
         String name = book == null ? "" : book.trim();
@@ -992,6 +1016,183 @@ public class MaterialService {
             saved.add(created);
         }
         return saved;
+    }
+
+    /**
+     * 卡片内容 → 还没保存的素材（来源 = 这次提取；事实、章节、原文摘录进 source，量级 / 书中位置进 profile）。
+     */
+    public Material fromCard(Map<String, Object> p, Long extractId, Long fileId, String fileName) {
+        Material m = new Material();
+        m.setCategory(String.valueOf(p.get("category")));
+        m.setSubtype(str(p.get("subtype")));
+        m.setTitle(str(p.get("title")));
+        m.setSummary(str(p.get("summary")));
+        m.setAttributes(p.get("attributes") instanceof Map<?, ?> a ? objectMapper.convertValue(a, Map.class) : Map.of());
+        m.setDetail(str(p.get("detail")));
+        m.setTags(p.get("tags") instanceof List<?> t ? t.stream().map(String::valueOf).toList() : List.of());
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("type", "extract");
+        source.put("extractId", extractId);
+        source.put("fileId", fileId);
+        source.put("fileName", fileName);
+        source.put("chapters", p.getOrDefault("chapters", List.of()));
+        source.put("excerpt", str(p.get("excerpt")));
+        if (p.get("facts") instanceof List<?> facts && !facts.isEmpty()) {
+            source.put("facts", facts);
+        }
+        m.setSource(source);
+        Map<String, Object> profile = new LinkedHashMap<>();
+        if (tierValue(p.get("tier")) != null) {
+            profile.put("tier", tierValue(p.get("tier")));
+            profile.put("tierReason", "整理卡片时标注");
+        }
+        if (p.get("bookPos") instanceof Number pos) {
+            profile.put("bookPos", pos.doubleValue());
+        }
+        if (!profile.isEmpty()) {
+            m.setProfile(profile);
+        }
+        return m;
+    }
+
+    /**
+     * 「更新已有」：把新卡片并进库里已有的素材 —— 属性只补没有的 / 空的键，概括 / 详细 / 细分类型只在原来为空时填，
+     * 标签取并集（≤12），事实和章节追加没有的（事实按原文依据去重，≤40）。名称、分类、量级不动。
+     */
+    @Transactional
+    @SuppressWarnings("unchecked")
+    public Material mergeInto(Long targetId, Material incoming) {
+        Material t = get(targetId);
+        Map<String, Object> attrs = new LinkedHashMap<>(t.getAttributes() == null ? Map.of() : t.getAttributes());
+        if (incoming.getAttributes() != null) {
+            incoming.getAttributes().forEach((k, v) -> {
+                Object old = attrs.get(k);
+                if (old == null || String.valueOf(old).isBlank()) {
+                    attrs.put(k, v);
+                }
+            });
+        }
+        Material req = new Material();
+        req.setId(t.getId());
+        req.setCategory(t.getCategory());
+        req.setSubtype(isBlank(t.getSubtype()) ? incoming.getSubtype() : t.getSubtype());
+        req.setTitle(t.getTitle());
+        req.setSummary(isBlank(t.getSummary()) ? incoming.getSummary() : t.getSummary());
+        req.setDetail(isBlank(t.getDetail()) ? incoming.getDetail() : t.getDetail());
+        req.setAttributes(attrs);
+        List<String> tags = new ArrayList<>(t.getTags() == null ? List.of() : t.getTags());
+        if (incoming.getTags() != null) {
+            incoming.getTags().stream().filter(x -> !tags.contains(x)).forEach(tags::add);
+        }
+        req.setTags(tags.size() > 12 ? new ArrayList<>(tags.subList(0, 12)) : tags);
+        Material saved = save(req);
+        // 来源：补事实 / 章节（save 不改 source，单独更新）
+        Map<String, Object> src = new LinkedHashMap<>(t.getSource() == null ? Map.of() : t.getSource());
+        Map<String, Object> in = incoming.getSource() == null ? Map.of() : incoming.getSource();
+        List<Object> facts = new ArrayList<>(src.get("facts") instanceof List<?> l ? (List<Object>) l : List.of());
+        Set<String> quotes = new java.util.HashSet<>();
+        facts.forEach(f -> quotes.add(f instanceof Map<?, ?> fm ? String.valueOf(fm.get("quote")) : String.valueOf(f)));
+        if (in.get("facts") instanceof List<?> nf) {
+            for (Object f : nf) {
+                String q = f instanceof Map<?, ?> fm ? String.valueOf(fm.get("quote")) : String.valueOf(f);
+                if (facts.size() < 40 && quotes.add(q)) {
+                    facts.add(f);
+                }
+            }
+        }
+        if (!facts.isEmpty()) {
+            src.put("facts", facts);
+        }
+        List<Object> chapters = new ArrayList<>(src.get("chapters") instanceof List<?> l ? (List<Object>) l : List.of());
+        if (in.get("chapters") instanceof List<?> nc) {
+            nc.stream().filter(ch -> !chapters.contains(ch)).forEach(chapters::add);
+        }
+        src.put("chapters", chapters.size() > 80 ? new ArrayList<>(chapters.subList(0, 80)) : chapters);
+        updateSource(t.getId(), src);
+        return saved;
+    }
+
+    /**
+     * 「作为可选版本」：新卡片存成一条素材，挂到库里已有的那条下面 —— 已有的是合并主条目（或它的成员）就加进主条目的版本；
+     * 否则新建一个同书的主条目（共性 = 已有那条的名称 / 概括），已有的和新的都成为它的可选版本（同精炼合并）。→ 主条目
+     */
+    @Transactional
+    @SuppressWarnings("unchecked")
+    public Material attachVersion(Long targetId, Material incoming) {
+        Material target = get(targetId);
+        if (target.getMergedInto() != null) {
+            target = get(target.getMergedInto());
+        }
+        Material created = save(incoming);
+        if (isMergeMaster(target)) {
+            Map<String, Object> src = new LinkedHashMap<>(target.getSource());
+            List<Object> members = new ArrayList<>(src.get("members") instanceof List<?> l ? (List<Object>) l : List.of());
+            members.add(created.getId());
+            List<Object> variants = new ArrayList<>(src.get("variants") instanceof List<?> l ? (List<Object>) l : List.of());
+            variants.add(variantOf(created));
+            src.put("members", members);
+            src.put("variants", variants);
+            updateSource(target.getId(), src);
+            materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getId, created.getId())
+                    .set(Material::getMergedInto, target.getId()));
+            return get(target.getId());
+        }
+        Material master = new Material();
+        master.setCategory(target.getCategory());
+        master.setTitle(target.getTitle());
+        master.setSubtype("");
+        master.setSummary(target.getSummary());
+        master.setDetail("");
+        master.setAttributes(Map.of());
+        List<String> tags = new ArrayList<>(target.getTags() == null ? List.of() : target.getTags());
+        master.setTags(tags.size() > 8 ? new ArrayList<>(tags.subList(0, 8)) : tags);
+        master.setSourceBook(target.getSourceBook() == null ? MANUAL_BOOK : target.getSourceBook());
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("type", "merge");
+        source.put("members", List.of(target.getId(), created.getId()));
+        source.put("books", target.getSourceBook() == null ? List.of() : List.of(target.getSourceBook()));
+        source.put("variants", List.of(variantOf(target), variantOf(created)));
+        master.setSource(source);
+        Material saved = save(master);
+        materialMapper.update(null, new LambdaUpdateWrapper<Material>().in(Material::getId, target.getId(), created.getId())
+                .set(Material::getMergedInto, saved.getId()));
+        return get(saved.getId());
+    }
+
+    private void updateSource(Long id, Map<String, Object> source) {
+        Material patch = new Material();
+        patch.setId(id);
+        patch.setSource(source);
+        patch.setUpdateTime(LocalDateTime.now());
+        materialMapper.updateById(patch);
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static Map<String, Object> variantOf(Material m) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        v.put("id", m.getId());
+        v.put("book", Objects.toString(m.getSourceBook(), ""));
+        v.put("title", m.getTitle());
+        v.put("label", "");
+        v.put("note", "");
+        return v;
+    }
+
+    /** 这本书（来源书）的素材：「分类|归一化标题」→ 那条素材（id / 标题 / mergedInto） */
+    public Map<String, Material> titleIndexOfBook(String book) {
+        Map<String, Material> out = new LinkedHashMap<>();
+        if (book == null) {
+            return out;
+        }
+        for (Material m : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getCategory, Material::getTitle, Material::getMergedInto)
+                .eq(Material::getSourceBook, book).orderByAsc(Material::getId))) {
+            out.putIfAbsent(m.getCategory() + "|" + normTitle(m.getTitle()), m);
+        }
+        return out;
     }
 
     public int ignoreCandidates(List<Long> ids) {

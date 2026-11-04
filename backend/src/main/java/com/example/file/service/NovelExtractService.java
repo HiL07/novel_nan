@@ -38,6 +38,8 @@ import java.util.concurrent.Executors;
 @Service
 public class NovelExtractService {
 
+    private static final String DRAFT_MESSAGE = "未开始：在提取工作区里选好章节范围和设置，点「开始提取」";
+
     private static final Logger log = LoggerFactory.getLogger(NovelExtractService.class);
 
     private static final Set<String> SUPPORTED_EXTS = Set.of("txt", "md", "docx", "pdf");
@@ -55,6 +57,7 @@ public class NovelExtractService {
     private final MaterialService materialService;
     private final ExtractResultStore resultStore;
     private final MaterialCompileMapper compileMapper;
+    private final ExtractCardService cardService;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "novel-extract");
         t.setDaemon(true);
@@ -72,7 +75,9 @@ public class NovelExtractService {
                                AiModelConfigService modelService,
                                MaterialService materialService,
                                ExtractResultStore resultStore,
-                               MaterialCompileMapper compileMapper) {
+                               MaterialCompileMapper compileMapper,
+                               ExtractCardService cardService) {
+        this.cardService = cardService;
         this.extractMapper = extractMapper;
         this.fileService = fileService;
         this.objectMapper = objectMapper;
@@ -149,6 +154,95 @@ public class NovelExtractService {
     }
 
     /**
+     * 新建提取工作区（同一本书可以有多个，比如快速档读全书 + 深拆读前 10 章）：给文件建一条「未开始」（DRAFT）的提取；
+     * 这个文件已有未开始的就直接用它（反复点「新建」不会堆出一串空工作区）。打开已有工作区由前端在列表里选。
+     */
+    public NovelExtract draft(Long fileId) {
+        FileInfo file = fileService.getById(fileId);
+        extOf(file);
+        NovelExtract old = extractMapper.selectOne(new LambdaQueryWrapper<NovelExtract>()
+                .eq(NovelExtract::getFileId, fileId).eq(NovelExtract::getStatus, NovelExtract.DRAFT)
+                .orderByDesc(NovelExtract::getId).last("LIMIT 1"));
+        if (old != null) {
+            return old;
+        }
+        NovelExtract task = new NovelExtract();
+        task.setFileId(fileId);
+        task.setFileName(file.getFileName());
+        task.setStatus(NovelExtract.DRAFT);
+        task.setProgress(0);
+        task.setMessage(DRAFT_MESSAGE);
+        task.setCreateTime(LocalDateTime.now());
+        task.setUpdateTime(task.getCreateTime());
+        extractMapper.insert(task);
+        return task;
+    }
+
+    /** 保存未开始提取的草稿设置 {model, materials}（工作区里改了就存，下次打开还原；模型开始时才校验） */
+    public NovelExtract saveDraft(Long id, Map<String, Object> body) {
+        NovelExtract task = requireDraft(id);
+        Map<String, Object> model = body != null && body.get("model") instanceof Map<?, ?> m ? castMap(m) : null;
+        Map<String, Object> materials = body != null && body.get("materials") instanceof Map<?, ?> m2 ? castMap(m2) : null;
+        Map<String, Object> safeModel = null;
+        if (model != null) { // 只留 source / configId / baseId / chunkChars，绝不存密钥
+            safeModel = new java.util.LinkedHashMap<>();
+            for (String k : List.of("source", "configId", "baseId", "chunkChars")) {
+                if (model.get(k) != null) {
+                    safeModel.put(k, model.get(k));
+                }
+            }
+        }
+        String json = optionsJson(safeModel, materials);
+        if (json != null && json.length() > 20000) {
+            throw new BizException(400, "草稿设置太大");
+        }
+        extractMapper.update(null, new LambdaUpdateWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                .eq(NovelExtract::getStatus, NovelExtract.DRAFT)
+                .set(NovelExtract::getOptions, json)
+                .set(NovelExtract::getUpdateTime, LocalDateTime.now()));
+        task.setOptions(json);
+        return task;
+    }
+
+    /** 未开始的提取 → 开始（和 submit 一样，只是用这一行；条件更新，只会成功一次） */
+    public NovelExtract start(Long id, Map<String, Object> materials, Map<String, Object> modelOpts) {
+        NovelExtract task = requireDraft(id);
+        FileInfo file = fileService.getById(task.getFileId());
+        String ext = extOf(file);
+        ModelChoice choice = resolveModel(modelOpts);
+        boolean withMaterials = materials != null && Boolean.TRUE.equals(materials.get("enabled"));
+        int n = extractMapper.update(null, new LambdaUpdateWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                .eq(NovelExtract::getStatus, NovelExtract.DRAFT)
+                .set(NovelExtract::getStatus, NovelExtract.QUEUED)
+                .set(NovelExtract::getProgress, 0)
+                .set(NovelExtract::getMessage, "排队中（" + choice.label() + (withMaterials ? "，记录设定实体" : "") + "）")
+                .set(NovelExtract::getOptions, optionsJson(modelOpts, withMaterials ? materials : null))
+                .set(NovelExtract::getUpdateTime, LocalDateTime.now()));
+        if (n == 0) {
+            throw new BizException(400, "这次提取已经开始了");
+        }
+        Map<String, Object> materialOpts = withMaterials ? materials : null;
+        executor.submit(() -> run(id, file, ext, choice.config(), choice.local(), materialOpts));
+        return extractMapper.selectById(id);
+    }
+
+    private NovelExtract requireDraft(Long id) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        if (!NovelExtract.DRAFT.equals(task.getStatus())) {
+            throw new BizException(400, "这次提取已经开始了");
+        }
+        return task;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(Map<?, ?> m) {
+        return (Map<String, Object>) m;
+    }
+
+    /**
      * 继续提取（INTERRUPTED 的任务）：Python 里这个任务还在跑（只是 Java 重启了）→ 接着轮询它；
      * 否则用提交时的参数重新提交，同一个断点键（e&lt;任务id&gt;）：已读完的块、整理好的卡片不再重做。
      */
@@ -160,6 +254,7 @@ public class NovelExtractService {
         if (!NovelExtract.INTERRUPTED.equals(task.getStatus())) {
             throw new BizException(400, "只有中断的任务可以继续");
         }
+        requireNoCompileRunning(id);
         if (adopt(task)) {
             return extractMapper.selectById(id);
         }
@@ -177,8 +272,22 @@ public class NovelExtractService {
                 ? objectMapper.convertValue(opts.path("materials"), Map.class) : null;
         FileInfo file = fileService.getById(task.getFileId());
         String ext = extOf(file);
+        // 大模型 = 当前启用的配置（项目约定）：开始后换了启用的配置（比如原来那个余额不足），继续 / 接着读 / 重读都用新的；
+        // 断点和大模型配置无关（一次读的字数都是 2 万字），已读的章照样接着用
+        String source = modelOpts == null ? "api" : String.valueOf(modelOpts.getOrDefault("source", "api"));
+        String newOptions = null;
+        if ("api".equals(source)) {
+            Long activeId = modelService.requireActive().getId();
+            if (modelOpts == null || !activeId.equals(toLong(modelOpts.get("configId")))) {
+                modelOpts = new java.util.LinkedHashMap<>(modelOpts == null ? Map.of() : modelOpts);
+                modelOpts.put("source", "api");
+                modelOpts.put("configId", activeId);
+                newOptions = optionsJson(modelOpts, materials);
+            }
+        }
         ModelChoice choice = resolveModel(modelOpts);
         extractMapper.update(null, new LambdaUpdateWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                .set(newOptions != null, NovelExtract::getOptions, newOptions)
                 .set(NovelExtract::getStatus, NovelExtract.QUEUED)
                 .set(NovelExtract::getMessage, "排队中（继续提取，" + choice.label() + "）")
                 .set(NovelExtract::getJobId, null)
@@ -320,31 +429,149 @@ public class NovelExtractService {
         return extractMapper.selectById(id);
     }
 
+    /** 改工作区名（空 = 清掉，显示书名） */
+    public NovelExtract rename(Long id, String title) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        String t = title == null ? "" : title.trim();
+        if (t.length() > 60) {
+            throw new BizException(400, "工作区名最多 60 个字");
+        }
+        extractMapper.update(null, new LambdaUpdateWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                .set(NovelExtract::getTitle, t.isEmpty() ? null : t));
+        task.setTitle(t.isEmpty() ? null : t);
+        return task;
+    }
+
     /**
-     * 删除提取失败的任务（成功的、提取中的不能删）：删记录和 Python 断点（AI 服务不可达时断点留着，不影响删除）。
-     * → {deleted, skipped}
+     * 删除前预览：{book, checkpointChapters（null = AI 服务不可达）, compileCount, candidateCount, lastOfBook,
+     * materialCount, pinnedCount, blocked（不为空 = 现在不能删的原因）}。
+     */
+    public Map<String, Object> deletePreview(Long id) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        String book = MaterialService.bookOf(task.getFileName());
+        boolean last = isLastOfBook(task);
+        long[] mats = last ? materialService.countBySource(book) : new long[]{0, 0};
+        Integer chapters = null;
+        try {
+            JsonNode cp = aiClient.extractCheckpoint(checkpointKey(id));
+            chapters = cp.path("exists").asBoolean(false) ? cp.path("stages").path("pass1").asInt(0) : 0;
+        } catch (Exception e) {
+            // AI 服务没开：只是少一个数字
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("book", book);
+        out.put("checkpointChapters", chapters);
+        out.put("compileCount", compileMapper.selectCount(new LambdaQueryWrapper<MaterialCompile>().eq(MaterialCompile::getExtractId, id)));
+        out.put("candidateCount", materialService.countCandidatesOfExtract(id));
+        out.put("cardCount", cardService.countOfExtract(id));
+        out.put("lastOfBook", last);
+        out.put("materialCount", mats[0]);
+        out.put("pinnedCount", mats[1]);
+        out.put("blocked", blockedReason(task));
+        return out;
+    }
+
+    /**
+     * 删除提取工作区（正在提取 / 整理的要先暂停）：任务记录、断点、结果文件、整理记录及其断点、这次提取的全部素材候选。
+     * 素材库按书共享：删的是这本书（MaterialService.bookOf 同名）的最后一个工作区时，这本书的素材一并删除（标记保留的不删）。
+     * → {deleted, skipped, materialsDeleted, reasons[]}
      */
     public Map<String, Object> delete(List<Long> ids) {
         if (ids == null || ids.isEmpty()) {
-            throw new BizException(400, "请选择要删除的任务");
+            throw new BizException(400, "请选择要删除的工作区");
         }
         int deleted = 0;
         int skipped = 0;
+        int materialsDeleted = 0;
+        List<String> reasons = new java.util.ArrayList<>();
         for (Long id : ids) {
             NovelExtract task = id == null ? null : extractMapper.selectById(id);
-            if (task == null || !NovelExtract.FAILED.equals(task.getStatus())) {
+            String blocked = task == null ? "工作区不存在" : blockedReason(task);
+            if (blocked != null) {
                 skipped++;
+                reasons.add(blocked);
                 continue;
             }
-            extractMapper.deleteById(id);
-            deleted++;
-            try {
-                aiClient.deleteExtractCheckpoint(checkpointKey(id));
-            } catch (Exception e) {
-                log.warn("删除提取断点失败，taskId={}：{}", id, e.getMessage());
+            String book = MaterialService.bookOf(task.getFileName());
+            List<MaterialCompile> compiles = compileMapper.selectList(new LambdaQueryWrapper<MaterialCompile>()
+                    .select(MaterialCompile::getId).eq(MaterialCompile::getExtractId, id));
+            // 先删记录（条件删除：检查之后刚好被启动了就不删），再清文件
+            int n = extractMapper.delete(new LambdaQueryWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                    .notIn(NovelExtract::getStatus, NovelExtract.QUEUED, NovelExtract.RUNNING));
+            if (n == 0) {
+                skipped++;
+                reasons.add("正在提取，请先暂停再删除");
+                continue;
             }
+            deleted++;
+            cancelRequested.remove(id);
+            pauseRequested.remove(id);
+            if (!compiles.isEmpty()) {
+                compileMapper.deleteBatchIds(compiles.stream().map(MaterialCompile::getId).toList());
+            }
+            int candidates = materialService.deleteCandidatesOfExtract(id);
+            cardService.deleteOfExtract(id);
+            deleteCheckpointQuietly(checkpointKey(id), "提取", id);
+            compiles.forEach(c -> deleteCheckpointQuietly("k" + c.getId(), "整理", c.getId()));
+            if (task.getResultPath() != null) {
+                resultStore.deleteQuietly(task.getResultPath());
+            }
+            if (book != null && isLastOfBook(task)) {
+                Object m = materialService.deleteBySource(book, true).get("deleted");
+                materialsDeleted += m instanceof Number num ? num.intValue() : 0;
+            }
+            log.info("删除提取工作区 {}（《{}》）：整理记录 {} 条，素材候选 {} 条", id, book, compiles.size(), candidates);
         }
-        return Map.of("deleted", deleted, "skipped", skipped);
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("deleted", deleted);
+        out.put("skipped", skipped);
+        out.put("materialsDeleted", materialsDeleted);
+        out.put("reasons", reasons);
+        return out;
+    }
+
+    /** 这个工作区正在整理卡片（排队 / 运行）时不能继续提取：整理读的是提取结果 / 断点，继续提取会改掉它 */
+    private void requireNoCompileRunning(Long id) {
+        if (compileMapper.selectCount(new LambdaQueryWrapper<MaterialCompile>().eq(MaterialCompile::getExtractId, id)
+                .in(MaterialCompile::getStatus, NovelExtract.QUEUED, NovelExtract.RUNNING)) > 0) {
+            throw new BizException(400, "正在整理卡片，请先暂停整理再继续提取");
+        }
+    }
+
+    /** 现在不能删的原因（null = 可以删）：正在提取，或这个工作区有正在进行的整理 */
+    private String blockedReason(NovelExtract task) {
+        if (NovelExtract.QUEUED.equals(task.getStatus()) || NovelExtract.RUNNING.equals(task.getStatus())) {
+            return "正在提取，请先暂停再删除";
+        }
+        boolean compiling = compileMapper.selectCount(new LambdaQueryWrapper<MaterialCompile>()
+                .eq(MaterialCompile::getExtractId, task.getId())
+                .in(MaterialCompile::getStatus, NovelExtract.QUEUED, NovelExtract.RUNNING)) > 0;
+        return compiling ? "正在整理卡片，请先暂停再删除" : null;
+    }
+
+    /** 除了它，这本书（同名）已经没有别的提取工作区 */
+    private boolean isLastOfBook(NovelExtract task) {
+        String book = MaterialService.bookOf(task.getFileName());
+        if (book == null) {
+            return false;
+        }
+        return extractMapper.selectList(new LambdaQueryWrapper<NovelExtract>()
+                        .select(NovelExtract::getId, NovelExtract::getFileName).ne(NovelExtract::getId, task.getId()))
+                .stream().noneMatch(t -> book.equals(MaterialService.bookOf(t.getFileName())));
+    }
+
+    private void deleteCheckpointQuietly(String key, String what, Long id) {
+        try {
+            aiClient.deleteExtractCheckpoint(key);
+        } catch (Exception e) {
+            log.warn("删除{}断点失败，id={}：{}", what, id, e.getMessage());
+        }
     }
 
     /**
@@ -352,12 +579,13 @@ public class NovelExtractService {
      */
     public List<NovelExtract> list() {
         List<NovelExtract> list = extractMapper.selectList(new LambdaQueryWrapper<NovelExtract>()
-                .select(NovelExtract::getId, NovelExtract::getFileId, NovelExtract::getFileName,
+                .select(NovelExtract::getId, NovelExtract::getFileId, NovelExtract::getFileName, NovelExtract::getTitle,
                         NovelExtract::getStatus, NovelExtract::getProgress, NovelExtract::getMessage,
                         NovelExtract::getWordCount, NovelExtract::getChapterCount, NovelExtract::getCandidateCount,
                         NovelExtract::getOptions, NovelExtract::getCreateTime, NovelExtract::getUpdateTime)
                 .orderByDesc(NovelExtract::getCreateTime));
-        Map<Long, Long> pending = materialService.pendingCountsByExtract();
+        Map<Long, Long> pending = new java.util.HashMap<>(materialService.pendingCountsByExtract());
+        cardService.newCountsByExtract().forEach((k, v) -> pending.merge(k, v, Long::sum)); // 旧候选 + 还没处理的卡片
         Map<Long, MaterialCompile> compiles = latestCompiles();
         list.forEach(t -> {
             t.setPendingCount(pending.getOrDefault(t.getId(), 0L));
@@ -423,13 +651,53 @@ public class NovelExtractService {
             return out;
         }
         try {
-            out.put("live", aiClient.extractLive(checkpointKey(id), Math.max(0, since)));
+            FileInfo file = fileService.getById(task.getFileId());
+            out.put("live", aiClient.extractLive(checkpointKey(id), Math.max(0, since), file.getId(),
+                    file.getFileExt() == null ? "" : file.getFileExt().toLowerCase()));
         } catch (RestClientResponseException e) {
             throw new BizException(400, "读取逐章进度失败：" + rejectReason(e));
         } catch (ResourceAccessException e) {
             throw new BizException(503, "AI 服务未启动或无法连接");
         }
         return out;
+    }
+
+    /**
+     * 全书实体 AI 归并（建议，不改任何数据）：body {entities:[{key, category, name, aliases?, fact?}], model}。
+     * 只支持大模型 / GGUF；字段白名单后转给 Python。
+     */
+    @SuppressWarnings("unchecked")
+    public JsonNode entityGroups(Map<String, Object> body) {
+        Object raw = body == null ? null : body.get("entities");
+        if (!(raw instanceof List<?> list) || list.size() < 2) {
+            throw new BizException(400, "至少要两个实体");
+        }
+        if (list.size() > 3000) {
+            throw new BizException(400, "实体太多（最多 3000 个）");
+        }
+        List<Map<String, Object>> items = new java.util.ArrayList<>();
+        for (Object o : list) {
+            if (!(o instanceof Map<?, ?> m)) {
+                continue;
+            }
+            Map<String, Object> it = new java.util.LinkedHashMap<>();
+            for (String k : List.of("key", "category", "name", "aliases", "fact")) {
+                if (m.get(k) != null) {
+                    it.put(k, m.get(k));
+                }
+            }
+            items.add(it);
+        }
+        Map<String, Object> modelOpts = body.get("model") instanceof Map<?, ?> mm ? (Map<String, Object>) mm : null;
+        ModelChoice choice = resolveModel(modelOpts);
+        if (choice.local() != null && !"gguf".equals(choice.local().get("source"))) {
+            throw new BizException(400, "AI 归并只支持大模型或 GGUF");
+        }
+        JsonNode res = callBook(() -> aiClient.entityGroups(items, choice.config()));
+        if (!res.path("ok").asBoolean(false)) {
+            throw new BizException(400, "AI 归并失败：" + res.path("message").asText("未知原因"));
+        }
+        return res;
     }
 
     /** 提取工作区看原文（开始前也能看）：文件的全书第 index 章（从 0 数，和提取同一套分章） */
@@ -651,11 +919,118 @@ public class NovelExtractService {
             resultStore.deleteQuietly(stored.relativePath());
             throw e;
         }
+        if (result.has("chapterCards")) {
+            return; // 逐章读的断点保留：「接着读到第 N 章」「重读这几章」要用（一章一行，约 5 KB / 章）
+        }
         try {
-            aiClient.deleteExtractCheckpoint(checkpointKey(taskId)); // 结果已保存，断点没用了
+            aiClient.deleteExtractCheckpoint(checkpointKey(taskId)); // 旧版章节分析：结果已保存，断点没用了
         } catch (Exception e) {
             log.warn("删除提取断点失败，taskId={}：{}", taskId, e.getMessage());
         }
+    }
+
+    /**
+     * 接着读到第 N 章（0 = 读到最后）：提取成功 / 中断、记录了设定实体、断点还在的任务，把终点往后扩，
+     * 同一断点键接着读——前面的章不重读，伏笔编号 / 主角状态 / 实体档案接着往下走，结果由全部断点行重新生成。
+     */
+    public NovelExtract extend(Long id, Integer toChapter) {
+        if (toChapter == null || toChapter < 0) {
+            throw new BizException(400, "请给出要读到的章（0 = 读到最后）");
+        }
+        return restartFromCheckpoint(id, (materials, task) -> {
+            int current = materials.path("toChapter").asInt(0);
+            int from = Math.max(1, materials.path("fromChapter").asInt(1));
+            if (current == 0) {
+                throw new BizException(400, "已经是读到全书最后一章了");
+            }
+            if (toChapter != 0 && toChapter <= current) {
+                throw new BizException(400, "要读到的章（第 " + toChapter + " 章）要在现在的终点（第 " + current + " 章）之后");
+            }
+            if (toChapter != 0 && toChapter < from) {
+                throw new BizException(400, "终点不能在起点（第 " + from + " 章）之前");
+            }
+            materials.put("toChapter", toChapter);
+            materials.remove("reread");
+            return "排队中（接着读到" + (toChapter == 0 ? "最后一章" : "第 " + toChapter + " 章") + "）";
+        });
+    }
+
+    /** 重读这几章：cis = 范围内序号（0 起）；同一断点键，只重读这几章，其他章不动 */
+    public NovelExtract reread(Long id, List<Integer> cis) {
+        if (cis == null || cis.isEmpty() || cis.size() > 200) {
+            throw new BizException(400, "请选 1–200 章重读");
+        }
+        List<Integer> clean = cis.stream().filter(Objects::nonNull).filter(c -> c >= 0 && c < 100000).distinct().sorted().toList();
+        if (clean.isEmpty()) {
+            throw new BizException(400, "章节序号不对");
+        }
+        return restartFromCheckpoint(id, (materials, task) -> {
+            com.fasterxml.jackson.databind.node.ObjectNode rr = materials.putObject("reread");
+            rr.put("id", Long.toHexString(System.currentTimeMillis()));
+            com.fasterxml.jackson.databind.node.ArrayNode arr = rr.putArray("cis");
+            clean.forEach(arr::add);
+            return "排队中（重读 " + clean.size() + " 章）";
+        });
+    }
+
+    private interface MaterialsPatch {
+        String apply(com.fasterxml.jackson.databind.node.ObjectNode materials, NovelExtract task);
+    }
+
+    /**
+     * 接着读 / 重读的共同流程：检查（成功或中断、记录了实体、断点还在）→ 改 options.materials → 清 job（否则 adopt 会接管
+     * 已成功的旧 Python 任务、把旧结果再存一遍）和结果路径（否则 live 认为已完成）→ 记为中断 → 走「继续」重新提交同一断点键。
+     */
+    private NovelExtract restartFromCheckpoint(Long id, MaterialsPatch patch) {
+        NovelExtract task = extractMapper.selectById(id);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + id);
+        }
+        if (!NovelExtract.SUCCEEDED.equals(task.getStatus()) && !NovelExtract.INTERRUPTED.equals(task.getStatus())) {
+            throw new BizException(400, "只有提取成功或已暂停的任务可以这样做");
+        }
+        requireNoCompileRunning(id);
+        com.fasterxml.jackson.databind.node.ObjectNode opts;
+        try {
+            opts = (com.fasterxml.jackson.databind.node.ObjectNode) objectMapper.readTree(
+                    task.getOptions() == null ? "{}" : task.getOptions());
+        } catch (Exception e) {
+            throw new BizException(400, "提交参数无法读取，请重新提取");
+        }
+        if (!opts.path("materials").isObject() || !opts.path("materials").path("enabled").asBoolean(false)) {
+            throw new BizException(400, "这次提取没有记录设定实体（旧版章节分析），只能重新提取");
+        }
+        JsonNode cp;
+        try {
+            cp = aiClient.extractCheckpoint(checkpointKey(id));
+        } catch (Exception e) {
+            throw new BizException(503, "AI 服务未启动或无法连接");
+        }
+        if (!cp.path("exists").asBoolean(false) || cp.path("stages").path("pass1").asInt(0) == 0) {
+            throw new BizException(400, "这次提取没有保留断点（之前的版本提取成功后会删掉断点），只能新建提取");
+        }
+        if (cp.path("running").asBoolean(false)) {
+            throw new BizException(400, "这个任务还在 AI 服务里运行，请等它停下");
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode materials = (com.fasterxml.jackson.databind.node.ObjectNode) opts.get("materials");
+        String message = patch.apply(materials, task);
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(opts);
+        } catch (Exception e) {
+            throw new BizException(500, "保存参数失败");
+        }
+        extractMapper.update(null, new LambdaUpdateWrapper<NovelExtract>().eq(NovelExtract::getId, id)
+                .set(NovelExtract::getOptions, json)
+                .set(NovelExtract::getStatus, NovelExtract.INTERRUPTED)
+                .set(NovelExtract::getJobId, null)
+                .set(NovelExtract::getResultPath, null)
+                .set(NovelExtract::getResultSize, null)
+                .set(NovelExtract::getResultSha256, null)
+                .set(NovelExtract::getProgress, 0)
+                .set(NovelExtract::getMessage, message)
+                .set(NovelExtract::getUpdateTime, LocalDateTime.now()));
+        return resume(id);
     }
 
     /** Python 断点键：data/extract-cache/e&lt;任务id&gt;/ */

@@ -34,11 +34,38 @@ export function pauseExtract(id) {
 }
 
 /**
- * 删除提取失败的任务（成功 / 提取中的跳过）→ {deleted, skipped}
+ * 删除提取工作区（正在提取 / 整理的跳过）：记录、断点、结果文件、整理记录、素材候选；
+ * 这本书最后一个工作区时连同这本书的素材（保留的除外）→ {deleted, skipped, materialsDeleted, reasons[]}
  * POST /api/novel/extract/delete {ids}
  */
 export function deleteExtracts(ids) {
   return request.post('/api/novel/extract/delete', { ids }).then((res) => res.data)
+}
+
+/* ---------- 卡片（卡片整理 / 素材选择，ExtractCardService） ---------- */
+/** 这个工作区的卡片 [{id, kind, category, title, data, history, version, edited, status, materialId, savedVersion, match}] */
+export const listCards = (id) => request.get(`/api/novel/extract/${id}/cards`).then((res) => res.data)
+/** 手改卡片 {title?, subtype?, summary?, detail?, attributes?, tags?, tier?, category?} */
+export const updateCard = (cid, body) => request.post(`/api/novel/extract/card/${cid}`, body).then((res) => res.data)
+/** 换回历史版本 */
+export const restoreCard = (cid, version) => request.post(`/api/novel/extract/card/${cid}/restore`, { version }).then((res) => res.data)
+/** 素材选择：items [{cardId, action: new|update|version|skip|reset, targetId?}] → {saved, updated, versions, skipped, errors} */
+export const saveCards = (id, items) => request.post(`/api/novel/extract/${id}/cards/save`, { items }).then((res) => res.data)
+
+/**
+ * 删除前预览 → {book, checkpointChapters, compileCount, candidateCount, lastOfBook, materialCount, pinnedCount, blocked}
+ * GET /api/novel/extract/{id}/delete-preview
+ */
+export function deleteExtractPreview(id) {
+  return request.get(`/api/novel/extract/${id}/delete-preview`).then((res) => res.data)
+}
+
+/**
+ * 改工作区名（空 = 清掉，显示书名）
+ * POST /api/novel/extract/{id}/title {title}
+ */
+export function renameExtract(id, title) {
+  return request.post(`/api/novel/extract/${id}/title`, { title }).then((res) => res.data)
 }
 
 /**
@@ -56,6 +83,14 @@ export function resumeExtract(id) {
 export function compileExtract(id, body) {
   return request.post(`/api/novel/extract/${id}/compile`, body).then((res) => res.data)
 }
+
+/** 共鸣素材分组提议（只是建议）{model?} → {groups: [{name, cardIds, reason}], usage}；POST /api/novel/extract/{id}/resonance-groups */
+export const resonanceGroups = (id, body = {}) =>
+  request.post(`/api/novel/extract/${id}/resonance-groups`, body, { timeout: 300000 }).then((res) => res.data)
+
+/** 世界观分组提议（只是建议）{model?} → {groups: [{name, members: [实体键], reason}], usage}；POST /api/novel/extract/{id}/world-groups */
+export const worldGroups = (id, body = {}) =>
+  request.post(`/api/novel/extract/${id}/world-groups`, body, { timeout: 300000 }).then((res) => res.data)
 
 /** 这次提取的整理记录（最近的在前）GET /api/novel/extract/{id}/compiles */
 export function listCompiles(id) {
@@ -113,6 +148,55 @@ export function getFileChapterText(fileId, index) {
  */
 export function updateExtractResult(id, result) {
   return request.post(`/api/novel/extract/${id}/result`, result).then((res) => res.data)
+}
+
+/**
+ * 打开提取工作区：这个文件「未开始」（DRAFT）的提取，没有就新建
+ * POST /api/novel/extract/draft/{fileId}
+ */
+export function createExtractDraft(fileId) {
+  return request.post(`/api/novel/extract/draft/${fileId}`).then((res) => res.data)
+}
+
+/**
+ * 保存未开始提取的草稿设置 {model, materials}（含章节范围）
+ * POST /api/novel/extract/{id}/draft
+ */
+export function saveExtractDraft(id, body) {
+  return request.post(`/api/novel/extract/${id}/draft`, body).then((res) => res.data)
+}
+
+/**
+ * 开始未开始的提取 {model, materials}
+ * POST /api/novel/extract/{id}/start
+ */
+export function startExtract(id, body) {
+  return request.post(`/api/novel/extract/${id}/start`, body).then((res) => res.data)
+}
+
+/**
+ * 全书实体的 AI 归并建议（不改数据，作者逐组采用）{entities:[{key, category, name, aliases, fact}], model}
+ * → {groups[{keys, category, type same|system, name, reason}], usage}
+ * POST /api/novel/extract/entity-groups
+ */
+export function entityGroupsAI(body) {
+  return request.post('/api/novel/extract/entity-groups', body, { timeout: 300000 }).then((res) => res.data)
+}
+
+/**
+ * 接着读到第 N 章（0 = 读到最后）：前面的章不重读，伏笔 / 主角状态 / 实体档案接着往下走
+ * POST /api/novel/extract/{id}/extend {toChapter}
+ */
+export function extendExtract(id, toChapter) {
+  return request.post(`/api/novel/extract/${id}/extend`, { toChapter }).then((res) => res.data)
+}
+
+/**
+ * 重读这几章（范围内序号，0 起），其他章不动
+ * POST /api/novel/extract/{id}/reread {cis}
+ */
+export function rereadExtract(id, cis) {
+  return request.post(`/api/novel/extract/${id}/reread`, { cis }).then((res) => res.data)
 }
 
 const SITE_TAG = /[[【(（][^\]】)）]*\.[A-Za-z]{2,}[^\]】)）]*[\]】)）]/g

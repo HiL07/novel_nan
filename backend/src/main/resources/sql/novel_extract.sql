@@ -3,7 +3,8 @@ CREATE TABLE IF NOT EXISTS novel_extract (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id         INTEGER NOT NULL,              -- 源文件 id（file 表，逻辑关联）
     file_name       TEXT,
-    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
+    title           TEXT,                          -- 工作区名（可空；同一本书可有多个提取工作区，用它区分）
+    status          TEXT    NOT NULL,              -- DRAFT（未开始）/QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
     progress        INTEGER NOT NULL DEFAULT 0,    -- 0~100
     message         TEXT,                          -- 进度说明 / 失败原因（≤1000 字）
     job_id          TEXT,                          -- Python 服务任务 id

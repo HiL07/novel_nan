@@ -55,6 +55,7 @@ public class SchemaMigrations {
         // 文件管理显示小说章节数（老文件由 FileService 启动后在后台补数）
         addColumn("file", "chapter_count", "INTEGER");
         addColumn("novel_extract", "options", "TEXT");
+        addColumn("novel_extract", "title", "TEXT"); // 同一本书多个提取工作区的名字（2026-11-03）
         // 模型配置：添加方式 / 提供商 ID / API 协议 / 模型目录（2026-11-02）
         addColumn("ai_model_config", "provider_type", "TEXT");
         addColumn("ai_model_config", "provider_id", "TEXT");

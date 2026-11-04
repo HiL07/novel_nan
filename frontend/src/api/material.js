@@ -11,7 +11,11 @@ export const MATERIAL_CATEGORIES = [
   { code: 'monster', label: '怪物', icon: 'Warning', attrs: ['外形', '能力', '弱点及原因', '习性', '社会结构', '来源', '与人类的关系'] },
   { code: 'location', label: '地点', icon: 'Location', attrs: ['特征', '危险', '特殊规则', '产出'] },
   { code: 'item', label: '物品功法', icon: 'Present', attrs: ['作用', '代价', '获取方式', '限制'] },
-  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['起因', '冲突', '转折', '结果', '功能'] }
+  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['起因', '冲突', '转折', '结果', '功能'] },
+  // 写法卡（卡片整理从写法统计总结出的规律）：不是设定实体，提取时不读这一类
+  { code: 'craft', label: '写法', icon: 'EditPen', attrs: ['规律', '适用场景', '示例章节', '数据'] },
+  // 共鸣素材：同一主题的卡片关联成整体（节点 / 关系 / 联动规则 / 融入指南）
+  { code: 'resonance', label: '共鸣', icon: 'Share', attrs: ['节点', '联动规则', '融入指南', '缺口'] }
 ]
 export const categoryOf = (code) => MATERIAL_CATEGORIES.find((c) => c.code === code)
 

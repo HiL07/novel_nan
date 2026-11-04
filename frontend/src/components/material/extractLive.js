@@ -29,6 +29,10 @@ export function useExtractLive({ fileId, onStatus, onFinished }) {
   const selected = ref(null)
   const activeMark = ref('')
   const liveError = ref('')
+  const pacing = ref(null) // 节奏统计（breakdown.pacing）：提取中由接口用已读的章现算，提取完成后取结果里的
+  const threads = ref([]) // 伏笔表 [{id, kind, text, plantCi, advances[], status}]，ci 为范围内序号
+  const entities = ref([]) // 实体档案（按已读的章汇总，facts[].ci 为范围内序号）
+  const appear = ref({}) // 范围内序号 ci → 这一章原文里出现了名字的实体键（代码扫原文）
   let since = 0
   let timer = null
   let stopped = true
@@ -46,6 +50,10 @@ export function useExtractLive({ fileId, onStatus, onFinished }) {
     running.value = false
     since = 0
     liveError.value = ''
+    pacing.value = null
+    threads.value = []
+    entities.value = []
+    appear.value = {}
   }
 
   function inRange(idx) {
@@ -58,6 +66,10 @@ export function useExtractLive({ fileId, onStatus, onFinished }) {
     const base = (r.range?.from || 1) - 1
     const cards = r.chapterCards || []
     range.value = r.range || { from: 1, to: cards.length, total: chapters.value.length || cards.length }
+    pacing.value = r.pacing || null
+    threads.value = r.threads || []
+    entities.value = r.entities || []
+    appear.value = Object.fromEntries(cards.map((c, ci) => [ci, (c.stats?.appear || []).map((a) => a.key)]))
     const ents = {}
     for (const e of r.entities || []) {
       const add = (ci, key, f) => {
@@ -123,6 +135,10 @@ export function useExtractLive({ fileId, onStatus, onFinished }) {
       if (live.range) range.value = live.range
       const base = (range.value?.from || 1) - 1
       for (const r of live.rows || []) rows[base + r.ci] = r
+      if (live.pacing) pacing.value = live.pacing
+      if (live.threads) threads.value = live.threads
+      if (live.entities) entities.value = live.entities
+      if (live.appear) appear.value = live.appear
       since = live.next ?? since
       current.value = live.current == null ? null : base + live.current
       running.value = !!live.running
@@ -282,7 +298,7 @@ export function useExtractLive({ fileId, onStatus, onFinished }) {
   }
 
   return {
-    chapters, rows, range, current, running, follow, selected, activeMark, liveError,
+    chapters, rows, range, current, running, follow, selected, activeMark, liveError, pacing, threads, entities, appear,
     chapterText, textLoading, textError, row, card, emotionText, sections, paragraphs,
     setBook, reset, fromResult, startPoll, stopPoll, stateOf, badges, select, pickMark, inRange
   }

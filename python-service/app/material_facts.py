@@ -230,6 +230,7 @@ def to_candidate(data: dict, ent: dict, chapters: list[dict]) -> dict | None:
     chap_ids = sorted({f["chapter"] for f in ent["facts"]})
     return {
         "candidateId": hashlib.sha1(ent["key"].encode()).hexdigest()[:12],
+        "entityKey": ent["key"],  # 卡片整理：卡片 ↔ 实体档案（世界观卡的成员、跳回原文）
         "category": ent["category"], "subtype": _text(data.get("subtype"), 32), "title": title,
         "summary": _text(data.get("summary"), 300), "detail": _text(data.get("detail"), 2000), "attributes": attrs,
         "tags": [_text(t, 20) for t in data.get("tags") or [] if _text(t, 20)][:8] if isinstance(data.get("tags"), list) else [],

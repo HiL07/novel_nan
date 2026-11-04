@@ -549,6 +549,7 @@
       </template>
     </el-dialog>
 
+    <ExtractPickDialog ref="pickRef" />
   </div>
 </template>
 
@@ -578,6 +579,7 @@ import {
   submitCrawl,
   useSavedUrl
 } from '@/api/crawl'
+import ExtractPickDialog from '@/components/material/ExtractPickDialog.vue'
 import { errorMessage } from '@/api/request'
 import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import SiteMapView from '@/components/crawl/SiteMapView.vue'
@@ -1437,9 +1439,10 @@ function reuseOptions(row) {
   scrollMainTop()
 }
 
+/** 抓好的书 → 提取工作区：已有就选一个打开或新建，没有就直接新建（ExtractPickDialog） */
+const pickRef = ref(null)
 function openExtract(row) {
-  const name = row.bookName || '抓取小说'
-  router.push({ path: '/novel/extract/new', query: { fileId: row.fileId, name: `${name}.txt` } })
+  pickRef.value?.open({ id: row.fileId, fileName: row.bookName || '' })
 }
 
 // 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止任务列表轮询（AI 解析的轮询不停）

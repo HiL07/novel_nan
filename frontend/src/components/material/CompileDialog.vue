@@ -1,8 +1,20 @@
 <template>
-  <el-dialog :model-value="modelValue" title="整理卡片" width="620px" @update:model-value="close" @open="onOpen">
-    <p class="intro">
-      把《{{ fileName }}》实体档案里的事实整理成素材卡（详细描述、属性、作者用法、借用提示），同类世界观合成体系卡，
-      并可从章节摘要里找出剧情段。整理好的进入「待确认」，逐条确认后才进素材库。可以换模型 / 换范围多次整理。
+  <el-dialog :model-value="modelValue" :title="TITLES[mode]" width="620px" @update:model-value="close" @open="onOpen">
+    <p v-if="mode === 'craft'" class="intro">
+      从《{{ fileName }}》已读章节的节奏、章末钩子、爽点、伏笔、开篇、主角变化里，由代码算出数字、挑出例子，再让模型写成可借用的写法规律
+      （每条规律都引用具体章节，引用对不上的会被丢掉）。约 6 次调用；依据不够的类型（比如快速档没有钩子）会跳过并说明原因。
+    </p>
+    <p v-else-if="mode === 'resonance'" class="intro">
+      把选好的 {{ groups.length }} 组卡片各关联成一张共鸣素材：节点之间的依赖 / 限制 / 对立关系、改了一个其他哪些要跟着改（联动规则）、
+      综合描述和还缺什么，以及放进别的世界观时哪些保留、哪些替换。每组 1 次调用；关系的两端必须是组里的卡片，对不上的会被丢掉。
+    </p>
+    <p v-else-if="mode === 'world'" class="intro">
+      把选好的 {{ groups.length }} 组实体各总结成一张世界观卡：它在这个世界里是什么、由什么组成、规矩和代价、原作怎么用，以及和其他设定的关系。
+      每组 1 次调用，只依据成员的事实。
+    </p>
+    <p v-else class="intro">
+      把《{{ fileName }}》实体档案里的事实整理成实体卡（详细描述、属性、作者用法、借用提示），同类世界观合成体系卡，
+      并可从章节摘要里找出剧情段。整理好的是这个工作区的卡片，在「素材选择」里挑过才进素材库。可以换模型 / 换范围多次整理。
     </p>
     <el-form label-width="90px">
       <el-form-item label="整理模型">
@@ -31,6 +43,7 @@
         </el-select>
       </el-form-item>
 
+      <template v-if="mode === 'entity'">
       <el-form-item label="范围">
         <el-radio-group v-model="scope.mode">
           <el-radio value="all">全部 {{ entities.length }} 个实体</el-radio>
@@ -48,11 +61,14 @@
         <el-switch v-model="scope.plot" />
         <span class="hint">从章节摘要里找跨章的完整剧情段，存成去掉人名地名的骨架（起因 / 冲突 / 转折 / 结果）</span>
       </el-form-item>
+      </template>
       <el-alert type="info" :closable="false" show-icon :title="estimate" />
     </el-form>
     <template #footer>
       <el-button @click="close">取消</el-button>
-      <el-button type="primary" :disabled="!canStart" :loading="starting" @click="confirm">开始整理（{{ chosen.length }} 个实体）</el-button>
+      <el-button type="primary" :disabled="!canStart" :loading="starting" @click="confirm">
+        {{ mode === 'craft' ? '开始整理写法卡' : mode === 'world' || mode === 'resonance' ? `开始整理（${groups.length} 组）` : `开始整理（${chosen.length} 个实体）` }}
+      </el-button>
     </template>
   </el-dialog>
 </template>
@@ -74,8 +90,11 @@ const props = defineProps({
   fileName: { type: String, default: '' },
   entities: { type: Array, default: () => [] }, // 实体档案（已按事实数排序）
   selectedKeys: { type: Array, default: () => [] }, // 实体档案里勾选的实体键
-  chapterCount: { type: Number, default: 0 }
+  chapterCount: { type: Number, default: 0 },
+  mode: { type: String, default: 'entity' }, // entity / craft（写法卡）/ world（世界观卡）
+  groups: { type: Array, default: () => [] } // world：作者确认过的分组 [{name, members}]
 })
+const TITLES = { entity: '整理实体卡', craft: '整理写法卡', world: '整理世界观卡', resonance: '整理共鸣素材' }
 const emit = defineEmits(['update:modelValue', 'started'])
 
 const STORE_KEY = 'nan_novel.compile.model'
@@ -94,7 +113,8 @@ const starting = ref(false)
 function readSaved() {
   try {
     const v = JSON.parse(localStorage.getItem(STORE_KEY) || 'null')
-    return v && typeof v === 'object' ? { source: v.source || 'api', configId: v.configId ?? null, baseId: v.baseId || '' } : {}
+    // 大模型默认 = 启用中的配置（不记上次选的那个）
+    return v && typeof v === 'object' ? { source: v.source || 'api', configId: null, baseId: v.baseId || '' } : {}
   } catch {
     return {}
   }
@@ -117,7 +137,10 @@ const chosen = computed(() => {
 const estimate = computed(() => {
   // 只有 1 条事实的实体 5 个一批
   const multi = chosen.value.filter((e) => (e.facts?.length || 0) >= 2).length
-  const calls = multi + Math.ceil((chosen.value.length - multi) / 5) + (scope.plot ? Math.ceil(props.chapterCount / ARC_WINDOW) : 0)
+  const calls =
+    props.mode === 'craft' ? 6
+      : props.mode === 'world' || props.mode === 'resonance' ? props.groups.length
+        : multi + Math.ceil((chosen.value.length - multi) / 5) + (scope.plot ? Math.ceil(props.chapterCount / ARC_WINDOW) : 0)
   const sec = calls * CARD_SECONDS[model.source]
   const time = sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} 分钟` : `${(sec / 3600).toFixed(1)} 小时`
   if (model.source !== 'api') return `约 ${calls} 次调用，预计 ${time}，不花钱；可以随时暂停，中断后继续`
@@ -129,7 +152,8 @@ const estimate = computed(() => {
 })
 
 const canStart = computed(() => {
-  if (!chosen.value.length) return false
+  if (props.mode === 'entity' && !chosen.value.length) return false
+  if ((props.mode === 'world' || props.mode === 'resonance') && !props.groups.length) return false
   if (model.source === 'gguf') return !!llama.value
   return model.source === 'local' ? !!model.baseId : !!model.configId
 })
@@ -171,16 +195,19 @@ async function confirm() {
       : model.source === 'local'
         ? { source: 'local', baseId: model.baseId }
         : { source: 'api', configId: model.configId }
-  const body = { model: m, plot: scope.plot }
-  const allCats = scope.categories.length === presentCategories.value.length
-  if (scope.mode === 'selected') body.entityKeys = chosen.value.map((e) => e.key)
-  else if (!allCats) body.categories = [...scope.categories]
-  if (scope.mode === 'top') body.topN = scope.topN
+  const body = { model: m, plot: scope.plot, mode: props.mode }
+  if (props.mode === 'world' || props.mode === 'resonance') body.groups = props.groups
+  if (props.mode === 'entity') {
+    const allCats = scope.categories.length === presentCategories.value.length
+    if (scope.mode === 'selected') body.entityKeys = chosen.value.map((e) => e.key)
+    else if (!allCats) body.categories = [...scope.categories]
+    if (scope.mode === 'top') body.topN = scope.topN
+  }
   starting.value = true
   try {
     const res = await compileExtract(props.extractId, body)
     if (res.code !== 0) throw new Error(res.message || '发起失败')
-    ElMessage.success('已开始整理卡片')
+    ElMessage.success(`已开始${TITLES[props.mode]}`)
     emit('started', res.data)
     close()
   } catch (e) {

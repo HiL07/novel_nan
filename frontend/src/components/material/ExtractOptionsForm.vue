@@ -75,7 +75,10 @@
           <el-radio-button :value="1">1 遍</el-radio-button>
           <el-radio-button :value="2">2 遍</el-radio-button>
         </el-radio-group>
-        <span class="hint">第 2 遍再按顺序读一次，只补漏掉的事实和实体（不做章节卡）</span>
+        <span class="hint">
+          第 2 遍再按顺序读一次，带着全书已知的实体，只补漏掉的事实和实体（不做章节卡）。实测读 1 遍只抓到 2 遍的 65–78% 的实体、
+          35–49% 的事实，时间约多 70%；只想看章节卡、不在乎实体档案全不全时可以选 1 遍
+        </span>
       </el-form-item>
       <el-form-item v-if="model.source !== 'api'" label="分段字数">
         <el-input-number v-model="opts.chunkChars" :min="1500" :max="6000" :step="500" />
@@ -97,25 +100,24 @@ import { MATERIAL_CATEGORIES } from '@/api/material'
 import { listModels as listConfigs } from '@/api/aiModel'
 import { isGenerationModel, listModels as listLocalModels, runningLlama } from '@/api/localModel'
 import { errorMessage } from '@/api/request'
+import { costOf, formatCost, priceOf } from '@/utils/modelPricing'
+import { estimateRead, fmtDuration } from './extractEstimate'
 
-/** 提取设置（提取工作区右栏）：模型 + 素材选项；章节范围由工作区左栏选，chars = 选中范围的字数（估算用）。build() → {model, materials?} */
+/**
+ * 提取设置（提取工作区右栏）：模型 + 素材选项；章节范围由工作区左栏选，chars = 选中范围的字数（估算用）。
+ * build() → {model, materials?}（开始提取用）；snapshot() → 草稿 {model, materials}（materials 带 enabled，关着也存）；
+ * restore(草稿) 还原；改了任何设置都 emit('change')（工作区据此自动保存草稿）。
+ */
 const props = defineProps({
   chars: { type: Number, default: 0 },
   disabled: { type: Boolean, default: false }
 })
+const emit = defineEmits(['change'])
 
 const STORE_KEY = 'nan_novel.extract.model'
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]', '::1']
 const LOCAL_SECONDS_PER_CHUNK = 45 // 旧版章节分析：本地 1.5B 每段约 45 秒
-// 逐章串行读的粗估：秒 / 千字（第 1 遍，按档位）。大模型 = DeepSeek 实测（2026-11-02，5 章 1 万字标准档 47 秒）；
-// GGUF / 本地 = 旧的分块实测（GGUF Qwen3-4B Q4 约 16 秒 / 千字）加上章节卡多出的输出，待实测校准。
-// 第 2 遍补漏按「快速」算。token：每千字输入约 1.4k，输出按档位（标准档实测 0.85k）
-const READ_SECONDS = {
-  api: { fast: 2, standard: 4.5, deep: 5.5 },
-  gguf: { fast: 16, standard: 30, deep: 35 },
-  local: { fast: 40, standard: 70, deep: 80 }
-}
-const READ_TOKENS = { input: 1400, output: { fast: 350, standard: 850, deep: 1000 } }
+// 逐章串行读的估算常数和函数在 extractEstimate.js（工作区「接着读」也用）
 const DEPTHS = [
   { value: 'fast', label: '快速', desc: '每章：设定实体 + 事实、一句话、关键事件，加上代码统计（字数、对白比例、出场实体）。最省' },
   {
@@ -125,12 +127,12 @@ const DEPTHS = [
   },
   { value: 'deep', label: '深拆', desc: '标准档 + 每章 3–6 个情节节点（原文按节点分段着色），输出最多' }
 ]
-const ENTITY_CATEGORIES = MATERIAL_CATEGORIES.filter((c) => c.code !== 'plot') // 情节由「整理卡片」从章节卡里找
+const ENTITY_CATEGORIES = MATERIAL_CATEGORIES.filter((c) => !['plot', 'craft', 'resonance'].includes(c.code)) // 情节 / 写法由「卡片整理」总结
 
 const opts = reactive({
   enabled: true,
   categories: ENTITY_CATEGORIES.map((c) => c.code),
-  rounds: 1,
+  rounds: 2,
   depth: 'standard',
   chunkChars: 3000,
   focus: ''
@@ -149,7 +151,7 @@ function readSaved() {
     if (!v || typeof v !== 'object') return {}
     return {
       source: ['local', 'gguf'].includes(v.source) ? v.source : 'api',
-      configId: v.configId ?? null,
+      configId: null, // 大模型默认 = 启用中的配置（不记上次选的那个：换了启用的配置后还会用旧的）
       baseId: v.baseId || '',
       chunkChars: Number(v.chunkChars) || 2500
     }
@@ -213,20 +215,22 @@ watch(
 const estimateText = computed(() => {
   const k = props.chars / 1000
   if (!k) return ''
-  const fmt = (sec) => (sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} 分钟` : `${(sec / 3600).toFixed(1)} 小时`)
+  const fmt = fmtDuration
   if (!opts.enabled) {
     if (model.source !== 'local') return ''
     return `约 ${Math.ceil(props.chars / model.chunkChars)} 段，预计 ${fmt(Math.ceil(props.chars / model.chunkChars) * LOCAL_SECONDS_PER_CHUNK)}`
   }
-  const speed = READ_SECONDS[model.source]
-  const sec = k * speed[opts.depth] + (opts.rounds === 2 ? k * speed.fast : 0)
+  const { seconds: sec, input, output } = estimateRead(props.chars, { source: model.source, depth: opts.depth, rounds: opts.rounds })
   const label = DEPTHS.find((d) => d.value === opts.depth)?.label
-  const head = `选中约 ${k >= 10 ? Math.round(k / 10) + ' 万' : Math.round(k) + ' 千'}字，${label}档 × ${opts.rounds} 遍，预计 ${fmt(sec)}（粗估）`
+  const head = `选中约 ${k >= 10 ? Math.round(k / 10) + ' 万' : Math.round(k) + ' 千'}字，${label}档 × ${opts.rounds} 遍，预计 ${fmt(sec)}${model.source === 'api' ? '（按实测估算）' : '（粗估，未实测）'}`
   if (model.source !== 'api') return `${head}，不花钱；可以随时暂停，之后从断点接着读`
-  const input = k * READ_TOKENS.input * opts.rounds
-  const output = k * (READ_TOKENS.output[opts.depth] + (opts.rounds === 2 ? READ_TOKENS.output.fast : 0))
-  const yuan = Math.round(((input * 2 + output * 3) / 1e6) * 100) / 100
-  return `${head}，约 ${((input + output) / 1e6).toFixed(2)}M tokens（DeepSeek 约 ${yuan} 元，按 2 / 3 元每百万输入 / 输出粗算）`
+  const tokens = `约 ${((input + output) / 1e6).toFixed(2)}M tokens（输入 ${(input / 1e6).toFixed(2)}M / 输出 ${(output / 1e6).toFixed(2)}M）`
+  // 按所选配置的模型名查参考单价（utils/modelPricing.js，用户改过的优先）；查不到就只给 token
+  const name = configs.value.find((c) => c.id === model.configId)?.model
+  const price = priceOf(name)
+  if (!price) return `${head}，${tokens}；「${name || '这个模型'}」没有参考单价，可在 token 统计条上填写`
+  const cost = formatCost(costOf({ promptTokens: input, completionTokens: output }, price), price.currency)
+  return `${head}，${tokens}，按${price.custom ? '你填的' : '参考'}单价约 ${cost}（以账单为准）`
 })
 
 const canStart = computed(() => {
@@ -235,6 +239,46 @@ const canStart = computed(() => {
   return model.source === 'local' ? !!model.baseId : !!model.configId
 })
 
+function modelBody() {
+  return model.source === 'gguf'
+    ? { source: 'gguf' }
+    : model.source === 'local'
+      ? { source: 'local', baseId: model.baseId, chunkChars: model.chunkChars }
+      : { source: 'api', configId: model.configId }
+}
+
+function snapshot() {
+  return { model: modelBody(), materials: { ...opts, categories: [...opts.categories], focus: opts.focus.trim() } }
+}
+
+let restoring = false
+function restore(saved) {
+  if (!saved) return
+  restoring = true
+  const m = saved.model || {}
+  if (['api', 'local', 'gguf'].includes(m.source)) model.source = m.source
+  if (m.configId != null) model.configId = m.configId
+  if (m.baseId) model.baseId = m.baseId
+  if (m.chunkChars) model.chunkChars = Number(m.chunkChars) || model.chunkChars
+  const mt = saved.materials
+  if (mt) {
+    opts.enabled = mt.enabled !== false
+    if (Array.isArray(mt.categories) && mt.categories.length) {
+      opts.categories = mt.categories.filter((c) => ENTITY_CATEGORIES.some((x) => x.code === c))
+    }
+    if ([1, 2].includes(mt.rounds)) opts.rounds = mt.rounds
+    if (DEPTHS.some((d) => d.value === mt.depth)) opts.depth = mt.depth
+    if (mt.chunkChars) opts.chunkChars = Number(mt.chunkChars) || opts.chunkChars
+    opts.focus = typeof mt.focus === 'string' ? mt.focus : ''
+  } else {
+    opts.enabled = false // 存过草稿但没开记录设定实体
+  }
+  if (model.source === 'local' && !localModels.value.length) loadLocal()
+  setTimeout(() => (restoring = false))
+}
+
+watch([opts, model], () => !restoring && emit('change'), { deep: true })
+
 /** → {model, materials?}（并记住模型选择） */
 function build() {
   try {
@@ -242,18 +286,12 @@ function build() {
   } catch {
     // 隐私模式等：不记住也能用
   }
-  const m =
-    model.source === 'gguf'
-      ? { source: 'gguf' }
-      : model.source === 'local'
-        ? { source: 'local', baseId: model.baseId, chunkChars: model.chunkChars }
-        : { source: 'api', configId: model.configId }
-  const out = { model: m }
+  const out = { model: modelBody() }
   if (opts.enabled) out.materials = { ...opts, categories: [...opts.categories], focus: opts.focus.trim() }
   return out
 }
 
-defineExpose({ build, canStart, enabled: computed(() => opts.enabled) })
+defineExpose({ build, snapshot, restore, canStart, enabled: computed(() => opts.enabled) })
 </script>
 
 <style scoped>

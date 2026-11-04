@@ -2,8 +2,10 @@ package com.example.file.controller;
 
 import com.example.file.common.Result;
 import com.example.file.common.ResultResponses;
+import com.example.file.entity.ExtractCard;
 import com.example.file.entity.MaterialCompile;
 import com.example.file.entity.NovelExtract;
+import com.example.file.service.ExtractCardService;
 import com.example.file.service.MaterialCompileService;
 import com.example.file.service.NovelExtractService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -33,20 +35,72 @@ public class NovelExtractController {
 
     private final NovelExtractService extractService;
     private final MaterialCompileService compileService;
+    private final ExtractCardService cardService;
 
-    public NovelExtractController(NovelExtractService extractService, MaterialCompileService compileService) {
+    public NovelExtractController(NovelExtractService extractService, MaterialCompileService compileService,
+                                  ExtractCardService cardService) {
         this.extractService = extractService;
         this.compileService = compileService;
+        this.cardService = cardService;
+    }
+
+    /** GET /api/novel/extract/{id}/cards：这个工作区的卡片（带 match = 素材库里这本书的同分类同名素材） */
+    @GetMapping("/{id}/cards")
+    public ResponseEntity<Result<List<ExtractCard>>> cards(@PathVariable Long id) {
+        return ResultResponses.handle(() -> cardService.list(id), log, "查询卡片失败，extractId=" + id);
+    }
+
+    /** POST /api/novel/extract/card/{cid} {title?, subtype?, summary?, detail?, attributes?, tags?, tier?, category?}：手改卡片 */
+    @PostMapping("/card/{cid}")
+    public ResponseEntity<Result<ExtractCard>> updateCard(@PathVariable Long cid, @RequestBody(required = false) Map<String, Object> body) {
+        return ResultResponses.handle(() -> cardService.update(cid, body), log, "保存卡片失败，cardId=" + cid);
+    }
+
+    /** POST /api/novel/extract/card/{cid}/restore {version}：换回历史版本 */
+    @PostMapping("/card/{cid}/restore")
+    public ResponseEntity<Result<ExtractCard>> restoreCard(@PathVariable Long cid, @RequestBody Map<String, Object> body) {
+        Object v = body == null ? null : body.get("version");
+        int version = v instanceof Number n ? n.intValue() : -1;
+        return ResultResponses.handle(() -> cardService.restore(cid, version), log, "换回卡片版本失败，cardId=" + cid);
+    }
+
+    /**
+     * POST /api/novel/extract/{id}/cards/save {items: [{cardId, action: new|update|version|skip|reset, targetId?}]}：
+     * 素材选择 → 存进素材库 → {saved, updated, versions, skipped, errors[]}
+     */
+    @PostMapping("/{id}/cards/save")
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Result<Map<String, Object>>> saveCards(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        List<Map<String, Object>> items = body != null && body.get("items") instanceof List<?> l ? (List<Map<String, Object>>) l : List.of();
+        return ResultResponses.handle(() -> cardService.saveToLibrary(id, items), log, "存入素材库失败，extractId=" + id);
     }
 
     /**
      * POST /api/novel/extract/{id}/compile {model, entityKeys?, categories?, topN?, plot?}：对提取成功的小说整理卡片
-     * （素材卡 / 体系卡 / 剧情段 → 待确认候选）。
+     * （实体卡 / 体系卡 / 剧情段 → 这个工作区的卡片，见 ExtractCardService）。
      */
     @PostMapping("/{id}/compile")
     public ResponseEntity<Result<MaterialCompile>> compile(@PathVariable Long id,
                                                            @RequestBody(required = false) Map<String, Object> options) {
         return ResultResponses.handle(() -> compileService.start(id, options), log, "发起整理卡片失败，extractId=" + id);
+    }
+
+    /**
+     * POST /api/novel/extract/{id}/world-groups {model?}：世界观分组提议（只是建议）→ {groups[{name, members[实体键], reason}], usage}；
+     * 作者改过之后用 compile {mode: world, groups} 整理世界观卡
+     */
+    @PostMapping("/{id}/world-groups")
+    public ResponseEntity<Result<JsonNode>> worldGroups(@PathVariable Long id, @RequestBody(required = false) Map<String, Object> body) {
+        return ResultResponses.handle(() -> compileService.proposeWorldGroups(id, body), log, "世界观分组失败，extractId=" + id);
+    }
+
+    /**
+     * POST /api/novel/extract/{id}/resonance-groups {model?}：共鸣素材分组提议（只是建议）→ {groups[{name, cardIds, reason}], usage}；
+     * 作者改过之后用 compile {mode: resonance, groups: [{name, cardIds}]} 生成
+     */
+    @PostMapping("/{id}/resonance-groups")
+    public ResponseEntity<Result<JsonNode>> resonanceGroups(@PathVariable Long id, @RequestBody(required = false) Map<String, Object> body) {
+        return ResultResponses.handle(() -> compileService.proposeResonanceGroups(id, body), log, "共鸣分组失败，extractId=" + id);
     }
 
     /** GET /api/novel/extract/{id}/compiles：这次提取的整理记录，最近的在前 */
@@ -86,6 +140,28 @@ public class NovelExtractController {
                 "提交提取任务失败，fileId=" + fileId);
     }
 
+    /** POST /api/novel/extract/draft/{fileId}：打开提取工作区 → 这个文件「未开始」（DRAFT）的提取（没有就新建） */
+    @PostMapping("/draft/{fileId}")
+    public ResponseEntity<Result<NovelExtract>> draft(@PathVariable Long fileId) {
+        return ResultResponses.handle(() -> extractService.draft(fileId), log, "新建提取失败，fileId=" + fileId);
+    }
+
+    /** POST /api/novel/extract/{id}/draft {model?, materials?}：保存未开始提取的草稿设置（含章节范围） */
+    @PostMapping("/{id}/draft")
+    public ResponseEntity<Result<NovelExtract>> saveDraft(@PathVariable Long id,
+                                                          @RequestBody(required = false) Map<String, Object> body) {
+        return ResultResponses.handle(() -> extractService.saveDraft(id, body), log, "保存提取设置失败，id=" + id);
+    }
+
+    /** POST /api/novel/extract/{id}/start {materials?, model?}：开始未开始的提取（参数同提交） */
+    @PostMapping("/{id}/start")
+    public ResponseEntity<Result<NovelExtract>> start(@PathVariable Long id,
+                                                      @RequestBody(required = false) ExtractOptions options) {
+        Map<String, Object> materials = options == null ? null : options.getMaterials();
+        Map<String, Object> model = options == null ? null : options.getModel();
+        return ResultResponses.handle(() -> extractService.start(id, materials, model), log, "开始提取失败，id=" + id);
+    }
+
     /**
      * POST /api/novel/extract/{id}/cancel，取消排队中 / 进行中 / 中断的任务（记为 FAILED「已取消」，进入提取失败）。
      */
@@ -103,12 +179,26 @@ public class NovelExtractController {
     }
 
     /**
-     * POST /api/novel/extract/delete {ids}，删除提取失败的任务（成功的 / 提取中的跳过）→ {deleted, skipped}。
+     * POST /api/novel/extract/delete {ids}，删除提取工作区（正在提取 / 整理的跳过）：记录、断点、结果文件、整理记录、素材候选；
+     * 是这本书最后一个工作区时连同这本书的素材（保留的除外）→ {deleted, skipped, materialsDeleted, reasons[]}。
      */
     @PostMapping("/delete")
     public ResponseEntity<Result<Map<String, Object>>> delete(@RequestBody Map<String, List<Long>> body) {
         return ResultResponses.handle(() -> extractService.delete(body == null ? null : body.get("ids")), log,
-                "删除提取任务失败");
+                "删除提取工作区失败");
+    }
+
+    /** GET /api/novel/extract/{id}/delete-preview → 删除会清掉什么（确认框用），见 NovelExtractService.deletePreview */
+    @GetMapping("/{id}/delete-preview")
+    public ResponseEntity<Result<Map<String, Object>>> deletePreview(@PathVariable Long id) {
+        return ResultResponses.handle(() -> extractService.deletePreview(id), log, "读取删除预览失败，id=" + id);
+    }
+
+    /** POST /api/novel/extract/{id}/title {title}：改工作区名（空 = 清掉） */
+    @PostMapping("/{id}/title")
+    public ResponseEntity<Result<NovelExtract>> rename(@PathVariable Long id, @RequestBody(required = false) Map<String, String> body) {
+        return ResultResponses.handle(() -> extractService.rename(id, body == null ? null : body.get("title")), log,
+                "修改工作区名失败，id=" + id);
     }
 
     /**
@@ -148,6 +238,27 @@ public class NovelExtractController {
     public ResponseEntity<Result<JsonNode>> fileChapterText(@PathVariable Long fileId, @PathVariable int index) {
         return ResultResponses.handle(() -> extractService.fileChapterText(fileId, index), log,
                 "读取章节原文失败，fileId=" + fileId + " index=" + index);
+    }
+
+    /** POST /api/novel/extract/{id}/extend {toChapter}：接着读到第 N 章（0 = 最后），前面的章不重读 */
+    @PostMapping("/{id}/extend")
+    public ResponseEntity<Result<NovelExtract>> extend(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        Integer to = body == null || !(body.get("toChapter") instanceof Number n) ? null : n.intValue();
+        return ResultResponses.handle(() -> extractService.extend(id, to), log, "接着读失败，id=" + id);
+    }
+
+    /** POST /api/novel/extract/{id}/reread {cis}：重读这几章（范围内序号，0 起） */
+    @PostMapping("/{id}/reread")
+    public ResponseEntity<Result<NovelExtract>> reread(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        List<Integer> cis = body == null || !(body.get("cis") instanceof List<?> l) ? null
+                : l.stream().filter(x -> x instanceof Number).map(x -> ((Number) x).intValue()).toList();
+        return ResultResponses.handle(() -> extractService.reread(id, cis), log, "重读失败，id=" + id);
+    }
+
+    /** POST /api/novel/extract/entity-groups {entities, model}：全书实体的 AI 归并建议（不改数据，作者逐组采用） */
+    @PostMapping("/entity-groups")
+    public ResponseEntity<Result<JsonNode>> entityGroups(@RequestBody Map<String, Object> body) {
+        return ResultResponses.handle(() -> extractService.entityGroups(body), log, "AI 归并失败");
     }
 
     /** GET /api/novel/extract/split/{fileId}：提取前预览分章（选章节范围用） */

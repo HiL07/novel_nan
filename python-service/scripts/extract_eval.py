@@ -6,7 +6,8 @@
       [--run deepseek=https://api.deepseek.com,1,deepseek-chat,DEEPSEEK_API_KEY] [--baseline deepseek] \\
       [--depth standard] [--chunk 3000] [--out 结果.json]
 
---run 名称=地址,遍数[,模型名[,存 API Key 的环境变量]]：模型名缺省时取服务 /v1/models 的第一个（llama.cpp）。
+--run 名称=地址,遍数[,模型名[,存 API Key 的环境变量[,think]]]：模型名缺省时取服务 /v1/models 的第一个（llama.cpp）；
+  第 5 项写 think = 推理模型保留思考（默认关掉，见 llm_client.chat）。
 --baseline：以哪一组的实体为基准计算其他组的实体召回（缺省 = 第一组）。
 每组先 scan（逐章串行提取，--depth 档位）再 compile_cards（整理卡片，取事实最多的 --max-candidates 个实体）。--no-compile 只跑提取。
 输出：每组耗时（含其中的阅读耗时）、token、块数、事实核实通过 / 丢弃、实体数、卡片数、不实用数、剧情段数、相对基准的实体召回，
@@ -40,7 +41,7 @@ def parse_run(spec: str) -> dict:
         r = httpx.get(base.rstrip("/") + "/models", timeout=10, trust_env=False).json()
         model = (r.get("data") or r.get("models"))[0].get("id") or (r.get("data") or r.get("models"))[0].get("name")
     return {"name": name, "cfg": ModelConfig(baseUrl=base, apiKey=key, model=model, concurrency=1 if not key else 4),
-            "rounds": rounds}
+            "rounds": rounds, "think": len(parts) > 4 and parts[4] == "think"}
 
 
 def pick_chapters(text: str, spec: str) -> list[dict]:
@@ -82,7 +83,7 @@ def main() -> None:
         run = parse_run(spec)
         opts = MaterialOptions(enabled=True, rounds=run["rounds"], chunkChars=args.chunk, depth=args.depth)
         usage = llm_client.new_usage(run["cfg"])
-        call = extractor._chat_fn(run["cfg"], usage)
+        call = extractor._chat_fn(run["cfg"], usage, think=run["think"])
         start = time.monotonic()
         last = {"t": 0.0}
 
@@ -124,6 +125,22 @@ def main() -> None:
         print(f"| {name} | {out['seconds']}（阅读 {out['scanSeconds']}） | {u['calls']} | {u['promptTokens']} | {u['completionTokens']} | "
               f"{st['factsVerified']} | {st['factsUnverified']} | {st['entities']} | {st['cards']} | {st['notUseful']} | "
               f"{st['systems']} | {st['arcs']} | {recall} |")
+
+    print("\n机器可用（给 AI 用的数据质量）：| 组 | 秒/千字 | 输入tok/千字 | 输出tok/千字 | 思考tok | 截断 | 枚举外丢弃 | 推进/回收没串上 | "
+          "钩子核实 | 爽点核实 | 伏笔核实 | 主角变化核实 | 关系核实 | 设定动态核实 | 节点 |")
+    for name, out in results.items():
+        cards = [c for c in out["chapterCards"] if c.get("status") != "empty"]
+        st, u = out["stats"], out["usage"]
+        k = max(1, chars) / 1000
+        def rate(key):
+            xs = [x for c in cards for x in c.get(key) or []]
+            return f"{sum(1 for x in xs if x.get('verified'))}/{len(xs)}" if xs else "-"
+        ops = [a for t in out["threads"] for a in [t] + t["advances"]]
+        th = f"{sum(1 for a in ops if a.get('quote'))}/{len(ops)}" if ops else "-"
+        print(f"| {name} | {out['scanSeconds'] / k:.1f} | {u['promptTokens'] / k:.0f} | {u['completionTokens'] / k:.0f} | "
+              f"{u.get('reasoningTokens', 0)} | {u.get('truncated', 0)} | {st.get('cardItemsDropped', 0)} | {st.get('threadUnlinked', 0)} | "
+              f"{rate('hooks')} | {rate('payoffs')} | {th} | {rate('leadChanges')} | {rate('relations')} | {rate('entityMoves')} | "
+              f"{sum(len(c.get('nodes') or []) for c in cards)} |")
 
     print("\n章节卡（逐章）：| 组 | 有一句话 | 有章末钩子 | 爽点/章 | 爽点原文核实 | 伏笔 埋/收 | 主角变化 | 关系 | 设定动态 | 金句 | 失败章 |")
     for name, out in results.items():

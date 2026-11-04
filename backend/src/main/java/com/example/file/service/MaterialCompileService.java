@@ -23,6 +23,7 @@ import org.springframework.web.client.RestClientResponseException;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -58,6 +59,7 @@ public class MaterialCompileService {
     private final MaterialService materialService;
     private final AiServiceClient aiClient;
     private final ObjectMapper objectMapper;
+    private final ExtractCardService cardService;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "material-compile");
         t.setDaemon(true);
@@ -69,7 +71,8 @@ public class MaterialCompileService {
     public MaterialCompileService(MaterialCompileMapper compileMapper, NovelExtractMapper extractMapper,
                                   NovelExtractService extractService, ExtractResultStore resultStore,
                                   FileService fileService, MaterialService materialService,
-                                  AiServiceClient aiClient, ObjectMapper objectMapper) {
+                                  AiServiceClient aiClient, ObjectMapper objectMapper, ExtractCardService cardService) {
+        this.cardService = cardService;
         this.compileMapper = compileMapper;
         this.extractMapper = extractMapper;
         this.extractService = extractService;
@@ -107,9 +110,6 @@ public class MaterialCompileService {
         if (task == null) {
             throw new BizException(404, "提取任务不存在：" + extractId);
         }
-        if (!NovelExtract.SUCCEEDED.equals(task.getStatus())) {
-            throw new BizException(400, "只有提取成功的小说可以整理卡片");
-        }
         if (compileMapper.selectCount(new LambdaQueryWrapper<MaterialCompile>()
                 .eq(MaterialCompile::getExtractId, extractId).in(MaterialCompile::getStatus, OPEN)) > 0) {
             throw new BizException(400, "这本小说已有未结束的整理任务，请等它结束、继续或取消");
@@ -118,16 +118,48 @@ public class MaterialCompileService {
         @SuppressWarnings("unchecked")
         Map<String, Object> model = (Map<String, Object>) clean.get("model");
         NovelExtractService.ModelChoice choice = extractService.resolveModel(model); // 先校验模型，避免建了任务才发现没配置
-        int entities = selectEntities(loadResult(task), clean).size();
-        if (entities == 0) {
-            throw new BizException(400, "所选范围内没有实体");
+        String mode = String.valueOf(clean.get("mode"));
+        // 共鸣素材的输入是这个工作区的卡片，不是提取结果；但和提取共用 Python 的队列，提取进行中时同样要先暂停
+        if ("resonance".equals(mode) && (NovelExtract.QUEUED.equals(task.getStatus()) || NovelExtract.RUNNING.equals(task.getStatus()))) {
+            throw new BizException(400, "提取进行中，请先暂停提取再整理");
+        }
+        CompileInput input = "resonance".equals(mode) ? null : compileInput(task);
+        int entities;
+        String what;
+        if ("resonance".equals(mode)) {
+            entities = ((List<?>) clean.getOrDefault("groups", List.of())).size();
+            if (entities == 0) {
+                throw new BizException(400, "请至少选一组（每组至少 2 张卡片）");
+            }
+            what = "共鸣素材，" + entities + " 组";
+        } else if ("craft".equals(mode)) {
+            entities = input.craftCards().size();
+            if (entities == 0) {
+                throw new BizException(400, "还没有读完的章节卡，没法总结写法");
+            }
+            what = "写法卡，" + entities + " 章";
+        } else if ("world".equals(mode)) {
+            entities = ((List<?>) clean.getOrDefault("groups", List.of())).size();
+            if (entities == 0) {
+                throw new BizException(400, "请至少选一组（每组至少 1 个实体）");
+            }
+            what = "世界观卡，" + entities + " 组";
+        } else {
+            entities = selectEntities(input.entities(), clean).size();
+            if (entities == 0) {
+                throw new BizException(400, "所选范围内没有实体");
+            }
+            what = entities + " 个实体";
+        }
+        if (input != null && input.partial() != null) {
+            clean.put("partial", input.partial()); // 暂停的提取：用已读的部分整理（整理记录里显示）
         }
 
         MaterialCompile c = new MaterialCompile();
         c.setExtractId(extractId);
         c.setStatus(NovelExtract.QUEUED);
         c.setProgress(0);
-        c.setMessage("排队中（" + choice.label() + "，" + entities + " 个实体）");
+        c.setMessage("排队中（" + choice.label() + "，" + what + "）");
         c.setEntityCount(entities);
         c.setOptions(writeJson(clean));
         c.setCreateTime(LocalDateTime.now());
@@ -135,6 +167,69 @@ public class MaterialCompileService {
         compileMapper.insert(c);
         executor.submit(() -> run(c.getId()));
         return c;
+    }
+
+    /**
+     * 世界观分组提议（同步，只是建议）：用和整理同一份输入（提取成功的结果 / 暂停时已读的部分）的实体档案 → Python。
+     * model：{source: api, configId?} | {source: gguf}；不传 = 启用中的大模型配置。→ {groups: [{name, members, reason}], usage}
+     */
+    @SuppressWarnings("unchecked")
+    public JsonNode proposeWorldGroups(Long extractId, Map<String, Object> body) {
+        NovelExtract task = extractMapper.selectById(extractId);
+        if (task == null) {
+            throw new BizException(404, "提取任务不存在：" + extractId);
+        }
+        Map<String, Object> model = body != null && body.get("model") instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
+        NovelExtractService.ModelChoice choice = extractService.resolveModel(model);
+        if (choice.local() != null && !"gguf".equals(choice.local().get("source"))) {
+            throw new BizException(400, "世界观分组只支持大模型或 GGUF");
+        }
+        CompileInput input = compileInput(task);
+        List<JsonNode> ents = new ArrayList<>();
+        input.entities().forEach(ents::add);
+        if (ents.size() < 2) {
+            throw new BizException(400, "实体太少，没法分组");
+        }
+        JsonNode res;
+        try {
+            res = aiClient.worldGroups(ents, choice.config());
+        } catch (org.springframework.web.client.ResourceAccessException e) {
+            throw new BizException(503, "AI 服务未启动或无法连接");
+        }
+        if (!res.path("ok").asBoolean(false)) {
+            throw new BizException(400, "世界观分组失败：" + res.path("message").asText("未知原因"));
+        }
+        return res;
+    }
+
+    /**
+     * 共鸣素材分组提议（同步，只是建议）：这个工作区的世界观卡 / 体系卡 / 实体卡 → Python 按主题分组。
+     * → {groups: [{name, cardIds, reason}], usage}
+     */
+    @SuppressWarnings("unchecked")
+    public JsonNode proposeResonanceGroups(Long extractId, Map<String, Object> body) {
+        if (extractMapper.selectById(extractId) == null) {
+            throw new BizException(404, "提取任务不存在：" + extractId);
+        }
+        Map<String, Object> model = body != null && body.get("model") instanceof Map<?, ?> m ? (Map<String, Object>) m : null;
+        NovelExtractService.ModelChoice choice = extractService.resolveModel(model);
+        if (choice.local() != null && !"gguf".equals(choice.local().get("source"))) {
+            throw new BizException(400, "共鸣分组只支持大模型或 GGUF");
+        }
+        List<Map<String, Object>> cards = cardService.resonanceCandidates(extractId);
+        if (cards.size() < 3) {
+            throw new BizException(400, "卡片太少（至少 3 张世界观 / 体系 / 实体卡），先整理实体卡或世界观卡");
+        }
+        JsonNode res;
+        try {
+            res = aiClient.resonanceGroups(cards, choice.config());
+        } catch (org.springframework.web.client.ResourceAccessException e) {
+            throw new BizException(503, "AI 服务未启动或无法连接");
+        }
+        if (!res.path("ok").asBoolean(false)) {
+            throw new BizException(400, "共鸣分组失败：" + res.path("message").asText("未知原因"));
+        }
+        return res;
     }
 
     /** 一次提取的全部整理记录，最近的在前 */
@@ -148,6 +243,10 @@ public class MaterialCompileService {
         MaterialCompile c = require(id);
         if (!NovelExtract.INTERRUPTED.equals(c.getStatus())) {
             throw new BizException(400, "只有中断的整理任务可以继续");
+        }
+        NovelExtract task = extractMapper.selectById(c.getExtractId());
+        if (task != null && (NovelExtract.QUEUED.equals(task.getStatus()) || NovelExtract.RUNNING.equals(task.getStatus()))) {
+            throw new BizException(400, "提取进行中，请先暂停提取再继续整理");
         }
         if (c.getJobId() != null && !c.getJobId().isBlank()) {
             try {
@@ -230,7 +329,133 @@ public class MaterialCompileService {
             out.put("topN", Math.min(n.intValue(), MAX_ENTITIES));
         }
         out.put("plot", !Boolean.FALSE.equals(opts.get("plot")));
+        // mode：entity（默认）/ craft（写法卡）/ world（世界观卡，groups = 作者确认过的分组）
+        String mode = String.valueOf(opts.getOrDefault("mode", "entity"));
+        out.put("mode", List.of("craft", "world", "resonance").contains(mode) ? mode : "entity");
+        if ("resonance".equals(out.get("mode")) && opts.get("groups") instanceof List<?> gs) {
+            // 共鸣素材：[{name, cardIds}]（卡片 id，每组 2–15 张，≤30 组）
+            List<Map<String, Object>> groups = new ArrayList<>();
+            for (Object g : gs) {
+                if (!(g instanceof Map<?, ?> gm) || groups.size() >= 30) {
+                    continue;
+                }
+                String name = gm.get("name") == null ? "" : String.valueOf(gm.get("name")).trim();
+                List<Long> ids = gm.get("cardIds") instanceof List<?> ms ? ms.stream().filter(x -> x instanceof Number)
+                        .map(x -> ((Number) x).longValue()).distinct().limit(15).toList() : List.of();
+                if (!name.isEmpty() && ids.size() >= 2) {
+                    groups.add(Map.of("name", name.length() > 20 ? name.substring(0, 20) : name, "cardIds", ids));
+                }
+            }
+            out.put("groups", groups);
+        }
+        if ("world".equals(out.get("mode")) && opts.get("groups") instanceof List<?> gs) {
+            List<Map<String, Object>> groups = new ArrayList<>();
+            for (Object g : gs) {
+                if (!(g instanceof Map<?, ?> gm) || groups.size() >= 50) {
+                    continue;
+                }
+                String name = gm.get("name") == null ? "" : String.valueOf(gm.get("name")).trim();
+                List<String> members = gm.get("members") instanceof List<?> ms
+                        ? ms.stream().filter(k -> k != null).map(String::valueOf).distinct().limit(20).toList() : List.of();
+                if (!name.isEmpty() && !members.isEmpty()) {
+                    groups.add(Map.of("name", name.length() > 20 ? name.substring(0, 20) : name, "members", members));
+                }
+            }
+            out.put("groups", groups);
+        }
         return out;
+    }
+
+    /**
+     * 整理的输入：实体档案 + 章节 [{title, summary}]；写法卡另用 craftCards（章节卡，带 ci / title）/ threads / base（范围起点前的章数）/
+     * fromStart；partial = 暂停的提取时 {readChapters, totalChapters}，否则 null
+     */
+    private record CompileInput(JsonNode entities, List<Map<String, Object>> chapters, Map<String, Object> partial,
+                                List<JsonNode> craftCards, JsonNode threads, int base) {
+    }
+
+    /**
+     * 提取成功 → 结果文件（含「写回实体档案」的合并）；已暂停且记录了实体 → 断点里已读的部分（Python live：实体档案同结构，
+     * 章节摘要 = 已读章节卡的「一句话 + 前 3 个事件」，同提取完成时的拼法）。提取进行中 / 失败 / 未开始不能整理。
+     */
+    private CompileInput compileInput(NovelExtract task) {
+        String st = task.getStatus();
+        if (NovelExtract.QUEUED.equals(st) || NovelExtract.RUNNING.equals(st)) {
+            throw new BizException(400, "提取进行中，请先暂停提取再整理（暂停后可以用已读的部分整理）");
+        }
+        if (NovelExtract.SUCCEEDED.equals(st)) {
+            JsonNode result = loadResult(task);
+            List<Map<String, Object>> chapters = new ArrayList<>();
+            for (JsonNode ch : result.path("chapters")) {
+                chapters.add(chapterOf(ch.path("title").asText(""), ch.path("summary").asText("")));
+            }
+            List<JsonNode> cards = new ArrayList<>();
+            result.path("chapterCards").forEach(c -> {
+                if ("done".equals(c.path("status").asText("done"))) {
+                    cards.add(c);
+                }
+            });
+            return new CompileInput(result.path("entities"), chapters, null, cards, result.path("threads"),
+                    Math.max(0, result.path("range").path("from").asInt(1) - 1));
+        }
+        if (!NovelExtract.INTERRUPTED.equals(st)) {
+            throw new BizException(400, "这次提取没有可整理的实体（未开始或已取消）");
+        }
+        FileInfo file = fileService.getById(task.getFileId());
+        JsonNode live;
+        try {
+            live = aiClient.extractLive("e" + task.getId(), 0, task.getFileId(),
+                    file.getFileExt() == null ? "" : file.getFileExt().toLowerCase());
+        } catch (Exception e) {
+            throw new BizException(503, "AI 服务未启动或无法连接，读不到已读部分的实体");
+        }
+        if (!live.path("exists").asBoolean(false) || !live.path("entities").isArray() || live.path("entities").isEmpty()) {
+            throw new BizException(400, "还没读到可整理的实体（断点里没有已读的章，或这次提取没有记录实体）");
+        }
+        Map<Integer, String> titles = new HashMap<>();
+        live.path("chapters").forEach(ch -> titles.put(ch.path("ci").asInt(), ch.path("title").asText("")));
+        Map<Integer, String> summaries = new HashMap<>();
+        List<JsonNode> craftCards = new ArrayList<>();
+        for (JsonNode row : live.path("rows")) {
+            if (!"done".equals(row.path("status").asText()) && !"partial".equals(row.path("status").asText())) {
+                continue;
+            }
+            JsonNode card = row.path("card");
+            if ("done".equals(row.path("status").asText()) && card.isObject()) {
+                com.fasterxml.jackson.databind.node.ObjectNode c = ((com.fasterxml.jackson.databind.node.ObjectNode) card).deepCopy();
+                c.put("ci", row.path("ci").asInt());
+                c.put("title", titles.getOrDefault(row.path("ci").asInt(), ""));
+                c.put("status", "done");
+                craftCards.add(c);
+            }
+            List<String> parts = new ArrayList<>();
+            if (!card.path("oneLine").asText("").isBlank()) {
+                parts.add(card.path("oneLine").asText());
+            }
+            int n = 0;
+            for (JsonNode ev : card.path("events")) {
+                if (n++ >= 3) {
+                    break;
+                }
+                parts.add(ev.asText());
+            }
+            String s = String.join("；", parts);
+            summaries.put(row.path("ci").asInt(), s.length() > 200 ? s.substring(0, 200) : s);
+        }
+        List<Map<String, Object>> chapters = new ArrayList<>();
+        for (JsonNode ch : live.path("chapters")) {
+            chapters.add(chapterOf(ch.path("title").asText(""), summaries.getOrDefault(ch.path("ci").asInt(), "")));
+        }
+        Map<String, Object> partial = new LinkedHashMap<>();
+        partial.put("readChapters", summaries.size());
+        partial.put("totalChapters", chapters.size());
+        craftCards.sort(java.util.Comparator.comparingInt(c -> c.path("ci").asInt()));
+        return new CompileInput(live.path("entities"), chapters, partial, craftCards, live.path("threads"),
+                Math.max(0, live.path("range").path("from").asInt(1) - 1));
+    }
+
+    private static Map<String, Object> chapterOf(String title, String summary) {
+        return Map.of("title", title, "summary", summary.length() > SUMMARY_CHARS ? summary.substring(0, SUMMARY_CHARS) : summary);
     }
 
     private JsonNode loadResult(NovelExtract task) {
@@ -252,12 +477,12 @@ public class MaterialCompileService {
     }
 
     /** 按 entityKeys / categories 过滤，再取前 topN（实体档案已按事实数排序） */
-    private List<JsonNode> selectEntities(JsonNode result, Map<String, Object> opts) {
+    private List<JsonNode> selectEntities(JsonNode entities, Map<String, Object> opts) {
         Set<String> keys = opts.get("entityKeys") instanceof List<?> l ? new HashSet<>(l.stream().map(String::valueOf).toList()) : null;
         Set<String> cats = opts.get("categories") instanceof List<?> l ? new HashSet<>(l.stream().map(String::valueOf).toList()) : null;
         int top = opts.get("topN") instanceof Number n ? n.intValue() : MAX_ENTITIES;
         List<JsonNode> out = new ArrayList<>();
-        for (JsonNode e : result.path("entities")) {
+        for (JsonNode e : entities) {
             if (out.size() >= top) {
                 break;
             }
@@ -284,8 +509,8 @@ public class MaterialCompileService {
             }
             MaterialCompile c = require(id);
             NovelExtract task = extractMapper.selectById(c.getExtractId());
-            if (task == null || !NovelExtract.SUCCEEDED.equals(task.getStatus())) {
-                update(id, NovelExtract.FAILED, null, "来源提取任务不存在或不是成功状态", null);
+            if (task == null) {
+                update(id, NovelExtract.FAILED, null, "来源提取任务不存在", null);
                 return;
             }
             JsonNode opts = objectMapper.readTree(c.getOptions());
@@ -294,19 +519,59 @@ public class MaterialCompileService {
             @SuppressWarnings("unchecked")
             Map<String, Object> model = opts.path("model").isObject() ? objectMapper.convertValue(opts.path("model"), Map.class) : null;
             NovelExtractService.ModelChoice choice = extractService.resolveModel(model);
-            JsonNode result = loadResult(task);
-            List<JsonNode> entities = selectEntities(result, optMap);
-            List<Map<String, Object>> chapters = new ArrayList<>();
-            for (JsonNode ch : result.path("chapters")) {
-                String summary = ch.path("summary").asText("");
-                chapters.add(Map.of("title", ch.path("title").asText(""),
-                        "summary", summary.length() > SUMMARY_CHARS ? summary.substring(0, SUMMARY_CHARS) : summary));
+            String mode = opts.path("mode").asText("entity");
+            CompileInput input = null;
+            if (!"resonance".equals(mode)) { // 共鸣素材的输入是卡片，不读提取结果
+                try {
+                    input = compileInput(task);
+                } catch (BizException e) {
+                    update(id, NovelExtract.INTERRUPTED, null, e.getMessage() + RESUME_HINT, null);
+                    return;
+                }
             }
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("fileId", task.getFileId());
-            body.put("entities", entities);
-            body.put("chapters", chapters);
+            body.put("mode", mode);
             body.put("plot", opts.path("plot").asBoolean(true));
+            if ("resonance".equals(mode)) {
+                Set<Long> ids = new HashSet<>();
+                opts.path("groups").forEach(g -> g.path("cardIds").forEach(x -> ids.add(x.asLong())));
+                List<Map<String, Object>> cards = cardService.resonanceInputs(c.getExtractId(), ids);
+                if (cards.size() < 2) {
+                    update(id, NovelExtract.FAILED, null, "分组里的卡片已经不在了（被删除或重新整理过），请重新分组", null);
+                    return;
+                }
+                body.put("entities", List.of());
+                body.put("chapters", List.of());
+                body.put("groups", opts.path("groups"));
+                body.put("resonanceCards", cards);
+            } else if ("craft".equals(mode)) {
+                Map<String, Object> craft = new LinkedHashMap<>();
+                craft.put("cards", input.craftCards());
+                craft.put("threads", input.threads().isArray() ? input.threads() : List.of());
+                craft.put("base", input.base());
+                craft.put("fromStart", input.base() == 0);
+                body.put("craft", craft);
+                body.put("entities", List.of());
+                body.put("chapters", List.of());
+            } else if ("world".equals(mode)) {
+                // 只送分组里用到的实体；已有实体卡的概括一起给（帮模型把握这个实体是什么）
+                Set<String> used = new HashSet<>();
+                opts.path("groups").forEach(g -> g.path("members").forEach(k -> used.add(k.asText())));
+                List<JsonNode> members = new ArrayList<>();
+                input.entities().forEach(e -> {
+                    if (used.contains(e.path("key").asText())) {
+                        members.add(e);
+                    }
+                });
+                body.put("entities", members);
+                body.put("chapters", List.of());
+                body.put("groups", opts.path("groups"));
+                body.put("summaries", cardService.entitySummaries(c.getExtractId(), used));
+            } else {
+                body.put("entities", selectEntities(input.entities(), optMap));
+                body.put("chapters", input.chapters());
+            }
             JsonNode job = aiClient.submitCompile(body, choice.config(), choice.local(), checkpointKey(id));
             String jobId = job.path("jobId").asText();
             update(id, NovelExtract.RUNNING, null, "已提交 AI 服务（" + choice.label() + "）", jobId);
@@ -399,23 +664,36 @@ public class MaterialCompileService {
         }
     }
 
-    /** 成功：卡片 → 待确认候选（同书已有的跳过）→ 记统计 → 删断点 */
+    /** 成功：结果 → 这个工作区的卡片（不再直接生成素材候选；在「素材选择」里挑过才进素材库）→ 记统计 → 删断点 */
     private void finish(Long id, JsonNode result) {
         MaterialCompile c = require(id);
-        NovelExtract task = extractMapper.selectById(c.getExtractId());
-        FileInfo file = task == null ? null : fileService.getById(task.getFileId());
-        MaterialService.CandidateStats stats = materialService.createCandidates(c.getExtractId(), task == null ? null : task.getFileId(),
-                file == null ? (task == null ? null : task.getFileName()) : file.getFileName(), result);
+        ExtractCardService.UpsertStats stats = cardService.upsertFromCompile(c.getExtractId(), id, result);
         JsonNode st = result.path("stats");
         int cards = st.path("cards").asInt() + st.path("systems").asInt();
         int arcs = st.path("arcs").asInt();
-        StringBuilder msg = new StringBuilder("整理完成：").append(cards).append(" 张素材卡、").append(arcs).append(" 个剧情段");
-        if (stats.created() > 0) {
-            msg.append("，").append(stats.created()).append(" 条待确认");
+        StringBuilder msg = new StringBuilder("整理完成：");
+        if (st.has("craftCards")) {
+            msg.append(st.path("craftCards").asInt()).append(" 张写法卡");
+            List<String> skipped = new ArrayList<>();
+            st.path("skipped").forEach(s -> skipped.add(s.path("label").asText() + "（" + s.path("reason").asText() + "）"));
+            if (!skipped.isEmpty()) {
+                msg.append("；缺少依据没整理：").append(String.join("、", skipped));
+            }
+        } else if (st.has("worldCards")) {
+            msg.append(st.path("worldCards").asInt()).append(" 张世界观卡");
+        } else if (st.has("resonanceCards")) {
+            msg.append(st.path("resonanceCards").asInt()).append(" 张共鸣素材");
+            if (st.path("notUseful").asInt() > 0) {
+                msg.append("（").append(st.path("notUseful").asInt()).append(" 组没整理出有依据的关系，已跳过）");
+            }
+        } else {
+            msg.append(cards).append(" 张实体 / 体系卡、").append(arcs).append(" 个剧情段");
         }
-        if (stats.duplicates() > 0) {
-            msg.append("；跳过与本书已有候选 / 素材重复的 ").append(stats.duplicates()).append(" 条");
+        msg.append("（新卡 ").append(stats.created()).append("，更新 ").append(stats.updated());
+        if (stats.keptEdited() > 0) {
+            msg.append("，手改过的 ").append(stats.keptEdited()).append(" 张保留、新版本放进历史");
         }
+        msg.append("）");
         if (st.path("notUseful").asInt() > 0) {
             msg.append("；").append(st.path("notUseful").asInt()).append(" 个实体信息太空泛未放入");
         }

@@ -18,7 +18,19 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
     "location": ("地点", ["特征", "危险", "特殊规则", "产出"]),
     "item": ("物品功法", ["作用", "代价", "获取方式", "限制"]),
     "plot": ("情节", ["起因", "冲突", "转折", "结果", "功能"]),
+    # 写法卡（卡片整理从写法统计总结出的规律，2026-11-03）：不是设定实体，提取时不读这一类
+    "craft": ("写法", ["规律", "适用场景", "示例章节", "数据"]),
+    # 共鸣素材（卡片整理把同一主题的卡片关联成整体：节点 / 关系 / 联动规则 / 融入指南，2026-11-04）：同样不参与提取
+    "resonance": ("共鸣", ["节点", "联动规则", "融入指南", "缺口"]),
 }
+# 逐章提取会记录的分类（设定实体 + 情节）；写法不是从原文里「认出来」的，不参与提取
+EXTRACT_CATEGORIES = [c for c in CATEGORIES if c not in ("craft", "resonance")]
+
+
+class RereadOptions(BaseModel):
+    """重读这几章：id = 这次重读的标记（断点行写上 rr = id，中断后继续不会重复重读），cis = 范围内的章序号。"""
+    id: str = Field(min_length=1, max_length=40)
+    cis: list[int] = Field(min_length=1, max_length=200)
 
 
 class MaterialOptions(BaseModel):
@@ -28,17 +40,19 @@ class MaterialOptions(BaseModel):
     超长章按段落切开）、章节范围 fromChapter / toChapter。整理卡片是之后单独的一步。"""
 
     enabled: bool = False
-    categories: list[str] = Field(default_factory=lambda: list(CATEGORIES))
+    categories: list[str] = Field(default_factory=lambda: list(EXTRACT_CATEGORIES))
     focus: str = Field(default="", max_length=300)
-    rounds: int = Field(default=1, ge=1, le=2)
+    rounds: int = Field(default=2, ge=1, le=2)  # 2c 实测：1 遍的实体召回 65–78%、事实 35–49%（相对 2 遍），默认 2 遍
     depth: str = Field(default="standard", pattern="^(fast|standard|deep)$")
     chunkChars: int = Field(default=3000, ge=1500, le=6000)
     # 章节范围（按 text_loader.split_book 分出的章，从 1 数）：fromChapter..toChapter，toChapter = 0 表示读到最后
     fromChapter: int = Field(default=1, ge=1, le=100000)
     toChapter: int = Field(default=0, ge=0, le=100000)
+    # 重读这几章（不进断点指纹）：见 chapter_scan.scan
+    reread: RereadOptions | None = None
 
     def active_categories(self) -> list[str]:
-        return [c for c in self.categories if c in CATEGORIES] or list(CATEGORIES)
+        return [c for c in self.categories if c in EXTRACT_CATEGORIES] or list(EXTRACT_CATEGORIES)
 
 
 def _norm_title(t: str) -> str:

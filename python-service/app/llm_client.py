@@ -4,6 +4,7 @@
 模型配置（地址、模型名、API Key）由 Java 后端随请求传入，本服务不保存密钥。
 """
 import json
+import threading
 import time
 from typing import Literal
 from urllib.parse import urlparse
@@ -149,24 +150,63 @@ def _raise_for_status(resp: httpx.Response) -> None:
     raise LLMError(f"请求被拒绝（{code}）：{detail}", fatal=code in (400, 422))
 
 
-def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | None) -> dict:
+# 不认 thinking 参数的服务（baseUrl, model）：第一次被 400 拒绝后记住，之后不再带
+_NO_THINKING_PARAM: set[tuple[str, str]] = set()
+
+
+def _send(url: str, payload: dict, headers: dict, timeout: float, trust_env: bool,
+          cancel: threading.Event | None) -> httpx.Response:
+    """发一次 POST。cancel 不为空（后台任务）时请求放到守护线程里，每 0.5 秒看一次取消标记，并限制总耗时：
+    httpx 的 timeout 只管「两次收到数据的间隔」，服务端忙时断断续续回数据（DeepSeek 503 过载时）一次调用能拖好几分钟，
+    取消也要等它返回（2026-11-03「一直显示正在取消」）。取消 → 致命 LLMError（任务按已取消收尾，被丢下的请求自己结束）。"""
+    if cancel is None:
+        return httpx.post(url, json=payload, headers=headers, timeout=timeout, trust_env=trust_env)
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["resp"] = httpx.post(url, json=payload, headers=headers, timeout=timeout, trust_env=trust_env)
+        except BaseException as e:  # noqa: BLE001 — 原样交给调用方
+            box["err"] = e
+
+    t = threading.Thread(target=run, name="llm-call", daemon=True)
+    t.start()
+    deadline = time.monotonic() + timeout
+    while t.is_alive():
+        if cancel.wait(0.5):
+            raise LLMError("已取消", fatal=True)
+        if time.monotonic() > deadline:
+            raise httpx.ReadTimeout(f"总耗时超过 {timeout:.0f}s")
+    if "err" in box:
+        raise box["err"]
+    return box["resp"]
+
+
+def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | None,
+               cancel: threading.Event | None = None) -> dict:
     """POST /chat/completions（或 Anthropic /v1/messages，转换后返回 OpenAI 形状），返回响应 JSON。
-    429/5xx/超时自动重试；不支持 json_object 的服务自动降级。"""
+    429/5xx/超时自动重试；不支持 json_object 的服务自动降级；不认 thinking 参数的服务去掉后重发。
+    cancel = 后台任务的取消标记：等待中途也能取消（见 _send）。"""
     headers = _headers(cfg.protocol, cfg.apiKey)
     timeout = timeout or config.LLM_TIMEOUT
     anthropic = cfg.protocol == "anthropic"
     if anthropic:
         payload = _to_anthropic(payload)
+    elif "thinking" in payload and (cfg.baseUrl, cfg.model) in _NO_THINKING_PARAM:
+        payload.pop("thinking")
 
     for attempt in range(retries + 1):
         try:
-            resp = httpx.post(_endpoint(cfg), json=payload, headers=headers,
-                              timeout=timeout, trust_env=_trust_env(cfg))
+            resp = _send(_endpoint(cfg), payload, headers, timeout, _trust_env(cfg), cancel)
             if resp.status_code == 400 and "response_format" in payload and "response_format" in resp.text:
                 # 不支持 JSON 模式：去掉后立即重发（不占用重试次数），靠 prompt 约束输出 JSON
                 payload.pop("response_format")
-                resp = httpx.post(_endpoint(cfg), json=payload, headers=headers,
-                                  timeout=timeout, trust_env=_trust_env(cfg))
+                resp = _send(_endpoint(cfg), payload, headers, timeout, _trust_env(cfg), cancel)
+            if resp.status_code in (400, 422) and "thinking" in payload and "thinking" in resp.text:
+                # 不认 thinking 参数：去掉后重发，并记住这个服务
+                payload.pop("thinking")
+                _NO_THINKING_PARAM.add((cfg.baseUrl, cfg.model))
+                resp = _send(_endpoint(cfg), payload, headers, timeout, _trust_env(cfg), cancel)
             _raise_for_status(resp)
             data = resp.json()
             if anthropic:
@@ -185,7 +225,11 @@ def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | N
         except (ValueError, KeyError, IndexError, TypeError):
             raise LLMError("模型返回格式不符合 " + ("Anthropic Messages" if anthropic else "OpenAI 兼容") + " 接口",
                            fatal=True)
-        time.sleep(2 * (attempt + 1))
+        if cancel is not None:
+            if cancel.wait(2 * (attempt + 1)):
+                raise LLMError("已取消", fatal=True)
+        else:
+            time.sleep(2 * (attempt + 1))
     raise LLMError("模型调用失败")
 
 
@@ -207,7 +251,11 @@ def add_usage(acc: dict, data: dict) -> dict:
     one = {"promptTokens": int(usage.get("prompt_tokens") or 0),
            "completionTokens": int(usage.get("completion_tokens") or 0),
            # DeepSeek: prompt_cache_hit_tokens；OpenAI / 通义: prompt_tokens_details.cached_tokens
-           "cacheHitTokens": int(usage.get("prompt_cache_hit_tokens") or details.get("cached_tokens") or 0)}
+           "cacheHitTokens": int(usage.get("prompt_cache_hit_tokens") or details.get("cached_tokens") or 0),
+           # 推理模型的思考 token（已含在 completionTokens 里）
+           "reasoningTokens": int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)}
+    if data["choices"][0].get("finish_reason") == "length":
+        acc["truncated"] = acc.get("truncated", 0) + 1
     acc["calls"] = acc.get("calls", 0) + 1
     for k, v in one.items():
         acc[k] = acc.get(k, 0) + v
@@ -215,8 +263,11 @@ def add_usage(acc: dict, data: dict) -> dict:
 
 
 def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: bool = True,
-         retries: int = 2, timeout: float | None = None, usage: dict | None = None) -> str:
-    """发送一次对话，返回文本（提取 / 校验用：低温度，默认 JSON 模式）。usage 不为空时累加本次 token 用量。"""
+         retries: int = 2, timeout: float | None = None, usage: dict | None = None, think: bool = False,
+         cancel: threading.Event | None = None) -> str:
+    """发送一次对话，返回文本（提取 / 校验用：低温度，默认 JSON 模式）。usage 不为空时累加本次 token 用量。
+    think=False（默认）对推理模型传 thinking: disabled——结构化提取不需要先「思考」，开着的话思考 token 也算进
+    max_tokens，会把 JSON 挤断（deepseek-v4.1-flash 实测一章思考约 1800 token，2026-11-03）；不认这个参数的服务自动去掉。"""
     payload = {
         "model": cfg.model,
         "messages": messages,
@@ -225,7 +276,9 @@ def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: boo
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    data = _post_chat(cfg, payload, retries, timeout)
+    if not think and source_of(cfg) == "api":
+        payload["thinking"] = {"type": "disabled"}
+    data = _post_chat(cfg, payload, retries, timeout, cancel)
     if usage is not None:
         add_usage(usage, data)
     return data["choices"][0]["message"]["content"] or ""

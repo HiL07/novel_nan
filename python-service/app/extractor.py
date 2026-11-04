@@ -42,7 +42,7 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig | None, on_progress: C
     if facts:
         usage = llm_client.new_usage(cfg)
         source = llm_client.source_of(cfg)
-        return _extract_facts(file_id, file_ext, on_progress, material_opts, stop_event, call=_chat_fn(cfg, usage),
+        return _extract_facts(file_id, file_ext, on_progress, material_opts, stop_event, call=_chat_fn(cfg, usage, stop=stop_event),
                               concurrency=cfg.concurrency if source == "api" else 1, model_name=cfg.model,
                               source=source, resume_key=resume_key, usage=usage, in_app=False)
     return _extract(file_id, file_ext, on_progress, stop_event,
@@ -51,14 +51,17 @@ def extract(file_id: int, file_ext: str, cfg: ModelConfig | None, on_progress: C
                     source=llm_client.source_of(cfg), resume_key=resume_key)
 
 
-def _chat_fn(cfg: ModelConfig, usage: dict) -> Callable[[list[dict], int], str]:
+def _chat_fn(cfg: ModelConfig, usage: dict, think: bool = False,
+             stop: threading.Event | None = None) -> Callable[[list[dict], int], str]:
+    """think=False：推理模型关掉思考（见 llm_client.chat）；评测脚本可以打开做对比。
+    stop = 任务的取消标记：模型调用等待中途也能取消（llm_client._send）。"""
     lock = threading.Lock()
 
     def call(messages: list[dict], max_tokens: int) -> str:
         one: dict = {}
-        text = llm_client.chat(cfg, messages, max_tokens=max_tokens, usage=one)
+        text = llm_client.chat(cfg, messages, max_tokens=max_tokens, usage=one, think=think, cancel=stop)
         with lock:
-            for k in ("calls", "promptTokens", "completionTokens", "cacheHitTokens"):
+            for k in ("calls", "promptTokens", "completionTokens", "cacheHitTokens", "reasoningTokens", "truncated"):
                 usage[k] = usage.get(k, 0) + one.get(k, 0)
         return text
 
@@ -202,36 +205,71 @@ def _extract_facts(file_id: int, file_ext: str, on_progress: Callable[[int, str]
 
 def compile_job(entities: list[dict], chapters: list[dict], cfg: ModelConfig | None, on_progress, *,
                 local: dict | None = None, plot: bool = True, stop_event: threading.Event | None = None,
-                resume_key: str | None = None) -> dict:
-    """整理卡片：实体档案 + 章节摘要 → {materials, stats, usage, model, source}。cfg = 大模型 / GGUF，local = 应用内本地模型。
-    断点指纹 = 实体键 + 事实数 + 是否整理剧情段：同一范围续跑时已整理的卡片不重做。"""
-    sig = hashlib.sha1(json.dumps([(e.get("key"), len(e.get("facts") or [])) for e in entities],
-                                  ensure_ascii=False).encode()).hexdigest()
-    ckpt = extract_checkpoint.Checkpoint(resume_key, {"compile": sig, "plot": plot, "chapters": len(chapters)})
-    resumed = len(ckpt.done("cards"))
+                resume_key: str | None = None, mode: str = "entity", craft: dict | None = None,
+                groups: list[dict] | None = None, summaries: dict | None = None,
+                resonance_cards: list[dict] | None = None) -> dict:
+    """整理卡片 → {materials, stats, usage, model, source}。cfg = 大模型 / GGUF，local = 应用内本地模型。
+    mode：entity = 实体档案 + 章节摘要 → 实体卡 / 体系卡 / 剧情段；craft = 章节卡 + 伏笔表 → 写法卡（craft_cards）；
+    world = 作者确认的分组 + 成员实体 → 世界观卡（world_cards）。
+    断点指纹 = mode + 输入签名：同一输入续跑时已整理的卡片不重做。"""
+    from . import craft_cards, resonance_cards as rc, world_cards
+
+    if mode == "craft":
+        cards = (craft or {}).get("cards") or []
+        sig_src = [(c.get("ci"), c.get("oneLine")) for c in cards]
+    elif mode == "world":
+        sig_src = [(g.get("name"), g.get("members")) for g in groups or []] + [(e.get("key"), len(e.get("facts") or [])) for e in entities]
+    elif mode == "resonance":
+        sig_src = [(g.get("name"), g.get("cardIds")) for g in groups or []] + [(c.get("id"), c.get("title")) for c in resonance_cards or []]
+    else:
+        sig_src = [(e.get("key"), len(e.get("facts") or [])) for e in entities]
+    sig = hashlib.sha1(json.dumps(sig_src, ensure_ascii=False).encode()).hexdigest()
+    fp = {"compile": sig, "plot": plot, "chapters": len(chapters)}
+    if mode != "entity":
+        fp = {"compile": sig, "mode": mode}
+    ckpt = extract_checkpoint.Checkpoint(resume_key, fp)
+    stage = {"craft": "craft", "world": "world", "resonance": "resonance"}.get(mode, "cards")
+    resumed = len(ckpt.done(stage))
+    what = {"craft": "写法卡", "world": f"{len(groups or [])} 组世界观卡",
+            "resonance": f"{len(groups or [])} 组共鸣素材"}.get(mode, f"{len(entities)} 个实体")
+
+    def run(call, concurrency: int, is_local: bool) -> dict:
+        if mode == "craft":
+            return craft_cards.compile_craft(craft or {}, call, concurrency, ckpt, on_progress, stop_event)
+        if mode == "resonance":
+            return rc.compile_resonance(groups or [], resonance_cards or [], call, concurrency, ckpt, on_progress, stop_event)
+        if mode == "world":
+            return world_cards.compile_world(entities, groups or [], summaries or {}, call, concurrency, ckpt, on_progress, stop_event)
+        return material_facts.compile_cards(entities, chapters, call, concurrency, ckpt, on_progress, stop_event,
+                                            local=is_local, plot=plot)
+
     try:
         if local:
             with local_extract.LocalSession(local["baseId"], stop_event) as session:
-                on_progress(0, f"{len(entities)} 个实体，模型 {session.name}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
-                out = material_facts.compile_cards(entities, chapters, session.chat, 1, ckpt, on_progress, stop_event,
-                                                   local=True, plot=plot)
+                on_progress(0, f"{what}，模型 {session.name}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
+                out = run(session.chat, 1, True)
                 model_name, source, usage = session.name, "local", None
         else:
             usage = llm_client.new_usage(cfg)
             source = llm_client.source_of(cfg)
-            on_progress(0, f"{len(entities)} 个实体，模型 {cfg.model}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
-            out = material_facts.compile_cards(entities, chapters, _chat_fn(cfg, usage),
-                                               cfg.concurrency if source == "api" else 1, ckpt, on_progress, stop_event,
-                                               local=False, plot=plot)
+            on_progress(0, f"{what}，模型 {cfg.model}" + (f"，从断点继续（已整理 {resumed} 批）" if resumed else ""))
+            out = run(_chat_fn(cfg, usage, stop=stop_event), cfg.concurrency if source == "api" else 1, False)
             model_name = cfg.model
     except material_facts.Cancelled as e:
         raise Cancelled(str(e)) from e
     finally:
         ckpt.close()
     st = out["stats"]
-    if st["entities"] and st["failedCards"] and not (st["cards"] or st["notUseful"]):
+    if st["failedCards"] and not (st["cards"] or st["notUseful"]) and (st["entities"] or mode != "entity"):
         raise LLMError("所有卡片都整理失败，请检查模型配置或稍后重试")
-    on_progress(100, f"完成：{st['cards'] + st['systems']} 张素材卡、{st['arcs']} 个剧情段")
+    if mode == "craft":
+        on_progress(100, f"完成：{st['cards']} 张写法卡" + (f"，{len(st['skipped'])} 类缺少依据" if st.get("skipped") else ""))
+    elif mode == "world":
+        on_progress(100, f"完成：{st['cards']} 张世界观卡")
+    elif mode == "resonance":
+        on_progress(100, f"完成：{st['cards']} 张共鸣素材")
+    else:
+        on_progress(100, f"完成：{st['cards'] + st['systems']} 张素材卡、{st['arcs']} 个剧情段")
     result = {"materials": out["materials"], "stats": st, "model": model_name, "source": source}
     if usage:
         result["usage"] = usage

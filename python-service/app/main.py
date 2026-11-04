@@ -91,6 +91,15 @@ class CompileRequest(BaseModel):
     local: Optional[LocalExtract] = None
     gguf: bool = False
     resumeKey: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # 2026-11-03：entity（实体卡 / 体系卡 / 剧情段）/ craft（写法卡，见 craft_cards）/ world（世界观卡，见 world_cards）
+    mode: str = Field(default="entity", pattern="^(entity|craft|world|resonance)$")
+    # craft：{cards: 章节卡, threads: 伏笔表, base: 范围起点前的章数, fromStart: 是否从第 1 章读起}
+    craft: Optional[dict] = None
+    # world：作者确认过的分组 [{name, members: [实体键]}]；summaries = {实体键: 已有实体卡的概括}
+    groups: list[dict] = Field(default_factory=list, max_length=200)
+    summaries: dict = Field(default_factory=dict)
+    # resonance：成员卡 [{id, kind, category, title, summary, detail, attributes, facts}]（groups = [{name, cardIds}]）
+    resonanceCards: list[dict] = Field(default_factory=list, max_length=2000)
 
 
 class VerifyResult(BaseModel):
@@ -134,7 +143,8 @@ def _run(job: Job, file_ext: str, req: "ExtractRequest | CompileRequest") -> Non
         elif isinstance(req, CompileRequest):
             job.result = extractor.compile_job(req.entities, [c.model_dump() for c in req.chapters], req.model, on_progress,
                                                local=req.local.model_dump() if req.local else None, plot=req.plot,
-                                               stop_event=stop, resume_key=req.resumeKey)
+                                               stop_event=stop, resume_key=req.resumeKey, mode=req.mode, craft=req.craft,
+                                               groups=req.groups, summaries=req.summaries, resonance_cards=req.resonanceCards)
         else:
             job.result = extractor.extract(job.fileId, file_ext, req.model, on_progress, req.materials,
                                            local=req.local.model_dump() if req.local else None, stop_event=stop,
@@ -296,6 +306,72 @@ def materials_profile(req: ProfileRequest) -> dict:
         return {"ok": False, "message": str(e), "fatal": e.fatal}
 
 
+class EntityGroupsRequest(BaseModel):
+    """全书实体的 AI 归并：[{key, category, name, aliases, fact}]（每个实体一条事实）。"""
+    entities: list[dict] = Field(min_length=2, max_length=3000)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/extract/entity-groups")
+def extract_entity_groups(req: EntityGroupsRequest) -> dict:
+    """→ {ok, groups[{keys, category, type same|system, name, reason}], usage}（只是建议，作者确认后才写回实体档案）"""
+    from . import entity_groups
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        return {"ok": True, **entity_groups.group(req.entities, cfg)}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
+class WorldGroupsRequest(BaseModel):
+    """世界观分组提议：实体档案（带 facts[ci]，事实多的在前）。"""
+    entities: list[dict] = Field(min_length=2, max_length=5000)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/extract/world-groups")
+def extract_world_groups(req: WorldGroupsRequest) -> dict:
+    """→ {ok, groups[{name, members[实体键], reason}], usage}（只是建议，作者改过之后才整理世界观卡）"""
+    from . import world_cards
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        return {"ok": True, **world_cards.propose_groups(req.entities, cfg)}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
+class ResonanceGroupsRequest(BaseModel):
+    """共鸣素材分组提议：这个工作区的卡片 [{id, kind, category, title, summary}]。"""
+    cards: list[dict] = Field(min_length=3, max_length=3000)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/extract/resonance-groups")
+def extract_resonance_groups(req: ResonanceGroupsRequest) -> dict:
+    """→ {ok, groups[{name, cardIds, reason}], usage}（只是建议，作者改过之后才生成共鸣素材）"""
+    from . import resonance_cards
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        return {"ok": True, **resonance_cards.propose(req.cards, cfg)}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
 class VectorFeedbackRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     modelId: str = Field(default="", max_length=120)
@@ -348,7 +424,16 @@ def _queue(req: "ExtractRequest | CompileRequest", ext: str = "") -> Job:
 @app.post("/api/extract/compile/jobs")
 def submit_compile(req: CompileRequest) -> Job:
     """整理卡片（和提取任务同一个队列，一次一个）；进度 / 取消用 /api/extract/jobs/{jobId}。"""
-    if not req.entities:
+    if req.mode == "craft":
+        if not (req.craft or {}).get("cards"):
+            raise HTTPException(400, "没有读完的章节卡，没法总结写法")
+    elif req.mode == "world":
+        if not req.groups or not req.entities:
+            raise HTTPException(400, "没有要整理的世界观分组")
+    elif req.mode == "resonance":
+        if not req.groups or not req.resonanceCards:
+            raise HTTPException(400, "没有要关联的卡片分组")
+    elif not req.entities:
         raise HTTPException(400, "没有要整理的实体")
     return _queue(req)
 
@@ -371,11 +456,21 @@ def extract_checkpoint_info(key: str) -> dict:
 
 
 @app.get("/api/extract/checkpoints/{key}/chapters")
-def extract_checkpoint_chapters(key: str, since: int = 0) -> dict:
-    """逐章查看（提取中）：since = 上次的 next → {exists, range, chapters?, rows, next, current, running}"""
+def extract_checkpoint_chapters(key: str, since: int = 0, fileId: int = 0, fileExt: str = "") -> dict:
+    """逐章查看（提取中）：since = 上次的 next → {exists, range, chapters?, rows, next, current, running,
+    有新章时另带 pacing / threads / entities，给了 fileId + fileExt 时再带 appear {ci: [实体键]}（按名字扫原文）}"""
     from . import chapter_scan
+    texts = None
+    if fileId > 0 and fileExt.lower() in config.SUPPORTED_EXTS:
+        try:
+            from . import extractor as _ex
+            meta = extract_checkpoint.load_json(key, "chapters") or {}
+            lo = ((meta.get("range") or {}).get("from") or 1) - 1
+            texts = [c["content"] for c in _ex.load_book(fileId, fileExt.lower())["chapters"][lo:]]
+        except Exception:  # 取不到原文只是少了出场统计
+            log.warning("逐章查看取原文失败 key=%s fileId=%s", key, fileId)
     try:
-        return {**chapter_scan.live(key, max(0, since)), "running": key in _active_keys}
+        return {**chapter_scan.live(key, max(0, since), texts), "running": key in _active_keys}
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 

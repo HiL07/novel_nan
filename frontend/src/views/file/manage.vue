@@ -66,7 +66,7 @@
           <el-icon
             v-if="isExtractable(item.fileExt)"
             class="file-extract"
-            :title="extractInfo(item) ? `小说提取（${extractInfo(item).tip}，仍可再次提取）` : '小说提取'"
+            :title="extractInfo(item) ? `打开提取工作区（${extractInfo(item).tip}）` : '小说提取'"
             @click.stop="startExtract(item)"
           >
             <MagicStick />
@@ -113,7 +113,7 @@
               {{ previewType === 'pdf' ? '复制地址' : '复制全文' }}
             </el-button>
             <el-button v-if="isExtractable(current.fileExt)" type="success" @click="startExtract(current)">
-              {{ extractInfo(current)?.state === 'done' ? '再次提取' : '小说提取' }}
+              {{ extractInfo(current) ? '打开提取工作区' : '小说提取' }}
             </el-button>
             <span v-if="isExtractable(current.fileExt) && extractInfo(current)" class="extract-hint">
               {{ extractInfo(current).tip }}
@@ -126,6 +126,7 @@
         <el-button type="primary" @click="downloadFile(current.id)">下载</el-button>
       </template>
     </el-dialog>
+    <ExtractPickDialog ref="pickRef" />
   </div>
 </template>
 
@@ -136,6 +137,7 @@ import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, fetchTextPage, listFiles, previewUrl } from '@/api/file'
 import { bookOf, isExtractable, listExtracts } from '@/api/novel'
+import ExtractPickDialog from '@/components/material/ExtractPickDialog.vue'
 import { errorMessage } from '@/api/request'
 
 const router = useRouter()
@@ -312,10 +314,13 @@ async function copyPreview() {
   }
 }
 
-/** 选中小说文件 → 打开提取工作区（左栏选章节范围、右栏设置、中间看原文，在那里开始提取） */
+/**
+ * 选中小说文件 → 提取工作区：这本书（同书名）已有工作区就弹出来选一个打开或新建，没有就直接新建（ExtractPickDialog）
+ */
+const pickRef = ref(null)
 function startExtract(item) {
   dialogVisible.value = false
-  router.push({ path: '/novel/extract/new', query: { fileId: item.id, name: item.fileName } })
+  pickRef.value?.open({ id: item.id, fileName: item.fileName })
 }
 
 /** 章节数：后端逐个数章节标题行得出（不看最后一章写的序号）；null = 非 txt/md 或尚未统计 */
