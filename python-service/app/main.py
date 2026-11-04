@@ -244,6 +244,30 @@ def materials_vector_search(req: VectorSearchRequest) -> dict:
         return {"ok": False, "message": str(e)}
 
 
+class MatchItem(BaseModel):
+    id: int
+    category: str = ""
+    title: str = Field(default="", max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    text: str = Field(default="", max_length=4000)
+
+
+class MatchRequest(BaseModel):
+    """入库前比对：queries = 还没入库的卡片，items = 这本书已有的素材（见 material_match）。"""
+    modelId: Optional[str] = Field(default=None, max_length=120)
+    queries: list[MatchItem] = Field(max_length=5000)
+    items: list[MatchItem] = Field(max_length=20000)
+    top: int = Field(default=3, ge=1, le=10)
+
+
+@app.post("/api/materials/match")
+def materials_match(req: MatchRequest) -> dict:
+    """→ {ok, matches: {卡片id: [{id, score, reason: name|alias|vector}]}, vector, message?}"""
+    from . import material_match
+    return {"ok": True, **material_match.match([q.model_dump() for q in req.queries], [i.model_dump() for i in req.items],
+                                               req.top, req.modelId or None)}
+
+
 class MergeItem(BaseModel):
     id: int
     category: str = ""

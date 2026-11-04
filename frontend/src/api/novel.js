@@ -45,6 +45,8 @@ export function deleteExtracts(ids) {
 /* ---------- 卡片（卡片整理 / 素材选择，ExtractCardService） ---------- */
 /** 这个工作区的卡片 [{id, kind, category, title, data, history, version, edited, status, materialId, savedVersion, match}] */
 export const listCards = (id) => request.get(`/api/novel/extract/${id}/cards`).then((res) => res.data)
+/** 入库前比对 → {matches: {卡片id: [{id, title, category, summary, score, reason name|alias|vector, extractId, workspace}]}, suggest: {卡片id: {action, targetId}}, vector, message?} */
+export const cardMatches = (id) => request.get(`/api/novel/extract/${id}/cards/matches`, { timeout: 180000 }).then((res) => res.data)
 /** 手改卡片 {title?, subtype?, summary?, detail?, attributes?, tags?, tier?, category?} */
 export const updateCard = (cid, body) => request.post(`/api/novel/extract/card/${cid}`, body).then((res) => res.data)
 /** 换回历史版本 */

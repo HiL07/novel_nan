@@ -26,12 +26,13 @@
       </template>
     </div>
 
+    <el-alert v-if="matchNote" type="warning" :closable="false" show-icon :title="matchNote" class="ms-note" />
     <el-empty v-if="!cards.length && !loading" description="还没有卡片：先在「卡片整理」里整理出卡片" />
     <el-table
       v-else
       ref="tableRef"
       v-loading="loading"
-      :data="rows"
+      :data="pageRows"
       size="small"
       height="100%"
       class="ms-table"
@@ -59,15 +60,32 @@
             <el-tag size="small" type="success">已入库</el-tag>
             <span class="muted"> 素材 #{{ row.materialId }}</span>
           </template>
-          <template v-else-if="row.match || needsResync(row)">
-            <el-tag size="small" type="warning">{{ needsResync(row) ? '卡片入库后又改过' : `已有同名：${row.match.title}` }}</el-tag>
-            <el-select v-model="actions[row.id]" size="small" style="width: 140px; margin-left: 6px">
-              <el-option label="更新已有" value="update" />
-              <el-option label="作为可选版本" value="version" />
+          <template v-else-if="needsResync(row)">
+            <el-tag size="small" type="warning">卡片入库后又改过</el-tag>
+            <el-select v-model="actions[row.id]" size="small" style="width: 130px; margin-left: 6px">
+              <el-option label="同步到那条" value="update" />
               <el-option label="仍存为新的" value="new" />
             </el-select>
           </template>
-          <el-tag v-else size="small" effect="plain">新的</el-tag>
+          <template v-else-if="candidatesOf(row).length">
+            <!-- 这本书已有素材里最像的 1–3 条（名称 / 别名包含或向量相似），默认动作按相似度建议，可以改 -->
+            <div class="cand-row">
+              <el-select v-model="actions[row.id]" size="small" style="width: 120px">
+                <el-option label="补充进已有" value="update" />
+                <el-option label="作为可选版本" value="version" />
+                <el-option label="新增" value="new" />
+              </el-select>
+              <el-select v-if="actions[row.id] !== 'new'" v-model="targets[row.id]" size="small" style="width: 210px">
+                <el-option v-for="m in candidatesOf(row)" :key="m.id" :value="m.id" :label="`${m.title}（${matchText(m)}）`" />
+              </el-select>
+            </div>
+            <div class="muted cand-list">
+              <span v-for="m in candidatesOf(row)" :key="m.id" class="cand" :title="m.summary">
+                {{ m.title }} · {{ matchText(m) }}<template v-if="m.workspace"> · 来自「{{ m.workspace }}」</template>
+              </span>
+            </div>
+          </template>
+          <el-tag v-else size="small" effect="plain">{{ matching ? '比对中…' : '新的（书库里没有相似的）' }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="90">
@@ -77,6 +95,16 @@
         </template>
       </el-table-column>
     </el-table>
+    <!-- 分页：一次只渲染一页（每行有两个下拉框，几百行全渲染会卡住页面）；勾选跨页保留 -->
+    <el-pagination
+      v-if="rows.length > PAGE"
+      v-model:current-page="page"
+      class="ms-pager"
+      small
+      layout="total, prev, pager, next"
+      :total="rows.length"
+      :page-size="PAGE"
+    />
 
     <el-drawer v-model="previewOpen" :title="preview?.title" size="45%" append-to-body>
       <CardEditor :card="preview" @saved="onCardSaved" />
@@ -92,9 +120,9 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { listCards, saveCards } from '@/api/novel'
+import { cardMatches, listCards, saveCards } from '@/api/novel'
 import { MATERIAL_CATEGORIES, TIERS, categoryOf, listCandidates } from '@/api/material'
 import { errorMessage } from '@/api/request'
 import CandidateReview from './CandidateReview.vue'
@@ -116,7 +144,10 @@ const KIND_OPTIONS = [
 ]
 const kindText = (c) => KIND_LABEL[c.kind] || `实体 · ${categoryOf(c.category)?.label || c.category}`
 
-const cards = ref([])
+// 浅层响应式：几百张卡、每张带事实和历史版本，深层代理会拖慢页面；改卡片时整体替换数组
+const cards = shallowRef([])
+const PAGE = 50
+const page = ref(1)
 const loading = ref(false)
 const statusFilter = ref('todo')
 const kindFilter = ref('')
@@ -152,17 +183,23 @@ const rows = computed(() => {
   )
 })
 watch(statusFilter, () => tableRef.value?.clearSelection())
+const pageRows = computed(() => rows.value.slice((page.value - 1) * PAGE, page.value * PAGE))
+watch(rows, (list) => {
+  if ((page.value - 1) * PAGE >= list.length) page.value = 1
+})
 
-async function load() {
+/** withMatches：重新比对（打开时 / 存完之后）；从别的工作区切回来只刷新卡片状态 */
+async function load(withMatches = true) {
   loading.value = true
   try {
     const res = await listCards(props.extractId)
     if (res.code !== 0) throw new Error(res.message)
     cards.value = res.data || []
     cards.value.forEach((c) => {
-      // 库里已有同名：默认「更新已有」；卡片入库后又改过：默认更新到它存进去的那条
-      if (actions[c.id] == null && (c.match || needsResync(c))) actions[c.id] = 'update'
+      // 卡片入库后又改过：默认同步到它存进去的那条
+      if (actions[c.id] == null && needsResync(c)) actions[c.id] = 'update'
     })
+    if (withMatches || !Object.keys(matchMap.value).length) loadMatches()
   } catch (e) {
     ElMessage.error(errorMessage(e, '读取卡片失败'))
   } finally {
@@ -171,9 +208,40 @@ async function load() {
 }
 
 function itemOf(c) {
-  const target = needsResync(c) ? c.materialId : c.match?.id
-  const action = c.match || needsResync(c) ? actions[c.id] || 'update' : 'new'
-  return { cardId: c.id, action, targetId: action === 'new' ? undefined : target }
+  if (needsResync(c)) {
+    const action = actions[c.id] || 'update'
+    return { cardId: c.id, action, targetId: action === 'new' ? undefined : c.materialId }
+  }
+  const action = candidatesOf(c).length ? actions[c.id] || 'new' : 'new'
+  return { cardId: c.id, action, targetId: action === 'new' ? undefined : targets[c.id] }
+}
+
+/* ---------- 入库前比对：这本书已有素材里可能是同一条的 ---------- */
+const matchMap = ref({}) // 卡片 id → [{id, title, score, reason, workspace, summary}]
+const targets = reactive({}) // 卡片 id → 目标素材 id
+const matching = ref(false)
+const matchNote = ref('')
+const candidatesOf = (c) => matchMap.value[c.id] || []
+const matchText = (m) => (m.reason === 'name' ? '同名' : m.reason === 'alias' ? '名称包含' : `相似 ${Math.round(m.score * 100)}%`)
+async function loadMatches() {
+  matching.value = true
+  try {
+    const res = await cardMatches(props.extractId)
+    if (res.code !== 0) throw new Error(res.message)
+    matchMap.value = res.data.matches || {}
+    matchNote.value = res.data.message || ''
+    Object.entries(res.data.suggest || {}).forEach(([id, s]) => {
+      if (actions[id] == null) actions[id] = s.action
+      if (targets[id] == null && s.targetId) targets[id] = s.targetId
+    })
+    Object.entries(matchMap.value).forEach(([id, list]) => {
+      if (targets[id] == null && list.length) targets[id] = list[0].id
+    })
+  } catch (e) {
+    matchNote.value = errorMessage(e, '入库比对失败，只能按「新增」存')
+  } finally {
+    matching.value = false
+  }
 }
 
 async function saveChecked() {
@@ -219,7 +287,7 @@ const preview = ref(null)
 const previewOpen = computed({ get: () => !!preview.value, set: (v) => !v && (preview.value = null) })
 function onCardSaved(card) {
   const i = cards.value.findIndex((c) => c.id === card.id)
-  if (i >= 0) cards.value[i] = { ...card, match: cards.value[i].match }
+  if (i >= 0) cards.value = cards.value.map((c, k) => (k === i ? { ...card, match: c.match } : c))
   preview.value = cards.value[i] || card
 }
 
@@ -233,6 +301,8 @@ async function checkOld() {
     hasOldCandidates.value = false
   }
 }
+
+defineExpose({ reload: () => load(false) })
 
 watch(
   () => props.extractId,
@@ -264,6 +334,10 @@ watch(
 .spacer {
   flex: 1;
 }
+.ms-pager {
+  justify-content: center;
+  padding: 6px 0;
+}
 .ms-table {
   flex: 1;
   min-height: 0;
@@ -276,6 +350,20 @@ watch(
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ms-note {
+  margin: 6px 16px 0;
+  width: auto;
+}
+.cand-row {
+  display: flex;
+  gap: 6px;
+}
+.cand-list {
+  margin-top: 2px;
+}
+.cand {
+  margin-right: 10px;
 }
 .belong {
   margin-left: 6px;

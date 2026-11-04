@@ -125,7 +125,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cancelCompile, listCards, listCompiles, pauseCompile, resumeCompile, updateExtractResult } from '@/api/novel'
 import { MATERIAL_CATEGORIES, categoryOf } from '@/api/material'
@@ -177,7 +177,8 @@ const emptyText = computed(() =>
 )
 
 /* ---------- 卡片 ---------- */
-const cards = ref([])
+// 浅层响应式：卡片多（几百张、每张带事实和历史版本）时深层代理会拖慢切换；改卡片时整体替换数组
+const cards = shallowRef([])
 const loadingCards = ref(false)
 const group = ref('')
 const keyword = ref('')
@@ -251,7 +252,7 @@ function pickEntity(key) {
 }
 function onCardSaved(card) {
   const i = cards.value.findIndex((c) => c.id === card.id)
-  if (i >= 0) cards.value[i] = { ...card, match: cards.value[i].match }
+  if (i >= 0) cards.value = cards.value.map((c, k) => (k === i ? { ...card, match: c.match } : c))
 }
 
 /* ---------- 整理任务 ---------- */

@@ -108,6 +108,10 @@ const ROLE_COLOR = {
 }
 
 const tab = ref('graph')
+// 状态先声明：下面的 watch(immediate) 一挂载就会调用 layout() / clear()，用到这些（之前声明在后面 → 「Cannot access before initialization」，整个工作区页面跟着更新失败、切换卡住）
+const pos = ref({})
+const focusId = ref(null)
+const ruleIdx = ref(-1)
 const nodes = computed(() => props.data?.nodes || [])
 const edges = computed(() => (props.data?.edges || []).filter((e) => pos.value[e.from] && pos.value[e.to]))
 const rules = computed(() => props.data?.rules || [])
@@ -118,7 +122,6 @@ const titleOf = (id) => byId.value[id]?.title || id
 const short = (t) => (t && t.length > 5 ? t.slice(0, 5) + '…' : t)
 
 /* ---------- 布局：圆周初始化 + 200 步力导向（节点 ≤15，直接算） ---------- */
-const pos = ref({})
 function layout() {
   const ns = nodes.value
   const es = props.data?.edges || []
@@ -163,10 +166,7 @@ function layout() {
   }
   pos.value = p
 }
-watch(() => props.data, () => {
-  layout()
-  clear()
-}, { immediate: true })
+
 
 /** 箭头停在目标圆的边上 */
 function end(e) {
@@ -178,8 +178,6 @@ function end(e) {
 }
 
 /* ---------- 高亮：选中节点 / 选中联动规则 ---------- */
-const focusId = ref(null)
-const ruleIdx = ref(-1)
 const focusNode = computed(() => (focusId.value ? byId.value[focusId.value] : null))
 const hotNodes = computed(() => {
   if (ruleIdx.value >= 0) {
@@ -217,6 +215,10 @@ function clear() {
   focusId.value = null
   ruleIdx.value = -1
 }
+watch(() => props.data, () => {
+  layout()
+  clear()
+}, { immediate: true })
 </script>
 
 <style scoped>

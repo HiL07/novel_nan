@@ -214,6 +214,15 @@ public class AiServiceClient {
         return slowClient.post().uri("/api/extract/resonance-groups").body(body).retrieve().body(JsonNode.class);
     }
 
+    /** POST /api/materials/match：入库前比对 {queries, items, top} → {ok, matches: {卡片id: [{id, score, reason}]}, vector, message?} */
+    public JsonNode materialMatch(List<Map<String, Object>> queries, List<Map<String, Object>> items, int top) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("queries", queries);
+        body.put("items", items);
+        body.put("top", top);
+        return slowClient.post().uri("/api/materials/match").body(body).retrieve().body(JsonNode.class);
+    }
+
     /** POST /api/materials/profile：一批素材（≤20）→ 量级 {ok, tiers: {id: {tier, reason}}, skipped, usage}；cfg 为 null 时用 GGUF */
     public JsonNode materialProfile(List<Map<String, Object>> items, AiModelConfig cfg) {
         Map<String, Object> body = new HashMap<>(Map.of("items", items));

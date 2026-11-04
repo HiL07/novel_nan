@@ -27,10 +27,33 @@ const routes = [
     component: () => import('@/views/novel/workspace.vue')
   },
   {
+    // 侧边栏「素材库」：子菜单 全部素材 / 书库（一本书一个素材库工作区，同名小说算一本）
     path: '/material',
+    redirect: (to) => ({ path: '/material/all', query: to.query }),
+    meta: {
+      title: '素材库',
+      icon: 'Collection',
+      children: [
+        { path: '/material/all', title: '全部素材', icon: 'Collection' },
+        { path: '/material/books', title: '书库', icon: 'Notebook' }
+      ]
+    }
+  },
+  {
+    path: '/material/all',
     name: 'material',
-    component: () => import('@/views/material/index.vue'),
-    meta: { title: '素材库', icon: 'Collection' }
+    component: () => import('@/views/material/index.vue')
+  },
+  {
+    path: '/material/books',
+    name: 'materialBooks',
+    component: () => import('@/views/material/books.vue')
+  },
+  {
+    // 单本书库（?name=书名：书名里常有括号、加号，放查询参数）
+    path: '/material/book',
+    name: 'materialBook',
+    component: () => import('@/views/material/book.vue')
   },
   {
     path: '/inspire',

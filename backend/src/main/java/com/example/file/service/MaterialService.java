@@ -1181,6 +1181,18 @@ public class MaterialService {
         return v;
     }
 
+    /** 这本书（来源书）的全部素材（不含大字段 detail / attributes），书库和入库比对用 */
+    public List<Material> materialsOfBook(String book) {
+        if (book == null) {
+            return List.of();
+        }
+        return materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getCategory, Material::getSubtype, Material::getTitle, Material::getSummary,
+                        Material::getTags, Material::getSource, Material::getPinned, Material::getMergedInto,
+                        Material::getProfile, Material::getUseCount, Material::getUpdateTime)
+                .eq(Material::getSourceBook, book).orderByAsc(Material::getCategory).orderByDesc(Material::getUpdateTime));
+    }
+
     /** 这本书（来源书）的素材：「分类|归一化标题」→ 那条素材（id / 标题 / mergedInto） */
     public Map<String, Material> titleIndexOfBook(String book) {
         Map<String, Material> out = new LinkedHashMap<>();

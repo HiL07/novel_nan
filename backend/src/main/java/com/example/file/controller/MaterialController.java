@@ -31,9 +31,23 @@ public class MaterialController {
     private static final Logger log = LoggerFactory.getLogger(MaterialController.class);
 
     private final MaterialService materialService;
+    private final com.example.file.service.MaterialBookService bookService;
 
-    public MaterialController(MaterialService materialService) {
+    public MaterialController(MaterialService materialService, com.example.file.service.MaterialBookService bookService) {
         this.materialService = materialService;
+        this.bookService = bookService;
+    }
+
+    /** GET /api/material/books：书库列表 [{book, total, byCategory, pinned, workspaces, pending, updateTime}] */
+    @GetMapping("/books")
+    public ResponseEntity<Result<List<Map<String, Object>>>> books() {
+        return ResultResponses.handle(bookService::books, log, "查询书库失败");
+    }
+
+    /** GET /api/material/book?name=：单本书库 {book, materials, workspaces, resonance}（书名用查询参数：书名里常有括号、加号） */
+    @GetMapping("/book")
+    public ResponseEntity<Result<Map<String, Object>>> book(@org.springframework.web.bind.annotation.RequestParam String name) {
+        return ResultResponses.handle(() -> bookService.detail(name), log, "查询书库失败");
     }
 
     /** GET /api/material/categories：[{code, label, count}] */

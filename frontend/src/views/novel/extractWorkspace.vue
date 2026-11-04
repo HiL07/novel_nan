@@ -253,8 +253,10 @@
     </div>
 
     <!-- 卡片整理工作区 -->
-    <div v-if="started && mode === 'cards'" class="xw-pane xw-fixed">
+    <!-- 卡片整理 / 素材选择：第一次打开时才挂载，之后切换只显示 / 隐藏（卡片多时重建一次要好几秒），切回来时刷新数据 -->
+    <div v-if="started && visited.cards" v-show="mode === 'cards'" class="xw-pane xw-fixed">
       <CompileWorkspace
+        ref="cardsRef"
         :key="taskId"
         :extract-id="taskId"
         :file-name="fileName"
@@ -273,8 +275,8 @@
     </div>
 
     <!-- 素材选择工作区：从卡片里挑 → 存进素材库（同书已有同名的逐条选：更新已有 / 作为可选版本） -->
-    <div v-if="started && mode === 'materials'" class="xw-pane xw-fixed">
-      <MaterialSelect :key="taskId" :extract-id="taskId" />
+    <div v-if="started && visited.materials" v-show="mode === 'materials'" class="xw-pane xw-fixed">
+      <MaterialSelect ref="materialsRef" :key="taskId" :extract-id="taskId" />
     </div>
 
     <el-drawer v-model="resultOpen" :title="`提取结果 · ${bookName}`" size="60%" destroy-on-close>
@@ -363,6 +365,25 @@ const resultOpen = ref(false)
 /* 顶部三个工作区，记在地址 ?tab= 里（刷新 / 返回保持） */
 const MODES = ['extract', 'cards', 'materials']
 const mode = ref(MODES.includes(route.query.tab) ? route.query.tab : 'extract')
+const visited = reactive({ cards: false, materials: false }) // 打开过的工作区保留着，不再重建
+const cardsRef = ref(null)
+const materialsRef = ref(null)
+watch(
+  mode,
+  (m, old) => {
+    if (m === 'extract') return
+    if (!visited[m]) {
+      visited[m] = true // 第一次打开：组件挂载时自己加载
+      return
+    }
+    if (old !== m) (m === 'cards' ? cardsRef : materialsRef).value?.reload?.() // 切回来：两边会互相改卡片状态，刷新一下
+  },
+  { immediate: true }
+)
+watch(taskId, () => {
+  visited.cards = mode.value === 'cards'
+  visited.materials = mode.value === 'materials'
+})
 watch(mode, (m) => {
   if (route.name !== 'extractWorkspace' || (route.query.tab || 'extract') === m) return
   router.replace({ query: { ...route.query, tab: m === 'extract' ? undefined : m } })

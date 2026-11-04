@@ -43,9 +43,11 @@ public class ExtractCardService {
     private final MaterialService materialService;
     private final FileService fileService;
     private final ObjectMapper objectMapper;
+    private final AiServiceClient aiClient;
 
     public ExtractCardService(ExtractCardMapper cardMapper, NovelExtractMapper extractMapper, MaterialService materialService,
-                              FileService fileService, ObjectMapper objectMapper) {
+                              FileService fileService, ObjectMapper objectMapper, AiServiceClient aiClient) {
+        this.aiClient = aiClient;
         this.cardMapper = cardMapper;
         this.extractMapper = extractMapper;
         this.materialService = materialService;
@@ -152,6 +154,158 @@ public class ExtractCardService {
             }
         }
         return cards;
+    }
+
+    /**
+     * 入库比对的阈值。重排分（bge-reranker，2026-11-04《奥术神座》实测）：同一东西的不同写法 0.58–0.999，拿不准的 ≈0.4，
+     * 不同的人 ≈0.003，一部分 ↔ 整体 ≈0.03；重排不可用时退回 bge-small 余弦（分不开，阈值从严）。
+     */
+    static final double SAME = 0.85;      // 「一部分 ↔ 整体」重排也常有 0.7–0.93（骑士侍从 ↔ 骑士体系），所以补充进已有要 ≥0.85
+    static final double VERSION = 0.40;
+    static final double SAME_CHAR = 0.95; // 角色：父女 / 同姓也有 0.7（海恩伯爵 ↔ 菲丽丝·海恩），只有很高才建议
+    static final double VERSION_CHAR = 0.85;
+    static final double NOISE = 0.10;
+    static final double SAME_VEC = 0.88;
+    static final double VERSION_VEC = 0.80;
+
+    /**
+     * 入库前比对：这个工作区还没入库（NEW）和入库后又改过的卡片，在这本书已有的素材里找「可能是同一条」的
+     * （名称 / 别名包含 + 同分类向量相似度，Python material_match），每张卡最多 3 条，并给建议动作：
+     * 名称命中或 ≥ SAME = update（补充进已有）；≥ VERSION = version（作为可选版本）；其余 new。合并成员显示成它的主条目。
+     * → {matches: {卡片id: [{id, title, category, score, reason, extractId, workspace}]}, suggest: {卡片id: {action, targetId}}, vector, message?}
+     */
+    public Map<String, Object> matches(Long extractId) {
+        NovelExtract task = requireTask(extractId);
+        String book = MaterialService.bookOf(task.getFileName());
+        List<Material> mats = materialService.materialsOfBook(book);
+        Map<String, Object> out = new LinkedHashMap<>();
+        Map<String, Object> matches = new LinkedHashMap<>();
+        Map<String, Object> suggest = new LinkedHashMap<>();
+        out.put("matches", matches);
+        out.put("suggest", suggest);
+        out.put("vector", false);
+        List<ExtractCard> cards = cardMapper.selectList(new LambdaQueryWrapper<ExtractCard>()
+                        .eq(ExtractCard::getExtractId, extractId).ne(ExtractCard::getStatus, ExtractCard.SKIPPED))
+                .stream().filter(c -> ExtractCard.NEW.equals(c.getStatus()) || c.getMaterialId() == null).toList();
+        if (cards.isEmpty() || mats.isEmpty()) {
+            return out;
+        }
+        Map<Long, Material> byId = new HashMap<>();
+        mats.forEach(m -> byId.put(m.getId(), m));
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (Material m : mats) {
+            Map<String, Object> it = new LinkedHashMap<>();
+            it.put("id", m.getId());
+            it.put("category", m.getCategory());
+            it.put("title", m.getTitle());
+            Object aliases = m.getSource() == null ? null : m.getSource().get("aliases");
+            if (aliases instanceof List<?> l) {
+                it.put("aliases", l.stream().map(String::valueOf).limit(20).toList());
+            }
+            it.put("text", trim(m.getTitle() + "：" + Objects.toString(m.getSummary(), ""), 600));
+            items.add(it);
+        }
+        List<Map<String, Object>> queries = new ArrayList<>();
+        for (ExtractCard c : cards) {
+            Map<String, Object> d = c.getData() == null ? Map.of() : c.getData();
+            Map<String, Object> q = new LinkedHashMap<>();
+            q.put("id", c.getId());
+            q.put("category", c.getCategory());
+            q.put("title", c.getTitle());
+            if (d.get("aliases") instanceof List<?> l) {
+                q.put("aliases", l.stream().map(String::valueOf).limit(20).toList());
+            }
+            q.put("text", trim(c.getTitle() + "：" + Objects.toString(d.get("summary"), ""), 600));
+            queries.add(q);
+        }
+        JsonNode res = aiClientMatch(queries, items);
+        if (res == null) {
+            out.put("message", "AI 服务未启动，没法比对");
+            return out;
+        }
+        out.put("vector", res.path("vector").asBoolean(false));
+        boolean reranked = res.path("reranked").asBoolean(false);
+        out.put("reranked", reranked);
+        if (res.hasNonNull("message")) {
+            out.put("message", res.path("message").asText());
+        }
+        Map<Long, String> workspaceTitle = new HashMap<>();
+        res.path("matches").fields().forEachRemaining(en -> {
+            List<Map<String, Object>> list = new ArrayList<>();
+            java.util.Set<Long> seen = new java.util.HashSet<>();
+            for (JsonNode h : en.getValue()) {
+                Material m = byId.get(h.path("id").asLong());
+                if (m == null || (reranked && !"name".equals(h.path("reason").asText()) && h.path("score").asDouble() < NOISE)) {
+                    continue; // 重排后分数很低的向量候选是噪音（描述相似的另一个东西），不列
+                }
+                Material shown = m.getMergedInto() != null && byId.containsKey(m.getMergedInto()) ? byId.get(m.getMergedInto()) : m;
+                if (!seen.add(shown.getId())) {
+                    continue;
+                }
+                Map<String, Object> x = new LinkedHashMap<>();
+                x.put("id", shown.getId());
+                x.put("title", shown.getTitle());
+                x.put("category", shown.getCategory());
+                x.put("summary", shown.getSummary());
+                x.put("score", h.path("score").asDouble());
+                x.put("reason", h.path("reason").asText());
+                x.put("sameCategory", Objects.equals(m.getCategory(), cardCategory(cards, en.getKey())));
+                Object eid = shown.getSource() == null ? null : shown.getSource().get("extractId");
+                if (eid instanceof Number n) {
+                    x.put("extractId", n.longValue());
+                    x.put("workspace", workspaceTitle.computeIfAbsent(n.longValue(), this::workspaceTitleOf));
+                }
+                list.add(x);
+            }
+            matches.put(en.getKey(), list);
+            Map<String, Object> s = new LinkedHashMap<>();
+            if (list.isEmpty()) {
+                s.put("action", "new");
+            } else {
+                Map<String, Object> best = list.get(0);
+                double score = ((Number) best.get("score")).doubleValue();
+                String reason = String.valueOf(best.get("reason"));
+                boolean sameCat = !Boolean.FALSE.equals(best.get("sameCategory"));
+                boolean character = "character".equals(cardCategory(cards, en.getKey()));
+                double same = !reranked ? SAME_VEC : character ? SAME_CHAR : SAME;
+                double version = !reranked ? VERSION_VEC : character ? VERSION_CHAR : VERSION;
+                String action;
+                if ("name".equals(reason)) {
+                    action = sameCat ? "update" : "new"; // 跨分类同名（地点「音乐家协会」↔ 势力）只列出来，不建议合
+                } else if (!sameCat) {
+                    action = "new";                      // 跨分类的名称包含（「维克托的琴房」⊃「维克托」）不建议
+                } else {
+                    action = score >= same ? "update" : score >= version ? "version" : "new";
+                }
+                s.put("action", action);
+                if (!"new".equals(s.get("action"))) {
+                    s.put("targetId", best.get("id"));
+                }
+            }
+            suggest.put(en.getKey(), s);
+        });
+        return out;
+    }
+
+    private static String cardCategory(List<ExtractCard> cards, String id) {
+        return cards.stream().filter(c -> String.valueOf(c.getId()).equals(id)).map(ExtractCard::getCategory).findFirst().orElse("");
+    }
+
+    private JsonNode aiClientMatch(List<Map<String, Object>> queries, List<Map<String, Object>> items) {
+        try {
+            return aiClient.materialMatch(queries, items, 3);
+        } catch (Exception e) {
+            log.warn("入库比对调用 AI 服务失败：{}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String workspaceTitleOf(Long extractId) {
+        NovelExtract t = extractMapper.selectById(extractId);
+        if (t == null) {
+            return "已删除的工作区";
+        }
+        return t.getTitle() != null && !t.getTitle().isBlank() ? t.getTitle() : "工作区 #" + t.getId();
     }
 
     /** 手改卡片（只收可改的字段）→ 旧内容进历史，标为手改过 */

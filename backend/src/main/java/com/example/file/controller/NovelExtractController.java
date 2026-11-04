@@ -50,6 +50,12 @@ public class NovelExtractController {
         return ResultResponses.handle(() -> cardService.list(id), log, "查询卡片失败，extractId=" + id);
     }
 
+    /** GET /api/novel/extract/{id}/cards/matches：入库前比对（这本书已有的素材里找可能是同一条的）+ 建议动作，见 ExtractCardService.matches */
+    @GetMapping("/{id}/cards/matches")
+    public ResponseEntity<Result<Map<String, Object>>> cardMatches(@PathVariable Long id) {
+        return ResultResponses.handle(() -> cardService.matches(id), log, "入库比对失败，extractId=" + id);
+    }
+
     /** POST /api/novel/extract/card/{cid} {title?, subtype?, summary?, detail?, attributes?, tags?, tier?, category?}：手改卡片 */
     @PostMapping("/card/{cid}")
     public ResponseEntity<Result<ExtractCard>> updateCard(@PathVariable Long cid, @RequestBody(required = false) Map<String, Object> body) {

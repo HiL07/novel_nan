@@ -37,6 +37,10 @@ export const searchMaterials = ({ tags = [], excludeBooks = [], ...rest } = {}) 
     tags: tags.length ? tags.join(',') : undefined,
     excludeBooks: excludeBooks.length ? excludeBooks.join(',') : undefined
   })
+/** 书库列表 [{book, total, byCategory, pinned, workspaces, pending, updateTime}] */
+export const listBooks = () => get('/api/material/books')
+/** 单本书库 {book, materials, workspaces, resonance} */
+export const getBook = (name) => get('/api/material/book', { name })
 /** 「手动添加」（无来源书）在按书筛选时的取值 */
 export const MANUAL_BOOK = '__manual__'
 /** 来源书 [{book（null = 手动添加）, count, pinned（保留数）, pending（待确认候选数）}] */
