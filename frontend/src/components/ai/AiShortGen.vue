@@ -9,14 +9,15 @@
     <div class="short-gen" @click.stop>
       <div class="title">{{ title }}</div>
       <el-input v-model="desc" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }" maxlength="500" :placeholder="placeholder" />
+      <slot name="extra" />
       <div class="row">
-        <el-button size="small" type="primary" plain :icon="MagicStick" :loading="busy" :disabled="!desc.trim()" @click="gen">
+        <el-button size="small" type="primary" plain :icon="MagicStick" :loading="busy" :disabled="!desc.trim() && !allowEmpty" @click="gen">
           {{ result ? '再生成一个' : 'AI 生成' }}
         </el-button>
         <span class="muted">{{ limit }} 字以内</span>
       </div>
       <template v-if="result !== ''">
-        <el-input v-model="result" :maxlength="limit" show-word-limit size="small" />
+        <el-input v-model="result" :type="limit > 30 ? 'textarea' : 'text'" :autosize="{ minRows: 2, maxRows: 6 }" :maxlength="limit" show-word-limit size="small" />
         <div class="ops">
           <el-button size="small" @click="visible = false">取消</el-button>
           <el-button size="small" type="primary" :disabled="!result.trim()" @click="use">{{ useText }}</el-button>
@@ -38,7 +39,8 @@ const props = defineProps({
   text: { type: String, default: 'AI 生成' },
   placeholder: { type: String, default: '描述你想要的感觉' },
   useText: { type: String, default: '使用' },
-  limit: { type: Number, default: 7 }
+  limit: { type: Number, default: 7 },
+  allowEmpty: { type: Boolean, default: false } // 描述可以空着（按写作参数 / 素材生成）
 })
 const emit = defineEmits(['use'])
 

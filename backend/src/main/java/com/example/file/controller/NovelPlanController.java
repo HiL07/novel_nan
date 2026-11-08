@@ -30,7 +30,7 @@ public class NovelPlanController {
         this.service = service;
     }
 
-    /** POST /api/novel/plan/{novelId}/idea {premise?, directions?, bookConfig?, tone?, conditions?, count?, model}（故事优先 ① 灵感） */
+    /** POST /api/novel/plan/{novelId}/idea {premise?, directions?, bookConfig?, tone?, conditions?, count?, materialIds?, model}（故事优先 ① 灵感） */
     @PostMapping("/idea")
     public ResponseEntity<Result<Map<String, Object>>> idea(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
         return ResultResponses.handle(() -> service.idea(novelId, body), log, "生成灵感失败");
@@ -48,7 +48,7 @@ public class NovelPlanController {
         return ResultResponses.handle(() -> service.cast(novelId, body), log, "生成人物和元素失败");
     }
 
-    /** POST /api/novel/plan/{novelId}/assist {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model}（参数这一步的小帮手） */
+    /** POST /api/novel/plan/{novelId}/assist {kind: direction|style|conditions|premise|sellingPoint, text, premise?, conditions?, directions?, bookConfig?, materialIds?, model}（参数这一步的小帮手） */
     @PostMapping("/assist")
     public ResponseEntity<Result<Map<String, Object>>> assist(@PathVariable String novelId, @RequestBody Map<String, Object> body) {
         return ResultResponses.handle(() -> service.assist(novelId, body), log, "AI 生成失败");

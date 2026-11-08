@@ -285,13 +285,16 @@ def chat(cfg: ModelConfig, messages: list[dict], max_tokens: int, json_mode: boo
 
 
 def complete(cfg: ModelConfig, messages: list[dict], *, max_tokens: int, temperature: float, top_p: float,
-             json_mode: bool = False, retries: int = 2, timeout: float | None = None) -> dict:
+             json_mode: bool = False, retries: int = 2, timeout: float | None = None, think: bool = True) -> dict:
     """创作用的一次对话：返回 {text, promptTokens, completionTokens, finishReason: stop|length}。
-    token 数取服务端 usage（没有时为 0，由调用方估算）。"""
+    token 数取服务端 usage（没有时为 0，由调用方估算）。think=False：关掉推理模型的思考（思考 token 也算进 max_tokens，
+    上限只有几百的短任务会被吃光、content 为空）；不认这个参数的服务自动去掉（_post_chat）。"""
     payload = {"model": cfg.model, "messages": messages, "max_tokens": max_tokens,
                "temperature": temperature, "top_p": top_p}
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if not think:
+        payload["thinking"] = {"type": "disabled"}
     data = _post_chat(cfg, payload, retries, timeout)
     choice = data["choices"][0]
     usage = data.get("usage") or {}

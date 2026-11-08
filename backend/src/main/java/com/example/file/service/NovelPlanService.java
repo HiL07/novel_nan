@@ -38,7 +38,7 @@ public class NovelPlanService {
         this.genService = genService;
     }
 
-    /** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, model} → {ideas[], usage, model} */
+    /** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, materialIds?（架空版）, model} → {ideas[], usage, model} */
     public Map<String, Object> idea(String novelId, Map<String, Object> req) {
         Map<String, Object> body = story(req, false);
         body.put("directions", strings(req.get("directions")).stream().limit(12).toList());
@@ -59,14 +59,17 @@ public class NovelPlanService {
             }
         }
         body.put("feedback", feedback);
+        body.put("materials", portableMaterials(req));
         return python("idea", novelId, body, req.get("model"));
     }
 
-    /** 参数这一步的小帮手 {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model} → {kind, value} */
+    /** 参数这一步的小帮手 {kind: direction|style|conditions|premise|sellingPoint, text, premise?, conditions?, directions?, bookConfig?, materialIds?（架空版）, model} → {kind, value} */
     public Map<String, Object> assist(String novelId, Map<String, Object> req) {
         Map<String, Object> body = story(req, false);
         body.put("kind", trim(req.get("kind"), 20));
         body.put("text", trim(req.get("text"), 1000));
+        body.put("directions", strings(req.get("directions")).stream().limit(12).toList());
+        body.put("materials", portableMaterials(req));
         return python("assist", novelId, body, req.get("model"));
     }
 
@@ -283,6 +286,11 @@ public class NovelPlanService {
 
     private static String joined(Object v) {
         return v instanceof List<?> l ? String.join("、", l.stream().map(String::valueOf).toList()) : trim(v, 120);
+    }
+
+    /** 参数 · 灵感这一步只用架空版（原素材带着原作的人名地名） */
+    private List<Map<String, Object>> portableMaterials(Map<String, Object> req) {
+        return materials(req).stream().filter(m -> m.get("portable") != null).toList();
     }
 
     /** 选中的素材 → Python 素材条目（多版本 + 量级 / 阶段适配） */

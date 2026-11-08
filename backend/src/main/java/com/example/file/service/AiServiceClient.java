@@ -223,6 +223,19 @@ public class AiServiceClient {
         return slowClient.post().uri("/api/materials/match").body(body).retrieve().body(JsonNode.class);
     }
 
+    /** POST /api/materials/portable：架空加工单条 {item, targetWorld} → {ok, portable, usage} / {ok: false, message}；cfg 为 null 时用 GGUF */
+    public JsonNode materialPortable(Map<String, Object> item, String targetWorld, AiModelConfig cfg) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("item", item);
+        body.put("targetWorld", targetWorld == null ? "" : targetWorld);
+        if (cfg == null) {
+            body.put("gguf", true);
+        } else {
+            body.put("model", modelBody(cfg));
+        }
+        return slowClient.post().uri("/api/materials/portable").body(body).retrieve().body(JsonNode.class);
+    }
+
     /** POST /api/materials/profile：一批素材（≤20）→ 量级 {ok, tiers: {id: {tier, reason}}, skipped, usage}；cfg 为 null 时用 GGUF */
     public JsonNode materialProfile(List<Map<String, Object>> items, AiModelConfig cfg) {
         Map<String, Object> body = new HashMap<>(Map.of("items", items));

@@ -37,10 +37,6 @@ export const searchMaterials = ({ tags = [], excludeBooks = [], ...rest } = {}) 
     tags: tags.length ? tags.join(',') : undefined,
     excludeBooks: excludeBooks.length ? excludeBooks.join(',') : undefined
   })
-/** 书库列表 [{book, total, byCategory, pinned, workspaces, pending, updateTime}] */
-export const listBooks = () => get('/api/material/books')
-/** 单本书库 {book, materials, workspaces, resonance} */
-export const getBook = (name) => get('/api/material/book', { name })
 /** 「手动添加」（无来源书）在按书筛选时的取值 */
 export const MANUAL_BOOK = '__manual__'
 /** 来源书 [{book（null = 手动添加）, count, pinned（保留数）, pending（待确认候选数）}] */
@@ -138,3 +134,29 @@ export const profileStatus = () => get('/api/material/profile/status')
 /** {model: {source: api, configId?} | {source: gguf}, onlyMissing?} */
 export const startProfile = (body) => post('/api/material/profile/start', body)
 export const stopProfile = () => post('/api/material/profile/stop')
+
+/* ---------- 架空工作区（2026-11-06）：每次架空一个工作区，勾选原素材加入待加工，后台逐条生成架空版（原素材不动） ---------- */
+const WS = '/api/material/portable-ws'
+/** 工作区列表 [{id, title, targetWorld, model, filter, status IDLE|RUNNING|PAUSED, message, counts {QUEUED, RUNNING, DONE, FAILED}, current[]}] */
+export const listPortableWs = () => get(`${WS}/list`)
+export const getPortableWs = (id) => get(`${WS}/${id}`)
+/** {title?, targetWorld?, model?: {source: api|gguf}} */
+export const createPortableWs = (body) => post(`${WS}/create`, body)
+/** {title?, targetWorld?, model?, filter?} */
+export const updatePortableWs = (id, body) => post(`${WS}/${id}/update`, body)
+/** → {portables, blocked} */
+export const portableWsDeletePreview = (id) => get(`${WS}/${id}/delete-preview`)
+/** {withMaterials} → {deletedMaterials} */
+export const deletePortableWs = (id, withMaterials) => post(`${WS}/${id}/delete`, { withMaterials })
+/** {category?, sourceBook?, keyword?, tags?: [], tagMode?, state: all|none|QUEUED|RUNNING|DONE|FAILED, page, size} → {total, records} */
+export const portableWsMaterials = (id, { tags = [], ...rest } = {}) =>
+  get(`${WS}/${id}/materials`, { ...rest, tags: tags.length ? tags.join(',') : undefined })
+/** {ids} | {all: true, filter}，redo? → {added, requeued, skipped} */
+export const portableWsEnqueue = (id, body) => post(`${WS}/${id}/enqueue`, body)
+/** {ids} → {removed} */
+export const portableWsDequeue = (id, ids) => post(`${WS}/${id}/dequeue`, { ids })
+export const startPortableWs = (id) => post(`${WS}/${id}/start`)
+export const pausePortableWs = (id) => post(`${WS}/${id}/pause`)
+
+/** 待确认：有待入库卡片的工作区 [{extractId, title, book, count}] */
+export const pendingWorkspaces = () => get('/api/material/pending-workspaces')

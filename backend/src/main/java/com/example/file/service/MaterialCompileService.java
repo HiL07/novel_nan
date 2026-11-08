@@ -120,10 +120,11 @@ public class MaterialCompileService {
         NovelExtractService.ModelChoice choice = extractService.resolveModel(model); // 先校验模型，避免建了任务才发现没配置
         String mode = String.valueOf(clean.get("mode"));
         // 共鸣素材的输入是这个工作区的卡片，不是提取结果；但和提取共用 Python 的队列，提取进行中时同样要先暂停
-        if ("resonance".equals(mode) && (NovelExtract.QUEUED.equals(task.getStatus()) || NovelExtract.RUNNING.equals(task.getStatus()))) {
+        boolean cardInput = "resonance".equals(mode); // 输入是这个工作区的卡片，不读提取结果
+        if (cardInput && (NovelExtract.QUEUED.equals(task.getStatus()) || NovelExtract.RUNNING.equals(task.getStatus()))) {
             throw new BizException(400, "提取进行中，请先暂停提取再整理");
         }
-        CompileInput input = "resonance".equals(mode) ? null : compileInput(task);
+        CompileInput input = cardInput ? null : compileInput(task);
         int entities;
         String what;
         if ("resonance".equals(mode)) {

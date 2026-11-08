@@ -57,7 +57,11 @@
                     <el-option label="包含全部" value="all" />
                     <el-option label="包含任一" value="any" />
                   </el-select>
+                  <el-select v-model="portKind" clearable placeholder="原素材 / 架空版" style="width: 150px" @change="search(1)">
+                    <el-option v-for="o in PORT_KINDS" :key="o.value" :label="o.label" :value="o.value" />
+                  </el-select>
                   <el-button type="primary" :icon="Search" @click="search(1)">检索</el-button>
+                  <el-button title="架空加工在「架空工作区」里做：每次一个工作区，勾选素材加入待加工" @click="router.push('/material/portable')">去架空工作区</el-button>
                 </template>
                 <template v-else-if="mode === 'vector'">
                   <el-select
@@ -157,6 +161,25 @@
                       <el-tag v-if="r.material.source?.type === 'merge'" size="small" type="success" title="由多条素材合并而来，打开可看各个可选版本">
                         {{ r.material.source.variants?.length || 0 }} 种写法
                       </el-tag>
+                      <el-tag
+                        v-if="r.material.source?.type === 'portable'"
+                        size="small"
+                        type="danger"
+                        effect="plain"
+                        :title="`架空工作区「${r.material.source.workspaceTitle || '?'}」由原素材「${r.material.source.originTitle}」生成`"
+                      >
+                        架空版 · {{ r.material.profile?.portable?.portability === 'direct' ? '直接可用' : '需要适配' }}
+                      </el-tag>
+                      <el-tag
+                        v-else-if="r.material.portables?.length"
+                        size="small"
+                        effect="plain"
+                        class="clickable"
+                        :title="r.material.portables.map((p) => `「${p.workspaceTitle || '?'}」${p.title}`).join('、') + '（点击打开第一个）'"
+                        @click.stop="openMaterialById(r.material.portables[0].id)"
+                      >
+                        已架空 {{ r.material.portables.length }}
+                      </el-tag>
                       <el-tag v-if="r.matchedLabel" size="small" type="warning" title="检索命中的是这个版本">命中：{{ r.matchedLabel }}</el-tag>
                       <el-tag v-if="tierOf(r.material)" size="small" type="info" effect="plain" :title="tierLabel(tierOf(r.material))">
                         量级 {{ tierOf(r.material) }}
@@ -212,10 +235,24 @@
             待确认<el-badge v-if="pending" :value="pending" class="pending-badge" />
           </template>
           <div class="pending-tip">
-            AI 在「小说提取」中发现的素材候选。可修改后保存到素材库，或忽略；只有确认保存的才会入库。
-            提取时可在「文件管理 → 小说提取」中选择素材类型与关注点。
+            各提取工作区「卡片整理」后还没存进素材库的卡片：选一个工作区，和工作区里的「素材选择」一样逐条选 补充进已有 / 作为可选版本 / 新增，或跳过。
           </div>
-          <CandidateReview ref="reviewRef" @changed="onCandidatesChanged" />
+          <div v-if="pendingWs.length" class="pending-ws">
+            <el-radio-group v-model="pendingWsId" size="small">
+              <el-radio-button v-for="w in pendingWs" :key="w.extractId" :value="w.extractId">
+                《{{ w.book }}》· {{ w.title }}（{{ w.count }}）
+              </el-radio-button>
+            </el-radio-group>
+          </div>
+          <el-empty v-else description="没有待入库的卡片" :image-size="60" />
+          <div v-if="pendingWsId" class="pending-select">
+            <MaterialSelect :key="pendingWsId" :extract-id="pendingWsId" @changed="onCardsSaved" />
+          </div>
+          <el-collapse v-if="oldPending" class="pending-old">
+            <el-collapse-item :title="`旧版待确认候选（${oldPending}）：改版前提取时直接生成的候选`">
+              <CandidateReview ref="reviewRef" @changed="onCandidatesChanged" />
+            </el-collapse-item>
+          </el-collapse>
         </el-tab-pane>
       </el-tabs>
     </el-card>
@@ -236,26 +273,35 @@
       </template>
     </el-dialog>
 
-    <MaterialEditor v-model="editor.visible" :material="editor.material" :default-category="category || 'world'" @saved="refreshAll" @deleted="refreshAll" />
+    <MaterialEditor
+      v-model="editor.visible"
+      :material="editor.material"
+      :default-category="category || 'world'"
+      @saved="refreshAll"
+      @deleted="refreshAll"
+      @open-material="openMaterialById"
+    />
   </div>
 </template>
 
 <script setup>
 import { computed, onActivated, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { Collection, Delete, MagicStick, Notebook, Plus, Reading, Search, Star, StarFilled } from '@element-plus/icons-vue'
 import CandidateReview from '@/components/material/CandidateReview.vue'
+import MaterialSelect from '@/components/material/MaterialSelect.vue'
 import MaterialEditor from '@/components/material/MaterialEditor.vue'
 import MergePanel from '@/components/material/MergePanel.vue'
 import ProfilePanel from '@/components/material/ProfilePanel.vue'
 import {
   MANUAL_BOOK, categoryOf, deleteMaterialSource, getMaterial, getMaterialCategories, getMaterialSources, getMaterialTags,
-  getVectorModelId, pendingCandidateCount, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, tierLabel, tierOf,
-  vectorFeedback, vectorIndex, vectorSearch
+  getVectorModelId, pendingCandidateCount, pendingWorkspaces, pinMaterial, searchMaterials, semanticSearch, setVectorModelId, tierLabel, tierOf, vectorFeedback, vectorIndex, vectorSearch
 } from '@/api/material'
 import { isEmbeddingModel, listModels } from '@/api/localModel'
 import { errorMessage } from '@/api/request'
 
+const router = useRouter()
 const tab = ref('library')
 const categories = ref([])
 const category = ref('')
@@ -264,6 +310,15 @@ const pending = ref(0)
 
 const mode = ref('keyword')
 const keyword = ref('')
+// 原素材 / 架空版（2026-11-06）：后端 kind = origin | portable | unported，portability = direct | adapt（只看架空版）
+const PORT_KINDS = [
+  { value: 'origin', label: '只看原素材' },
+  { value: 'unported', label: '还没架空的原素材' },
+  { value: 'portable', label: '只看架空版' },
+  { value: 'direct', label: '架空版 · 直接可用' },
+  { value: 'adapt', label: '架空版 · 需要适配' }
+]
+const portKind = ref('')
 const selectedTags = ref([])
 const tagMode = ref('all')
 const page = ref(1)
@@ -326,6 +381,7 @@ async function loadMeta() {
     categories.value = c
     tagCloud.value = t
     pending.value = p
+    loadPendingWs()
     sources.value = s.filter((x) => x.count)
   } catch (e) {
     ElMessage.error(errorMessage(e, '加载素材库失败'))
@@ -339,7 +395,9 @@ async function search(p = 1) {
     const data = await call(searchMaterials({
       category: category.value || undefined, tags: selectedTags.value, tagMode: tagMode.value,
       keyword: keyword.value.trim() || undefined, sourceBook: sourceBook.value || undefined,
-      pinned: pinnedOnly.value || undefined, page: p, size: pageSize
+      pinned: pinnedOnly.value || undefined, page: p, size: pageSize,
+      kind: ['origin', 'portable', 'unported'].includes(portKind.value) ? portKind.value : undefined,
+      portability: ['direct', 'adapt'].includes(portKind.value) ? portKind.value : undefined
     }), '检索失败')
     records.value = data.records
     total.value = data.total
@@ -520,6 +578,25 @@ async function onCandidatesChanged() {
   await refreshAll()
 }
 
+/* ---------- 待确认：各工作区还没入库的卡片 ---------- */
+const pendingWs = ref([])
+const pendingWsId = ref(null)
+const oldPending = computed(() => Math.max(0, pending.value - pendingWs.value.reduce((n, w) => n + w.count, 0)))
+async function loadPendingWs() {
+  try {
+    const res = await pendingWorkspaces()
+    pendingWs.value = res.code === 0 ? res.data || [] : []
+  } catch {
+    pendingWs.value = []
+  }
+  // 选中的工作区卡片都处理完了也保持选中（表格里还能看已入库 / 已跳过）；没选过就选第一个
+  if (pendingWsId.value == null) pendingWsId.value = pendingWs.value[0]?.extractId ?? null
+}
+async function onCardsSaved() {
+  await loadMeta()
+  if (mode.value === 'keyword') search(page.value)
+}
+
 watch(mode, (m) => {
   if (m === 'keyword') search(1)
   if (m === 'vector') {
@@ -536,6 +613,20 @@ onActivated(async () => {
 </script>
 
 <style scoped>
+.clickable {
+  cursor: pointer;
+}
+.pending-ws {
+  margin-bottom: 10px;
+}
+.pending-select {
+  height: 62vh;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+.pending-old {
+  margin-top: 12px;
+}
 .box-card {
   border: none;
   border-radius: 8px;

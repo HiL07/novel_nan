@@ -300,6 +300,27 @@ public class ExtractCardService {
         }
     }
 
+    /**
+     * 素材库「待确认」用：有还没入库（NEW）卡片的工作区 [{extractId, title, book, count}]，按卡片数从多到少
+     */
+    public List<Map<String, Object>> pendingWorkspaces() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        newCountsByExtract().forEach((id, n) -> {
+            NovelExtract t = extractMapper.selectById(id);
+            if (t == null) {
+                return;
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("extractId", id);
+            m.put("title", workspaceTitleOf(id));
+            m.put("book", MaterialService.bookOf(t.getFileName()));
+            m.put("count", n);
+            out.add(m);
+        });
+        out.sort((a, b) -> Long.compare((Long) b.get("count"), (Long) a.get("count")));
+        return out;
+    }
+
     private String workspaceTitleOf(Long extractId) {
         NovelExtract t = extractMapper.selectById(extractId);
         if (t == null) {

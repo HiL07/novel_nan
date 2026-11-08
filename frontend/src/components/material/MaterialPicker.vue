@@ -132,7 +132,8 @@ const props = defineProps({
   title: { type: String, default: '' },
   feedbackContext: { type: String, default: '' },
   editBlocked: { type: Boolean, default: false },
-  novelId: { type: String, default: '' }
+  novelId: { type: String, default: '' },
+  kind: { type: String, default: '' } // origin / portable（只列架空版）/ unported；空 = 全部
 })
 const emit = defineEmits(['update:modelValue', 'update:excludeBooks', 'apply', 'cancel'])
 
@@ -232,7 +233,7 @@ async function search() {
   try {
     const res = await searchMaterials({
       category: category.value || undefined, keyword: keyword.value.trim() || undefined, tags: tags.value, tagMode: 'all',
-      excludeBooks: props.excludeBooks, page: 1, size: 50
+      excludeBooks: props.excludeBooks, kind: props.kind || undefined, page: 1, size: 50
     })
     if (res.code !== 0) throw new Error(res.message)
     records.value = res.data.records
@@ -250,7 +251,7 @@ async function runVector() {
   try {
     const res = await vectorSearch({
       query, category: category.value || undefined, tags: tags.value, excludeBooks: props.excludeBooks, limit: 30,
-      novelId: props.novelId || undefined
+      novelId: props.novelId || undefined, kind: props.kind || undefined
     })
     if (res.code !== 0) throw new Error(res.message)
     vector.value = { ...res.data, query }

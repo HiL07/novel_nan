@@ -4,7 +4,7 @@
       先定<b>写作参数</b>和<b>故事灵感</b> → AI 生成<b>设定</b>（世界规则、力量体系、世界机制、关键资源和主角）→
       在设定的基础上搭<b>全书骨架</b>（分卷 + 阶段），同时按骨架配好<b>配角、势力 / 地点 / 物品 / 怪物和阶段表</b> → <b>写进工作区</b>。
       每一步进入时 AI 先自动生成，每一块都能直接改、也能给个方向让 AI 重来；写进工作区之后在「设定」页里也都能继续改。
-      <b>不用素材库也能完整走下来</b>，只生成框架，不写正文。
+      <b>不用素材库也能完整走下来</b>（想用的话，第一步可以挑几条架空素材作补充），只生成框架，不写正文。
     </div>
 
     <el-steps v-if="!externalSteps" :active="stepIndex" finish-status="success" simple class="steps">
@@ -13,8 +13,20 @@
 
     <!-- 故事优先 ① 写作参数 + 灵感 -->
     <div v-show="st.step === 'idea'" class="pane">
+      <div class="section-head"><span class="col-title">架空素材</span><span class="muted">可选，最多 {{ MAX_PLAN_MATERIALS }} 条；这一步的 AI 会参考它们，但始终以你填的内容为主</span></div>
+      <div class="chips">
+        <el-tag v-for="(m, i) in st.materials" :key="m.id" closable class="mat-chip" :type="m.portability === 'direct' ? 'success' : ''" effect="plain"
+                :title="m.portability === 'direct' ? '直接可用（点击查看）' : '需要适配（点击查看）'" @click="openMaterial(m.id)" @close="st.materials.splice(i, 1)">
+          {{ m.title }}
+        </el-tag>
+        <el-button size="small" @click="openMatPicker(false)">挑选…</el-button>
+        <el-button size="small" title="按写作参数、创作方向和你的想法检索架空版，预选最相关的几条，确认后才放进来" @click="openMatPicker(true)">按参数推荐</el-button>
+      </div>
+      <MaterialPicker v-model="matPicker.visible" pick-only kind="portable" title="挑选架空素材（只列架空版）" :initial-selected="st.materials"
+                      :vector-query="matPicker.query" :auto-vector="matPicker.auto" @apply="applyMaterials" />
+      <MaterialEditor v-model="matEditor.visible" :material="matEditor.material" @open-material="openMaterial" />
       <div class="section-head"><span class="col-title">写作参数</span><span class="muted">每一步都会带上；写正文时作为「作品定位」</span></div>
-      <BookConfigForm v-model="st.bookConfig" :assist="assistFn" />
+      <BookConfigForm v-model="st.bookConfig" :assist="assistFn" :material-count="st.materials.length" :use-materials="st.useMaterials" />
       <div class="section-head"><span class="col-title">创作方向</span><span class="muted">可选，点选几个；也可以描述你想写的，让 AI 提炼一个</span></div>
       <div class="chips">
         <el-check-tag v-for="d in allDirections" :key="d" :checked="st.directions.includes(d)" @change="toggleDirection(d)">{{ d }}</el-check-tag>
@@ -24,12 +36,16 @@
       <el-form label-width="76px" size="small" class="mt">
         <el-form-item label="你的想法">
           <AiWandInput v-model="st.premise" :run="(t) => assistFn('premise', t)" :maxlength="500"
+                       :allow-empty="matOn('premise')" empty-tip="先写几句，AI 再帮你润色；带上架空素材时空着也能点"
                        placeholder="一句话就行，如：法师，西幻冒险；也可以留空让 AI 按参数自由构思" />
+          <el-checkbox v-if="st.materials.length" v-model="st.useMaterials.premise" size="small">润色时带上架空素材（{{ st.materials.length }}）</el-checkbox>
         </el-form-item>
         <el-form-item label="补充要求">
           <AiWandInput v-model="st.conditions" :run="(t) => assistFn('conditions', t)" :maxlength="500" tip="AI 整理成一条条要求"
                        done-text="整理" empty-tip="随手写几句你的要求，AI 帮你整理成一条条"
+                       :allow-empty="matOn('conditions')"
                        placeholder="可选，如：不要后宫；主角是女性。也可以随手写一段话，点右下角魔术棒整理" />
+          <el-checkbox v-if="st.materials.length" v-model="st.useMaterials.conditions" size="small">整理时把素材的「一定保留」也列进来（{{ st.materials.length }}）</el-checkbox>
         </el-form-item>
         <el-form-item label="模型"><ModelPicker v-model="model" store-key="nan_novel.plan.model" /></el-form-item>
       </el-form>
@@ -40,13 +56,15 @@
           </el-button>
           <el-button v-if="st.ideas?.length" :disabled="!!busy" @click="openRegen">不满意，说说原因再生成…</el-button>
           <el-button :loading="busy === 'auto'" :disabled="!!busy" @click="runAuto">一键全自动（停在写入前）</el-button>
+          <el-checkbox v-if="st.materials.length" v-model="st.useMaterials.idea" size="small">带上架空素材（{{ st.materials.length }}）</el-checkbox>
           <span class="muted">约 5 次模型调用、2~3 分钟（大模型几分钱）</span>
         </div>
         <div class="basis muted idea-basis">
           <el-icon><InfoFilled /></el-icon>
           灵感根据这些生成：<b>写作参数</b>（平台 / 题材 / 标签 / 读者 / 卖点 / 人称 / 文风 / 字数）、勾选的<b>创作方向</b>、
           <b>你的想法</b>（空着 = AI 按参数自由发挥）、<b>补充要求</b>（必须满足）；用「说说原因再生成」时还会带上你写过的所有反馈。
-          不用素材库，也不看这个工作区已有的设定和章节。
+          <template v-if="matOn('idea')"><b>架空素材</b>只作补充：每个灵感至少用上一条，核心仍来自你填的内容。</template>
+          <template v-else>不用素材库。</template>不看这个工作区已有的设定和章节。
           <el-button v-if="lastRun" link type="primary" size="small" @click="logicOpen = true">查看这批的生成逻辑</el-button>
         </div>
       </div>
@@ -58,6 +76,13 @@
             <b>{{ it.title || `灵感 ${i + 1}` }}</b>
             <div class="hook">{{ it.hook }}</div>
             <div class="muted">{{ it.core }}</div>
+            <div v-if="it.materials" class="idea-mats">
+              <template v-if="it.materials.length">
+                用了：<el-button v-for="m in it.materials" :key="m.id" link type="primary" size="small" @click.stop="openMaterial(m.id)">{{ m.title }}</el-button>
+                <span v-if="it.materials[0].used" class="muted">（{{ it.materials[0].used }}）</span>
+              </template>
+              <span v-else class="muted">没用上素材</span>
+            </div>
           </div>
         </div>
         <el-form v-if="st.idea" label-width="76px" size="small" class="mt">
@@ -108,6 +133,7 @@
             <el-descriptions-item label="创作方向">{{ lastRun.inputs.directions?.join('、') || '（没选）' }}</el-descriptions-item>
             <el-descriptions-item label="你的想法">{{ lastRun.inputs.premise || '（空着，AI 按参数自由发挥）' }}</el-descriptions-item>
             <el-descriptions-item label="补充要求">{{ lastRun.inputs.conditions || '（没填）' }}</el-descriptions-item>
+            <el-descriptions-item label="架空素材">{{ lastRun.materials?.join('、') || '（没带）' }}</el-descriptions-item>
             <template v-for="(f, i) in lastRun.feedback || []" :key="i">
               <el-descriptions-item :label="`反馈 ${i + 1} · 不满意`">{{ f.dislike || '—' }}</el-descriptions-item>
               <el-descriptions-item :label="`反馈 ${i + 1} · 希望`">{{ f.want || '—' }}</el-descriptions-item>
@@ -434,7 +460,9 @@ import TokenUsageBar from '@/components/ai/TokenUsageBar.vue'
 import BookConfigForm from '@/components/novel/BookConfigForm.vue'
 import BookSkeleton from '@/components/novel/BookSkeleton.vue'
 import PlanCastCard from '@/components/novel/PlanCastCard.vue'
-import { getMaterialSources } from '@/api/material'
+import MaterialEditor from '@/components/material/MaterialEditor.vue'
+import MaterialPicker from '@/components/material/MaterialPicker.vue'
+import { getMaterial, getMaterialSources } from '@/api/material'
 import {
   ACTION_LABELS, DIRECTIONS, ELEMENT_LABELS, PACES, applyPlan, blankBookConfig, bookLayout, bookStages, getPlanDraft,
   planAssist, planBook, planCast, planEnrich, planIdea, planOutline, planReview, planSettings, planSettingsPart,
@@ -469,6 +497,8 @@ const blankState = () => ({
   enrich: null, enrichOriginals: {},
   volumePlan: [], volumeCount: 0, pace: 'normal', partUndo: {}, related: null,
   customDirections: [], ideaFeedback: [], ideaRuns: [],
+  // 架空素材篮（[{id, title, category, portability}]）和这一步 5 处 AI 各自的开关
+  materials: [], useMaterials: { sellingPoint: true, style: true, premise: true, conditions: true, idea: true },
   castIssues: [], castAt: '', runs: {}, sig: {},   // 骨架这一步的人物 / 元素检查；每次 AI 生成的依据快照；生成时输入的指纹（改过才问要不要重来）   // 自定义创作方向；重新生成时的反馈（全部记录）；每批灵感的输入快照   // 骨架的分卷方向 / 卷数 / 节奏；设定分模块重来的撤销
   settings: null, outline: null, review: null, originals: {}, appliedAt: ''
 })
@@ -742,13 +772,43 @@ async function step(name, fn) {
 }
 
 /** 生成一批灵感；withFeedback = 带上作者写过的所有反馈（「说说原因再生成」）。每批记一份输入快照（「查看生成逻辑」） */
+/* ---------- 架空素材篮：这一步的 AI 参考，只作补充 ---------- */
+const MAX_PLAN_MATERIALS = 8
+const matOn = (key) => !!st.materials.length && !!st.useMaterials[key]
+const matIds = (key) => (matOn(key) ? st.materials.map((m) => m.id) : [])
+const matPicker = reactive({ visible: false, query: '', auto: false })
+function openMatPicker(recommend) {
+  const query = recommend ? [configText(st.bookConfig), st.directions.join('、'), st.premise.trim(), st.conditions.trim()].filter(Boolean).join('；').slice(0, 500) : ''
+  if (recommend && !st.bookConfig.genre && !st.bookConfig.tags?.length && !st.directions.length && !st.premise.trim()) {
+    ElMessage.warning('先填题材 / 标签、创作方向或你的想法，才知道要推荐什么')
+    return
+  }
+  Object.assign(matPicker, { visible: true, query, auto: recommend })
+}
+function applyMaterials(list) {
+  if (list.length > MAX_PLAN_MATERIALS) ElMessage.warning(`最多 ${MAX_PLAN_MATERIALS} 条，只保留前 ${MAX_PLAN_MATERIALS} 条`)
+  st.materials = list.slice(0, MAX_PLAN_MATERIALS).map((m) => ({ id: m.id, title: m.title, category: m.category,
+    portability: m.profile?.portable?.portability || m.portability || 'adapt' }))
+}
+const matEditor = reactive({ visible: false, material: null })
+async function openMaterial(id) {
+  try {
+    const res = await getMaterial(id)
+    if (res.code !== 0) throw new Error(res.message)
+    Object.assign(matEditor, { visible: true, material: res.data })
+  } catch (e) {
+    ElMessage.error(errorMessage(e, '读取素材失败'))
+  }
+}
+
 async function runIdea(withFeedback = false) {
   const inputs = { premise: st.premise.trim(), directions: [...st.directions], bookConfig: clone(st.bookConfig),
     conditions: st.conditions.trim() }
   const feedback = withFeedback ? clone(st.ideaFeedback) : []
-  const data = await step('idea', () => planIdea(props.novelId, { ...inputs, tone: '', feedback, count: 3, model: model.value }))
+  const materialIds = matIds('idea')
+  const data = await step('idea', () => planIdea(props.novelId, { ...inputs, tone: '', feedback, count: 3, materialIds, model: model.value }))
   st.ideas = data.ideas || []
-  st.ideaRuns.push({ at: new Date().toLocaleString(), inputs, feedback })
+  st.ideaRuns.push({ at: new Date().toLocaleString(), inputs, feedback, materials: materialIds.length ? st.materials.map((m) => m.title) : [] })
   if (st.ideaRuns.length > 20) st.ideaRuns.splice(0, st.ideaRuns.length - 20)
   pickIdea(0)
 }
@@ -781,7 +841,8 @@ function addDirection(d) {
 
 /** 参数这一步的小帮手：kind = direction | style（7 字以内）| conditions（整理成一条条）| premise（润色） */
 async function assistFn(kind, text) {
-  const res = await planAssist(props.novelId, { kind, text, premise: st.premise.trim(), bookConfig: st.bookConfig, model: model.value })
+  const res = await planAssist(props.novelId, { kind, text, premise: st.premise.trim(), conditions: st.conditions.trim(), directions: [...st.directions],
+    bookConfig: st.bookConfig, materialIds: matIds(kind), model: model.value })
   if (res.code !== 0) throw new Error(res.message)
   addUsage(res.data?.usage)
   return res.data.value
@@ -1218,4 +1279,6 @@ const ChapterCard = defineComponent({
 .snapshot { margin: 4px 0 6px; }
 .snapshot .ai-basis { margin-top: 4px; }
 .related-items { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+.mat-chip { cursor: pointer; }
+.idea-mats { margin-top: 4px; font-size: 12px; color: var(--el-text-color-regular); }
 </style>

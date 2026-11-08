@@ -298,11 +298,11 @@ def _parse(text: str, local: dict | None) -> dict:
 
 
 def _run_api(api: dict, messages: list[dict], max_tokens: int, temperature: float = 0.9,
-             json_mode: bool = True) -> tuple[dict, str]:
+             json_mode: bool = True, think: bool = True) -> tuple[dict, str]:
     cfg = llm_client.ModelConfig(**api)
     try:
         return llm_client.complete(cfg, messages, max_tokens=max_tokens, temperature=temperature, top_p=0.95,
-                                   json_mode=json_mode, timeout=170), cfg.model
+                                   json_mode=json_mode, timeout=170, think=think), cfg.model
     except llm_client.LLMError as e:
         raise IdeaError(f"大模型调用失败：{e}") from e
 

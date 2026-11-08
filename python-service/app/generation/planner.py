@@ -164,8 +164,9 @@ def feedback_text(feedback) -> str:
 
 
 def idea(req: dict) -> dict:
-    """{premise?, directions?[], bookConfig?, tone?, conditions?, count?} → {ideas[{title, core, situation, conflict, payoff, hook}]}
-    一句话（可以为空）扩成几个完整的故事灵感，彼此明显不同，作者挑一个再改。"""
+    """{premise?, directions?[], bookConfig?, tone?, conditions?, count?, materials?[架空版]}
+    → {ideas[{title, core, situation, conflict, payoff, hook, materials?[{id, title, used}]}]}
+    一句话（可以为空）扩成几个完整的故事灵感，彼此明显不同，作者挑一个再改。带素材时每个灵感至少用上一条，但核心来自作者写的内容。"""
     count = max(1, min(5, _int(req.get("count"), 3)))
     directions = _strs(req.get("directions"), 20, 8)
     parts = [f"作者的想法：{_clip(req.get('premise'), 500)}" if _clip(req.get("premise"), 500)
@@ -182,6 +183,11 @@ def idea(req: dict) -> dict:
     fb = feedback_text(req.get("feedback"))
     if fb:
         parts.append(fb)
+    block, refs = _portable_block(req.get("materials"))
+    if block and not _has_author_input(req):
+        raise InspireError(NO_AUTHOR_INPUT)
+    if block:
+        parts.append(f"{AUTHOR_FIRST}\n【可参考的架空素材】\n{block}")
     parts.append(
         f"【任务】把作者的想法扩写成 {count} 个完整的故事灵感，彼此在核心设定 / 冲突 / 卖点上明显不同（不要只换名字）。每个：\n"
         "- title 暂定书名（12 字内）\n"
@@ -191,10 +197,22 @@ def idea(req: dict) -> dict:
         "- payoff 爽点方向：读者追下去的爽点 / 情绪回报在哪（60 字内）\n"
         "- hook 一句话卖点，像书封文案（30 字内）\n"
         "要贴合写作参数里的平台和读者；题材常见的套路可以用，但每个灵感至少有一处让人眼前一亮的变化。\n"
-        '输出 {"ideas": [{"title": "…", "core": "…", "situation": "…", "conflict": "…", "payoff": "…", "hook": "…"}]}')
+        + ("每个灵感至少用上一条架空素材的机制或用途（起新名字），但故事的核心必须来自作者的想法和创作方向。\n"
+           "另外输出 sources（用到的素材编号，如 [\"S1\"]）和 used（用了素材的哪一点，20 字内）。\n" if block else "")
+        + '输出 {"ideas": [{"title": "…", "core": "…", "situation": "…", "conflict": "…", "payoff": "…", "hook": "…"'
+        + (', "sources": ["S1"], "used": "…"' if block else "") + "}]}")
     messages = [{"role": "system", "content": STORY_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
-    data, usage, model = _call(req, messages, 2500, 0.95)
-    found = [x for x in (_clean_idea(d) for d in data.get("ideas") or data.get("items") or []) if x][:count]
+    data, usage, model = _call(req, messages, 6000 if block else 2500, 0.95)  # 带素材时提示词长、模型思考多，3000 实测会截断
+    found = []
+    for d in data.get("ideas") or data.get("items") or []:
+        x = _clean_idea(d)
+        if x and block:  # 编号由代码核对：对不上的丢掉，一条都没对上的灵感保留，页面标「没用上素材」
+            used = _clip(d.get("used"), 40)
+            ids = inspire._refs(d.get("sources"), {k: m["id"] for k, m in refs.items()})
+            x["materials"] = [{"id": m["id"], "title": _clip(m.get("title"), 30), "used": used} for m in refs.values() if m["id"] in ids]
+        if x:
+            found.append(x)
+    found = found[:count]
     if not found:
         raise InspireError("模型没有给出可用的灵感，请重试")
     return {"ideas": found, "usage": usage, "model": model}
@@ -211,6 +229,8 @@ ASSIST_KINDS = {
                    "只保留作者真的提出的要求，不要自己加；最多 8 条，只输出要求本身，不要编号、不要解释", 400),
     "premise": ("润色作者的故事想法：保留原意和作者写到的所有要素，把它写得更清楚、更具体（可以补一两处细节让想法更完整），"
                 "100 字以内，只输出润色后的想法本身", 300),
+    "sellingPoint": ("根据作者写的内容提炼这本书的核心卖点：读者为什么追这本书，1–2 句话、60 字以内、要具体（不要「爽点密集」这种空话），"
+                     "只输出卖点本身", 200),
 }
 
 
@@ -222,31 +242,113 @@ def _short_label(text: str, limit: int = 7) -> str:
     return t[:limit]
 
 
+AUTHOR_FIRST = ("【主次】上面作者写的内容是主体，必须保留、不能被替换；下面的架空素材只是补充，用来让内容更具体、更有新意。"
+                "可以借用素材的机制、用途和关系，但名字要起新的，输出里不要提到素材的名称；不要把素材原样搬进来，也不要让素材盖过作者的想法。")
+NO_AUTHOR_INPUT = "先填写作参数（题材 / 标签等）或写几句你的想法，素材只做补充"
+MATERIAL_ASSIST = ("sellingPoint", "style", "premise", "conditions")
+_MATERIAL_MARK = re.compile(r"[（(]\s*(?:来自素材\s*)?S\s*(\d+)\s*[）)]\s*$", re.I)
+
+
+def _portable_block(materials) -> tuple[str, dict[str, dict]]:
+    """架空版 → 提示词块（[S1]…）和 编号 → 素材。按档案字段写，不用通用的素材文本：
+    那里只留 260 字，示例会把叙事用途 / 一定保留挤掉；也不写来源书、原作绑定和被替换的原作词（from）。"""
+    lines, refs = [], {}
+    for m in [x for x in materials or [] if isinstance(x, dict) and isinstance(x.get("portable"), dict)][:8]:
+        p = m["portable"]
+        key = f"S{len(refs) + 1}"
+        refs[key] = m
+        bits = [_clip(p.get("core"), 160)]
+        for label, values in (("叙事用途", p.get("uses")), ("一定保留", p.get("keep")),
+                              ("换世界时可以换成", [r.get("to") for r in p.get("replace") or [] if isinstance(r, dict)]),
+                              ("节点角色", [n.get("role") for n in p.get("nodeMap") or [] if isinstance(n, dict)]),
+                              ("联动规则", [f"{r.get('if')} → {r.get('then')}" for r in p.get("rules") or [] if isinstance(r, dict)])):
+            items = _strs(values, 80, 6)
+            if items:
+                bits.append(f"{label}：" + "；".join(items))
+        cat = ideas.CATEGORY_LABELS.get(m.get("category"), "写法" if m.get("category") == "craft" else "素材")
+        lines.append(f"[{key}]【{cat}】{_clip(m.get('title'), 30)}：" + "。".join(b for b in bits if b))
+    return "\n".join(lines), refs
+
+
+def _has_author_input(req: dict, text: str = "") -> bool:
+    """作者自己填过东西吗（平台 / 读者 / 人称 / 字数是表单默认值，不算）"""
+    cfg = req.get("bookConfig") if isinstance(req.get("bookConfig"), dict) else {}
+    return bool(text or _clip(req.get("premise"), 500) or _clip(req.get("conditions"), 500) or _strs(req.get("directions"), 20, 8)
+                or any(cfg.get(k) for k in ("genre", "tags", "sellingPoint", "style")))
+
+
+def _assist_task(kind: str, need: str, text: str, has_materials: bool) -> str:
+    if not has_materials:
+        return need
+    if kind == "premise":
+        return ("润色作者的故事想法：保留原意和作者写到的所有要素，把素材里合适的一两处机制融进去（起新名字），100 字以内，只输出想法本身" if text else
+                "作者还没写想法：以写作参数和创作方向为主，写一个 100 字以内的故事想法，可以用上素材里一两处机制（起新名字），只输出想法本身")
+    if kind == "conditions":
+        return ("分两部分输出，一条一行、不要编号、不要解释：先把作者随手写的话整理成明确的要求（只保留作者真的提出的，不要自己加）；"
+                "再从素材的「一定保留」里挑和作者的想法直接相关的（最多 3 条，一个素材最多 1 条，不相关的不要加，可以一条都不加），"
+                "每条一句话、30 字以内，改写成要求（不出现素材的名字），放在后面，结尾写来源编号，如（S1）。总共最多 8 条")
+    if kind == "style":
+        return need + "。参考下面写法素材的手法，作者的描述优先"
+    return need + "。可以从素材的叙事用途和内核里找能放大的点，但卖点要落在作者的题材和想法上"
+
+
+def _clean_conditions(out: str, refs: dict[str, dict]) -> str:
+    """作者的要求排前面；素材来的最多 3 条、标明来自哪条素材，编号对不上的丢掉"""
+    own, from_material = [], []
+    for row in out.splitlines():
+        row = re.sub(r"^\s*(\d+[.、．)]|[-•·*])\s*", "", row).strip()
+        if not row:
+            continue
+        mark = _MATERIAL_MARK.search(row)
+        if not mark:
+            own.append(row)
+        elif (m := refs.get(f"S{mark.group(1)}")) and len(from_material) < 3:
+            from_material.append(f"{row[:mark.start()].rstrip()}（来自素材「{_clip(m.get('title'), 20)}」）")
+    return "\n".join((own + from_material)[:8])[:500]
+
+
 def assist(req: dict) -> dict:
-    """{kind: direction|style|conditions|premise, text, bookConfig?, premise?} → {kind, value}
-    参数这一步的小帮手：一句描述 → 7 字以内的创作方向 / 文风；随手写的话 → 一条条补充要求；润色「你的想法」。不用 JSON，直接要正文"""
+    """{kind: direction|style|conditions|premise|sellingPoint, text, bookConfig?, premise?, conditions?, directions?, materials?} → {kind, value}
+    参数这一步的小帮手：一句描述 → 7 字以内的创作方向 / 文风；随手写的话 → 一条条补充要求；润色「你的想法」；提炼核心卖点。
+    materials = 作者选的架空版：只作补充，作者什么都没填时不生成。不用 JSON，直接要正文"""
     kind = str(req.get("kind") or "")
     if kind not in ASSIST_KINDS:
         raise InspireError(f"不认识的帮手种类：{kind}")
     text = _clip(req.get("text"), 1000)
-    if not text:
-        raise InspireError("先写几句描述")
+    materials = (req.get("materials") or []) if kind in MATERIAL_ASSIST else []
+    if kind == "style":  # 文风只参考写法类素材
+        materials = [m for m in materials if isinstance(m, dict) and m.get("category") == "craft"]
+    block, refs = _portable_block(materials)
+    if not text and not (kind == "sellingPoint" or block):
+        raise InspireError("素材篮里没有写法类素材，先写几句想要的感觉" if kind == "style" and req.get("materials") else "先写几句描述")
+    if not _has_author_input(req, text):
+        raise InspireError(NO_AUTHOR_INPUT)
     need, max_tokens = ASSIST_KINDS[kind]
+    if block:
+        max_tokens = max(max_tokens, 500 if kind == "conditions" else 300 if kind == "sellingPoint" else max_tokens)
     parts = []
     cfg = spec_mod.positioning_text(req.get("bookConfig"))
-    if cfg and kind in ("direction", "premise"):
+    if cfg and (kind in ("direction", "premise", "sellingPoint") or block):
         parts.append("【写作参数】（参考）\n" + cfg)
+    directions = _strs(req.get("directions"), 20, 8)
+    if directions and kind in ("premise", "sellingPoint"):
+        parts.append("创作方向：" + "、".join(directions))
     if kind != "premise" and _clip(req.get("premise"), 500):
         parts.append(f"作者的故事想法（参考）：{_clip(req.get('premise'), 500)}")
-    parts.append(f"作者写的：{text}")
-    parts.append(f"【任务】{need}。")
+    if kind in ("premise", "sellingPoint") and _clip(req.get("conditions"), 500):
+        parts.append(f"补充要求（参考）：{_clip(req.get('conditions'), 500)}")
+    if text:
+        parts.append(f"作者写的：{text}")
+    if block:
+        parts.append(f"{AUTHOR_FIRST}\n【可参考的架空素材】\n{block}")
+    parts.append(f"【任务】{_assist_task(kind, need, text, bool(block))}。")
     messages = [{"role": "system", "content": "你是网络小说编辑，帮作者把零散的想法整理成清楚的说法。只输出要求的内容，不要任何解释。"},
                 {"role": "user", "content": "\n\n".join(parts)}]
     try:
         if req.get("local") and (req.get("local") or {}).get("baseId"):
             r, model = ideas._run_local(req["local"], messages, max_tokens, temperature=0.5, use_adapter=False)
         elif req.get("api"):
-            r, model = ideas._run_api(req["api"], messages, max_tokens, temperature=0.7, json_mode=False)
+            r, model = ideas._run_api(req["api"], messages, max_tokens, temperature=0.7, json_mode=False, think=False)  # 短任务：思考会吃光上限
         else:
             raise InspireError("请选择大模型、GGUF 或本地模型")
     except ideas.IdeaError as e:
@@ -254,6 +356,10 @@ def assist(req: dict) -> dict:
     out = (r.get("text") or "").strip()
     if kind in ("direction", "style"):
         value = _short_label(out)
+    elif kind == "conditions" and block:
+        value = _clean_conditions(out, refs)
+    elif kind == "sellingPoint":
+        value = _clip(re.sub(r"^(核心)?卖点[：:]\s*", "", out), 200)
     elif kind == "conditions":
         rows = [re.sub(r"^\s*(\d+[.、．)]|[-•·*])\s*", "", x).strip() for x in out.splitlines()]
         value = "\n".join(x for x in rows if x)[:500]

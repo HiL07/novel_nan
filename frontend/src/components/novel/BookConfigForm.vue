@@ -40,13 +40,26 @@
       </el-select>
     </el-form-item>
     <el-form-item label="核心卖点">
-      <el-input v-model="cfg.sellingPoint" maxlength="200" placeholder="可选，如：每一卷探索一座新的浮空城，主角靠偷学禁咒越级" />
+      <div class="style-row">
+        <el-input v-model="cfg.sellingPoint" maxlength="200" placeholder="可选，如：每一卷探索一座新的浮空城，主角靠偷学禁咒越级" />
+        <AiShortGen v-if="assist" :run="(d) => assist('sellingPoint', d)" title="AI 提炼核心卖点（按你填的参数和想法）" text="AI 生成" :limit="200" allow-empty
+                    placeholder="可选：想突出什么。空着 = 按写作参数、创作方向和你的想法提炼" @use="(v) => (cfg.sellingPoint = v)">
+          <template #extra>
+            <el-checkbox v-if="materialCount && useMaterials" v-model="useMaterials.sellingPoint" size="small">带上架空素材（{{ materialCount }}）</el-checkbox>
+          </template>
+        </AiShortGen>
+      </div>
     </el-form-item>
     <el-form-item label="文风">
       <div class="style-row">
         <el-input v-model="cfg.style" maxlength="60" placeholder="可选，如：轻松幽默 / 细腻 / 冷峻（也就是全书的基调）" />
         <AiShortGen v-if="assist" :run="(d) => assist('style', d)" title="描述想要的感觉，AI 概括成文风" text="AI 生成"
-                    placeholder="如：读起来要像老朋友讲故事，偶尔自嘲，打斗干脆利落" @use="(v) => (cfg.style = v)" />
+                    :allow-empty="!!(materialCount && useMaterials?.style)"
+                    placeholder="如：读起来要像老朋友讲故事，偶尔自嘲，打斗干脆利落" @use="(v) => (cfg.style = v)">
+          <template #extra>
+            <el-checkbox v-if="materialCount && useMaterials" v-model="useMaterials.style" size="small">参考素材篮里的写法素材</el-checkbox>
+          </template>
+        </AiShortGen>
       </div>
     </el-form-item>
   </el-form>
@@ -58,7 +71,8 @@ import AiShortGen from '@/components/ai/AiShortGen.vue'
 
 const cfg = defineModel({ type: Object, required: true })
 // (kind, text) => Promise<string>：自动规划页传进来（AI 生成文风）；工作区「作品定位」对话框里不传就不显示
-defineProps({ assist: { type: Function, default: null } })
+// materialCount / useMaterials：自动规划的架空素材篮（条数 / 每处的开关），其他地方不传
+defineProps({ assist: { type: Function, default: null }, materialCount: { type: Number, default: 0 }, useMaterials: { type: Object, default: null } })
 </script>
 
 <style scoped>

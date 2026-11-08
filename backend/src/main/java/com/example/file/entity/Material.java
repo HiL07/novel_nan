@@ -69,6 +69,16 @@ public class Material {
     @TableField(exist = false)
     private List<Material> members;
 
+    /**
+     * 架空版（2026-11-06）：原素材 → 它在各架空工作区的架空版 [{id, title, workspaceId, workspaceTitle}]；
+     * 架空版（source.type = portable）→ originState 原素材是否还在 / 之后改过。列表 / 详情填充
+     */
+    @TableField(exist = false)
+    private List<Map<String, Object>> portables;
+
+    @TableField(exist = false)
+    private String originState;
+
     /** 被应用到工作区的次数 */
     private Integer useCount;
 

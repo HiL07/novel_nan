@@ -330,6 +330,34 @@ def materials_profile(req: ProfileRequest) -> dict:
         return {"ok": False, "message": str(e), "fatal": e.fatal}
 
 
+class PortableRequest(BaseModel):
+    """架空加工单条（素材库里的原素材 → 架空版；批量由 Java 逐条调用）：item = {id, kind, category, title, aliases, summary,
+    detail, attributes, facts, rules?, nodes?}"""
+    item: dict
+    targetWorld: str = Field(default="", max_length=200)
+    model: Optional[ModelConfig] = None
+    gguf: bool = False
+
+
+@app.post("/api/materials/portable")
+def materials_portable(req: PortableRequest) -> dict:
+    """→ {ok, portable, usage} / {ok: false, message}（同步，一次 1–2 次模型调用）"""
+    from . import material_portable
+    try:
+        cfg = ModelConfig(**local_llama.api_config()) if req.gguf else req.model
+        if cfg is None:
+            return {"ok": False, "message": "请指定大模型配置或 GGUF"}
+        usage = llm_client.new_usage(cfg)
+        p = material_portable.portable_one(req.item, extractor._chat_fn(cfg, usage), req.targetWorld.strip())
+        if not p:
+            return {"ok": False, "message": "模型没有给出可用的架空档案，请重试"}
+        return {"ok": True, "portable": p, "usage": usage}
+    except local_llama.LlamaError as e:
+        return {"ok": False, "message": str(e)}
+    except llm_client.LLMError as e:
+        return {"ok": False, "message": str(e), "fatal": e.fatal}
+
+
 class EntityGroupsRequest(BaseModel):
     """全书实体的 AI 归并：[{key, category, name, aliases, fact}]（每个实体一条事实）。"""
     entities: list[dict] = Field(min_length=2, max_length=3000)

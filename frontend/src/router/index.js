@@ -27,33 +27,38 @@ const routes = [
     component: () => import('@/views/novel/workspace.vue')
   },
   {
-    // 侧边栏「素材库」：子菜单 全部素材 / 书库（一本书一个素材库工作区，同名小说算一本）
-    path: '/material',
-    redirect: (to) => ({ path: '/material/all', query: to.query }),
+    // 侧边栏「素材库」：子菜单 素材库 / 架空工作区（2026-11-06）
+    path: '/material-menu',
+    redirect: '/material',
     meta: {
       title: '素材库',
       icon: 'Collection',
       children: [
-        { path: '/material/all', title: '全部素材', icon: 'Collection' },
-        { path: '/material/books', title: '书库', icon: 'Notebook' }
+        { path: '/material', title: '素材库', icon: 'Collection' },
+        { path: '/material/portable', title: '架空工作区', icon: 'MagicStick' }
       ]
     }
   },
   {
-    path: '/material/all',
+    path: '/material',
     name: 'material',
     component: () => import('@/views/material/index.vue')
   },
   {
-    path: '/material/books',
-    name: 'materialBooks',
-    component: () => import('@/views/material/books.vue')
+    // 架空工作区列表：每次架空一个工作区
+    path: '/material/portable',
+    name: 'portableList',
+    component: () => import('@/views/material/portableList.vue')
   },
   {
-    // 单本书库（?name=书名：书名里常有括号、加号，放查询参数）
-    path: '/material/book',
-    name: 'materialBook',
-    component: () => import('@/views/material/book.vue')
+    path: '/material/portable/:id(\\d+)',
+    name: 'portableWorkspace',
+    component: () => import('@/views/material/portableWorkspace.vue')
+  },
+  {
+    // 书库（2026-11-04 加、11-06 删掉：和素材库重复）留下的旧链接回到素材库
+    path: '/material/:rest(all|books|book)',
+    redirect: (to) => ({ path: '/material', query: to.query })
   },
   {
     path: '/inspire',

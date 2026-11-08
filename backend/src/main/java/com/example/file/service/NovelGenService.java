@@ -291,6 +291,16 @@ public class NovelGenService {
             item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
             item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
             item.put("book", Objects.requireNonNullElse(m.getSourceBook(), ""));
+            if (MaterialService.isPortable(m) && m.getProfile() != null && m.getProfile().get("portable") instanceof Map<?, ?> p) {
+                // 架空版的结构化档案（不带 bindings / example：原作词不进提示词），自动规划按字段使用
+                Map<String, Object> portable = new LinkedHashMap<>();
+                for (String k : List.of("core", "uses", "replace", "keep", "portability", "nodeMap", "rules")) {
+                    if (p.get(k) != null) {
+                        portable.put(k, p.get(k));
+                    }
+                }
+                item.put("portable", portable);
+            }
             if (MaterialService.isMergeMaster(m)) {
                 addVariants(item, m, variantChoice.getOrDefault(m.getId(), "auto"));
             }

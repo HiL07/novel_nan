@@ -114,7 +114,9 @@ public class MaterialMergeService {
         boolean crossOnly = Boolean.TRUE.equals(o.get("crossBookOnly"));
 
         LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<Material>().isNull(Material::getMergedInto)
-                .in(Material::getCategory, cats);
+                .in(Material::getCategory, cats)
+                // 架空版不参与合并（它由原素材生成，原素材合并后可以重做架空版，2026-11-06）
+                .apply("COALESCE(json_extract(source, '$.type'), '') <> 'portable'");
         if (!books.isEmpty()) {
             List<String> named = books.stream().filter(b -> !MaterialService.MANUAL_BOOK.equals(b)).toList();
             boolean manual = books.contains(MaterialService.MANUAL_BOOK);

@@ -9,9 +9,9 @@ import request, { aiRequest } from './request'
 const java = (novelId, step, body) =>
   request.post(`/api/novel/plan/${novelId}/${step}`, body, { timeout: 300000 }).then((res) => res.data)
 
-/** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, model} → {ideas[{title, core, situation, conflict, payoff, hook}], usage} */
+/** 故事优先 ① {premise?, directions?, bookConfig?, tone?, conditions?, count?, materialIds?（架空版）, model} → {ideas[{title, core, situation, conflict, payoff, hook, materials?[{id, title, used}]}], usage} */
 export const planIdea = (novelId, body) => java(novelId, 'idea', body)
-/** 参数这一步的小帮手 {kind: direction|style|conditions|premise, text, premise?, bookConfig?, model} → {kind, value}（direction / style ≤7 字） */
+/** 参数这一步的小帮手 {kind: direction|style|conditions|premise|sellingPoint, text, premise?, conditions?, directions?, bookConfig?, materialIds?（架空版）, model} → {kind, value}（direction / style ≤7 字） */
 export const planAssist = (novelId, body) => java(novelId, 'assist', body)
 /** 设定的单个模块重新生成 {settings, module: rules|note|cards|power|abilities|mechanics|resources|characters|elements, category?, direction?, keep?, idea?, bookConfig?, book?, model} → {module, category, value, keep, usage} */
 export const planSettingsPart = (novelId, body) => java(novelId, 'settings-part', body)

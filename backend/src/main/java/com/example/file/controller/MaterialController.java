@@ -31,23 +31,17 @@ public class MaterialController {
     private static final Logger log = LoggerFactory.getLogger(MaterialController.class);
 
     private final MaterialService materialService;
-    private final com.example.file.service.MaterialBookService bookService;
+    private final com.example.file.service.ExtractCardService cardService;
 
-    public MaterialController(MaterialService materialService, com.example.file.service.MaterialBookService bookService) {
+    public MaterialController(MaterialService materialService, com.example.file.service.ExtractCardService cardService) {
         this.materialService = materialService;
-        this.bookService = bookService;
+        this.cardService = cardService;
     }
 
-    /** GET /api/material/books：书库列表 [{book, total, byCategory, pinned, workspaces, pending, updateTime}] */
-    @GetMapping("/books")
-    public ResponseEntity<Result<List<Map<String, Object>>>> books() {
-        return ResultResponses.handle(bookService::books, log, "查询书库失败");
-    }
-
-    /** GET /api/material/book?name=：单本书库 {book, materials, workspaces, resonance}（书名用查询参数：书名里常有括号、加号） */
-    @GetMapping("/book")
-    public ResponseEntity<Result<Map<String, Object>>> book(@org.springframework.web.bind.annotation.RequestParam String name) {
-        return ResultResponses.handle(() -> bookService.detail(name), log, "查询书库失败");
+    /** GET /api/material/pending-workspaces：待确认里列出的、有待入库卡片的工作区 [{extractId, title, book, count}] */
+    @GetMapping("/pending-workspaces")
+    public ResponseEntity<Result<List<Map<String, Object>>>> pendingWorkspaces() {
+        return ResultResponses.handle(cardService::pendingWorkspaces, log, "查询待入库卡片失败");
     }
 
     /** GET /api/material/categories：[{code, label, count}] */
@@ -65,7 +59,8 @@ public class MaterialController {
     /**
      * GET /api/material/list?category=&tags=a,b&tagMode=all|any&keyword=&sourceBook=&excludeBooks=a,b&pinned=&page=&size=
      * 关键词 + 标签检索；sourceBook = 只看某本书（__manual__ = 手动添加），excludeBooks = 屏蔽来源书（保留的素材除外），
-     * pinned=true 只看保留的
+     * pinned=true 只看保留的，kind = origin / portable / unported（原素材 / 架空版 / 还没架空的原素材），
+     * portability = direct / adapt（架空版的可移植度）
      */
     @GetMapping("/list")
     public ResponseEntity<Result<Page<Material>>> list(@RequestParam(required = false) String category,
@@ -75,10 +70,12 @@ public class MaterialController {
                                                        @RequestParam(required = false) String sourceBook,
                                                        @RequestParam(required = false) List<String> excludeBooks,
                                                        @RequestParam(required = false) Boolean pinned,
+                                                       @RequestParam(required = false) String kind,
+                                                       @RequestParam(required = false) String portability,
                                                        @RequestParam(defaultValue = "1") int page,
                                                        @RequestParam(defaultValue = "20") int size) {
         return ResultResponses.handle(() -> materialService.search(category, tags, tagMode, keyword,
-                sourceBook, excludeBooks, pinned, page, size), log, "检索素材失败");
+                sourceBook, excludeBooks, pinned, kind, portability, page, size), log, "检索素材失败");
     }
 
     /** GET /api/material/sources：来源书 [{book（null = 手动添加）, count, pinned, pending}] */
@@ -109,7 +106,7 @@ public class MaterialController {
     }
 
     /**
-     * POST /api/material/vector-search {query, modelId?, category?, tags?, excludeBooks?, limit?, mode?: hybrid|vector, rerank?}：
+     * POST /api/material/vector-search {query, modelId?, category?, tags?, excludeBooks?, limit?, mode?: hybrid|vector, rerank?, kind?: origin|portable|unported}：
      * 本地检索（向量 + 关键词融合，可选重排；默认 hybrid + 重排）
      * → {results[{material, score(0–100), similarity, vecRank, lexRank}], reranked, rerankSkipped, mode, total, considered, model, …}
      */
@@ -117,7 +114,7 @@ public class MaterialController {
     public ResponseEntity<Result<Map<String, Object>>> vector(@RequestBody SemanticReq req) {
         return ResultResponses.handle(() -> materialService.withStageFit(materialService.vectorSearch(req.getQuery(),
                 req.getCategory(), req.getTags(), req.getExcludeBooks(), req.getModelId(), req.getLimit() == null ? 20 : req.getLimit(),
-                req.getMode(), !Boolean.FALSE.equals(req.getRerank())), req.getNovelId()), log, "向量检索失败");
+                req.getMode(), !Boolean.FALSE.equals(req.getRerank()), null, req.getKind()), req.getNovelId()), log, "向量检索失败");
     }
 
     /** POST /api/material/vector-index {modelId?, encode}：全部素材的向量化情况 / 一键全部向量化 → {total, cached, encoded, pending, …} */
@@ -172,10 +169,11 @@ public class MaterialController {
         return ResultResponses.handle(() -> materialService.candidates(status, extractId), log, "查询素材候选失败");
     }
 
-    /** GET /api/material/candidates/count：待确认数量 */
+    /** GET /api/material/candidates/count：待确认数量 = 旧版候选 + 各工作区还没入库的卡片 */
     @GetMapping("/candidates/count")
     public ResponseEntity<Result<Long>> pendingCount() {
-        return ResultResponses.handle(materialService::pendingCount, log, "查询素材候选失败");
+        return ResultResponses.handle(() -> materialService.pendingCount()
+                + cardService.newCountsByExtract().values().stream().mapToLong(Long::longValue).sum(), log, "查询素材候选失败");
     }
 
     /** POST /api/material/candidates/save {items: [{id, category?, title?, summary?, attributes?, tags?, detail?}]}：确认入库 */
@@ -203,6 +201,8 @@ public class MaterialController {
         private String mode;
         /** 向量检索：是否用重排模型（默认 true） */
         private Boolean rerank;
+        /** 向量检索：origin（原素材）/ portable（架空版）/ unported；空 = 全部 */
+        private String kind;
         /** 向量检索：给哪个工作区用（结果带 tier / fit = 和它当前故事阶段合不合适，选择弹窗预选时跳过远景） */
         private String novelId;
     }

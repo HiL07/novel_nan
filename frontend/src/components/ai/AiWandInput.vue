@@ -11,7 +11,7 @@
       @update:model-value="(v) => emit('update:modelValue', v)"
     />
     <el-tooltip :content="modelValue?.trim() ? tip : emptyTip" placement="top">
-      <span class="wand" :class="{ disabled: !modelValue?.trim() || disabled }" @click="go">
+      <span class="wand" :class="{ disabled: (!modelValue?.trim() && !allowEmpty) || disabled }" @click="go">
         <el-icon v-if="!busy"><MagicStick /></el-icon>
         <el-icon v-else class="is-loading"><Loading /></el-icon>
       </span>
@@ -37,7 +37,8 @@ const props = defineProps({
   rows: { type: Number, default: 2 },
   maxlength: { type: [Number, String], default: 500 },
   placeholder: { type: String, default: '' },
-  disabled: { type: Boolean, default: false }
+  disabled: { type: Boolean, default: false },
+  allowEmpty: { type: Boolean, default: false } // 框里空着也能点（按写作参数 / 素材生成）
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -51,7 +52,7 @@ watch(() => props.modelValue, (v) => {
 
 async function go() {
   const text = (props.modelValue || '').trim()
-  if (!text || props.disabled || busy.value) return
+  if ((!text && !props.allowEmpty) || props.disabled || busy.value) return
   busy.value = true
   try {
     const value = await props.run(text)

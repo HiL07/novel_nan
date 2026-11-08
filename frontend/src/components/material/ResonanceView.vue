@@ -71,6 +71,14 @@
         <b>替换「{{ titleOf(r.node) }}」</b>：{{ r.why }}<template v-if="r.hint"> → {{ r.hint }}</template>
       </div>
       <div v-if="fusion.cascade" class="line"><b>替换后要联动调整：</b>{{ fusion.cascade }}</div>
+      <template v-if="portable?.nodeMap?.length">
+        <div class="sec-title">架空后的节点对应<template v-if="portable.exampleWorld">（示例世界：{{ portable.exampleWorld }}）</template></div>
+        <div v-for="(n, i) in portable.nodeMap" :key="'pm' + i" class="line">
+          「{{ n.title || titleOf(n.node) }}」→ <el-tag size="small" effect="plain">{{ n.role }}</el-tag>
+          <template v-if="n.replaceWith"> → {{ n.replaceWith }}</template>
+        </div>
+        <div v-for="(r, i) in portable.rules || []" :key="'pr' + i" class="line">通用联动：{{ r.if }} → {{ r.then }}</div>
+      </template>
       <template v-if="data.gaps?.length">
         <div class="sec-title">原书还没讲清楚的（借用时自己补）</div>
         <div v-for="(g, i) in data.gaps" :key="i" class="line">· {{ g }}</div>
@@ -87,7 +95,8 @@
 import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
-  data: { type: Object, default: () => ({}) } // 共鸣素材卡片的 data
+  data: { type: Object, default: () => ({}) }, // 共鸣素材卡片的 data
+  portable: { type: Object, default: null } // 架空档案（有 nodeMap 时在「说明」里显示节点对应）
 })
 const emit = defineEmits(['pick-card'])
 
