@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+> 接手记录（2026-11-15）：用户确认项目核心为“从其他小说提取素材，并在生成自己的小说时导入使用”。后续开发先读 [项目接手与核心目标](docs/项目接手与核心目标.md)，其中区分用户目标、代码现状与待定方案；本文件保留既有技术约定。
+
 Project guidance for AI coding assistants (Claude Code). Read this before generating or modifying code.
 This file holds the overview, the core rules and the doc index; endpoint-level details live in
 [`docs/claude/`](docs/claude/README.md) — **read the matching file before touching that area**.
@@ -61,6 +63,7 @@ Main feature areas: 文件管理 → 小说抓取 → 小说提取 (提取工作
 | `docs/走向引擎.md` | direction engine: drivers → review / revise → ranking; eval method and measured versions |
 | `docs/自动规划.md` | auto planning (story-first only; material-first route removed 2026-11-02, kept in §2 for reference) |
 | `docs/精炼合并.md` | similar groups, AI drafts and grounding checks, 共性 + 可选版本, unmerge |
+| `docs/素材使用方案.md` | discussion draft (2026-11-11, not implemented): how materials should be retrieved and used in auto planning (参数 · 灵感 / 设定), retrieval research with links, material tree, retrieval test plan, open questions |
 | `docs/待办.md` | open work (UI redesign steps, user issues) |
 | `模型对比测试报告.md` | DeepSeek vs local GGUF / safetensors benchmark (2026-10-27) |
 

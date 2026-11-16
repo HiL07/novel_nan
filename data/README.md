@@ -18,6 +18,10 @@ Java（Spring Boot）与 Python（FastAPI）共用的数据根目录。**本目�
 | `crawl-rules/<host>_<id>.json` | AI 解析地址得到的站点抓取规则（整条记录：状态 待确认 / 已确认、XPath 规则、地址规律、总结、学习样例），方便查找 / 备份 | Java（`CrawlRuleService`：解析成功、确认时写入；启动时补写缺失的） | 人工查看；程序以数据库为准 | Java（不确认 / 删除规则、确认替换旧规则时） | `crawl_site_rule` 一行一个文件 |
 | `material-index/<baseId>/vectors.npy`、`keys.json`、`meta.json`；`material-index/feedback.jsonl` | 素材向量（本地 embedding 模型，如 bge-small-zh；键 = 素材文本 SHA-1，按模型分目录）；向量检索反馈（查询 → 勾选 / 没勾选的素材，以后微调向量模型用） | Python（`app/local/embedding.py`，向量检索 / 全部向量化时写入） | Python | 可整个删除（下次检索自动重建，反馈会丢） | 不入数据库；素材文本由 Java 每次随请求传入 |
 
+## 素材实验导出
+
+`exports/materials-时间戳/` 保存供独立检索实验使用的私有 JSONL 快照和统计清单。导出程序只读访问素材表，不读取模型配置或密钥表；保留原文摘抄、来源与关联，未脱敏。使用说明见 [素材快照导出](../scripts/export/README.md)。这些文件同样被 Git 忽略，不应直接提交到新仓库。
+
 ## 格式约定
 
 - 编码：**UTF-8，无 BOM**；JSON 不转义中文（Java `ObjectMapper` 默认 / Python `ensure_ascii=False`）。

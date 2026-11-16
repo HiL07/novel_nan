@@ -5,7 +5,7 @@
 - 整站（site）：复刻 copybook 的跳转链——站点首页 → 分类 → 分类列表翻页 → 书籍详情 → 目录 → 正文，
   先 discover() 有界采样出书籍清单，再由 Java 逐本提交普通抓取任务，每本一个 txt。
 
-思路来自 copybook/（scrapy 爬 quanshuwang.com：XPath 硬编码，直接写 Django 的 sqlite）。
+思路来自 https://github.com/hahaha108/copyBook（scrapy 爬 quanshuwang.com：XPath 硬编码，直接写 Django 的 sqlite）。
 这里改为：规则可配置（内置预设 / 自定义 XPath / 自动识别）、限速串行、有界采样，
 结果交给 Java 落盘入库（Python 不碰数据库）。
 """

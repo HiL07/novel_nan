@@ -6,7 +6,7 @@
 
 ### Novel crawl API (`NovelCrawlController`, `/api/novel/crawl/**`)
 
-Fetches web novels and stores them as normal **txt files in file management**, so they can be extracted like uploads. Re-implementation of the idea in `copybook/` (scrapy spider for the now-dead quanshuwang.com: hardcoded XPath, whole-site crawl, writes Django's sqlite): configurable rules, rate-limited, Java is the only DB writer. **Two modes**, chosen by `options.mode` (default `book`) and surfaced as a switch on the crawl page:
+Fetches web novels and stores them as normal **txt files in file management**, so they can be extracted like uploads. Re-implementation of the idea in <https://github.com/hahaha108/copyBook> (the local `copybook/` folder was removed on 2026-11-12; scrapy spider for the now-dead quanshuwang.com: hardcoded XPath, whole-site crawl, writes Django's sqlite): configurable rules, rate-limited, Java is the only DB writer. **Two modes**, chosen by `options.mode` (default `book`) and surfaced as a switch on the crawl page:
 
 - **`book`** — one table-of-contents URL → one txt (the original behaviour).
 - **`site`** (UI: 全自动) — the book list comes from a **site catalog** built with an AI-learned rule (see *Auto crawler* below); Java crawls **one book at a time** through the same single-book pipeline, so each novel becomes its own txt (`novel_crawl_book` rows). One Java task, N Python jobs. (The old copybook-style `/discover` endpoint was removed; old site tasks still retry / resume from their stored book list.)
