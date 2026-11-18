@@ -95,18 +95,18 @@ function fmt(n) {
   gap: 4px 12px;
   margin: 6px 0;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .model {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .cost {
   font-weight: 600;
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .dim {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-weight: normal;
 }
 .price-form {

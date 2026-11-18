@@ -31,6 +31,27 @@ export function initValues(fields) {
  * 内置分类里的分组字段（如「主要角色」）补上新增的子字段、同步展示方式（display / section / desc），
  * 子字段按默认顺序排列，用户自定义的子字段保持在后面。已填的值不动，新字段的值由 ensureValue 按需初始化。
  */
+/** 各设定结构版本新增的内置普通字段（分组字段不用列，upgradeConfig 会补缺的分组）：版本 → {分类 key: [字段 key]} */
+const ADDED_FIELDS = {
+  4: { world: ['powerSystem', 'mechanics', 'resources'] }   // 自动规划「故事优先」的力量体系 / 世界机制 / 关键资源
+}
+
+/**
+ * 内置字段的说明文字（desc）以默认结构为准：已保存的工作区带着旧的字段定义，说明改了也要能看到。
+ * 只同步 desc（纯展示），不动字段本身；用户自建的字段（custom）不碰。
+ */
+export function syncBuiltinDescs(saved, defaults) {
+  for (const defCat of defaults.categories || []) {
+    const cat = (saved.categories || []).find((c) => c.key === defCat.key && !c.custom)
+    if (!cat) continue
+    for (const f of cat.fields || []) {
+      const d = (defCat.fields || []).find((x) => x.key === f.key)
+      if (d && !f.custom && d.desc) f.desc = d.desc
+    }
+  }
+  return saved
+}
+
 export function upgradeConfig(saved, defaults) {
   const from = saved.schemaVersion || 1
   const to = defaults.schemaVersion || 1
@@ -38,10 +59,25 @@ export function upgradeConfig(saved, defaults) {
   for (const defCat of defaults.categories || []) {
     const cat = (saved.categories || []).find((c) => c.key === defCat.key && !c.custom)
     if (!cat) continue
+    // 某个版本新增的普通字段：只补一次（用户之后删掉的不会再加回来），插在默认结构里它后面那个字段之前
+    for (let v = from + 1; v <= to; v++) {
+      for (const key of ADDED_FIELDS[v]?.[defCat.key] || []) {
+        if (cat.fields.some((f) => f.key === key)) continue
+        const i = defCat.fields.findIndex((f) => f.key === key)
+        if (i < 0) continue
+        const next = defCat.fields.slice(i + 1).map((f) => cat.fields.findIndex((x) => x.key === f.key)).find((j) => j >= 0)
+        cat.fields.splice(next ?? cat.fields.length, 0, clone(defCat.fields[i]))
+      }
+    }
     for (const defField of defCat.fields || []) {
       if (defField.type !== 'group') continue
       const field = cat.fields.find((f) => f.key === defField.key)
-      if (!field || field.type !== 'group') continue
+      if (!field) {
+        // 新增的内置分组（如情节推进的「阶段表」）：补到这个分类里
+        cat.fields.push(clone(defField))
+        continue
+      }
+      if (field.type !== 'group') continue
       if (defField.display) field.display = defField.display
       if (defField.desc) field.desc = defField.desc
       const children = field.fields || []
@@ -117,7 +153,7 @@ export function summarizeFields(fields, container) {
         .map((item, i) => {
           const sub = summarizeFields(field.fields || [], item)
           const nameItem = sub.find((s) => typeof s.value === 'string')
-          return {
+          const out = {
             key: item._id,
             label: `${field.itemLabel || '项'} ${i + 1}${nameItem ? `：${nameItem.value}` : ''}`,
             type: 'groupItem',
@@ -126,6 +162,10 @@ export function summarizeFields(fields, container) {
             display: '',
             children: sub
           }
+          // 出场条件（借鉴世界书：从第几章起 / 持续几章 / 排除词），只给生成用，不渲染进设定文字
+          const appear = cleanAppear(item._appear)
+          if (appear) out.appear = appear
+          return out
         })
         .filter((it) => it.children.length)
       if (items.length) {
@@ -138,6 +178,19 @@ export function summarizeFields(fields, container) {
     }
   }
   return out
+}
+
+/** 出场条件 {from, span, exclude[]}：全空 = null */
+export function cleanAppear(a) {
+  if (!a) return null
+  const out = {}
+  if (Number(a.from) > 0) out.from = Math.floor(Number(a.from))
+  if (Number(a.span) > 0) out.span = Math.floor(Number(a.span))
+  const words = (Array.isArray(a.exclude) ? a.exclude : String(a.exclude || '').split(/[，,、\s]+/))
+    .map((w) => String(w).trim())
+    .filter(Boolean)
+  if (words.length) out.exclude = words.slice(0, 10)
+  return Object.keys(out).length ? out : null
 }
 
 /** 整个创作设定：按分类汇总 */

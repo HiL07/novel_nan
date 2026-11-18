@@ -1,12 +1,16 @@
 package com.example.file.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.example.file.common.BizException;
+import com.example.file.common.DataPaths;
 import com.example.file.entity.FileInfo;
 import com.example.file.mapper.FileMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -43,10 +47,15 @@ public class FileService {
     @Value("${file.storage.path}")
     private String storagePath;
 
-    private final FileMapper fileMapper;
+    /** 章节规则版本（data/.defaults-applied 里的一行）：ChapterCounter 规则变了就换版本号，启动时把所有文本文件重数一遍 */
+    private static final String CHAPTER_RULES_MARK = "chapter-count-rules-v2";
 
-    public FileService(FileMapper fileMapper) {
+    private final FileMapper fileMapper;
+    private final DataPaths dataPaths;
+
+    public FileService(FileMapper fileMapper, DataPaths dataPaths) {
         this.fileMapper = fileMapper;
+        this.dataPaths = dataPaths;
     }
 
     /**
@@ -115,6 +124,7 @@ public class FileService {
         info.setFileSize(size);
         info.setContentType(contentType);
         info.setFileExt(fileExt);
+        info.setChapterCount(countChapters(fileExt, targetFile));
         info.setCreateTime(LocalDateTime.now());
         try {
             fileMapper.insert(info);
@@ -126,6 +136,82 @@ public class FileService {
 
         // 9. 返回（含自增 id）
         return info;
+    }
+
+    /** 只有 txt / md 能直接数章节（docx / pdf 在 Java 侧不解析） */
+    private static boolean isCountable(String ext) {
+        return "txt".equals(ext) || "md".equals(ext);
+    }
+
+    /** 数章节数；非文本返回 null，读取 / 解码失败返回 -1（不再重试） */
+    private Integer countChapters(String ext, Path file) {
+        if (!isCountable(ext)) {
+            return null;
+        }
+        try {
+            return ChapterCounter.count(decodeText(Files.readAllBytes(file)));
+        } catch (IOException | RuntimeException e) {
+            log.warn("统计章节数失败：{}", file, e);
+            return -1;
+        }
+    }
+
+    /**
+     * 启动后在后台给还没统计过的 txt / md 补章节数（老文件），不拖慢启动；
+     * 章节规则换了版本（{@link #CHAPTER_RULES_MARK} 不在标记文件里）时全部重数一遍，做完写入标记。
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void backfillChapterCounts() {
+        Thread t = new Thread(() -> {
+            Path mark = dataPaths.root().resolve(".defaults-applied");
+            boolean recountAll;
+            try {
+                recountAll = !(Files.exists(mark) && Files.readAllLines(mark, StandardCharsets.UTF_8).contains(CHAPTER_RULES_MARK));
+            } catch (IOException e) {
+                log.warn("读取标记文件失败，按需补统计章节数：{}", e.getMessage());
+                recountAll = false;
+            }
+            LambdaQueryWrapper<FileInfo> query = new LambdaQueryWrapper<FileInfo>().in(FileInfo::getFileExt, "txt", "md");
+            if (!recountAll) {
+                query.isNull(FileInfo::getChapterCount);
+            }
+            List<FileInfo> pending = fileMapper.selectList(query);
+            if (pending.isEmpty()) {
+                if (recountAll) {
+                    writeMark(mark);
+                }
+                return;
+            }
+            Path rootPath = Paths.get(storagePath).toAbsolutePath().normalize();
+            int n = 0;
+            for (FileInfo f : pending) {
+                Path file = rootPath.resolve(f.getStoragePath()).normalize();
+                Integer count = file.startsWith(rootPath) ? countChapters(f.getFileExt(), file) : Integer.valueOf(-1);
+                try {
+                    fileMapper.update(null, new LambdaUpdateWrapper<FileInfo>()
+                            .eq(FileInfo::getId, f.getId())
+                            .set(FileInfo::getChapterCount, count));
+                    n++;
+                } catch (RuntimeException e) {
+                    log.warn("保存章节数失败，文件 id={}", f.getId(), e);
+                }
+            }
+            log.info(recountAll ? "章节规则已更新，已重新统计 {} 个文本文件的章节数" : "已补统计 {} 个文本文件的章节数", n);
+            if (recountAll) {
+                writeMark(mark);
+            }
+        }, "chapter-count-backfill");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void writeMark(Path mark) {
+        try {
+            Files.writeString(mark, CHAPTER_RULES_MARK + System.lineSeparator(), StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            log.warn("写入章节规则标记失败（下次启动会再重数一遍）：{}", e.getMessage());
+        }
     }
 
     /**

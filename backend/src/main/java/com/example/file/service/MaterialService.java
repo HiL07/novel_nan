@@ -23,6 +23,7 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -54,9 +55,13 @@ public class MaterialService {
         CATEGORIES.put("location", "地点");
         CATEGORIES.put("item", "物品功法");
         CATEGORIES.put("plot", "情节");
+        CATEGORIES.put("craft", "写法"); // 卡片整理的写法卡（不是设定实体，提取时不读）
+        CATEGORIES.put("resonance", "共鸣"); // 共鸣素材：同一主题的卡片关联成整体（节点 / 关系 / 联动规则 / 融入指南）
     }
 
     private static final int SEMANTIC_POOL = 150;
+    /** 向量检索一次最多比较的素材数（超出按使用次数取前 N 条） */
+    private static final int VECTOR_POOL = 20000;
     /** 按来源书筛选时代表「手动添加（无来源书）」 */
     public static final String MANUAL_BOOK = "__manual__";
 
@@ -84,7 +89,7 @@ public class MaterialService {
     public List<Map<String, Object>> categories() {
         Map<String, Long> counts = new LinkedHashMap<>();
         for (Map<String, Object> row : materialMapper.selectMaps(new QueryWrapper<Material>()
-                .select("category", "COUNT(*) AS cnt").groupBy("category"))) {
+                .select("category", "COUNT(*) AS cnt").isNull("merged_into").groupBy("category"))) {
             counts.put(String.valueOf(row.get("category")), ((Number) row.get("cnt")).longValue());
         }
         List<Map<String, Object>> out = new ArrayList<>();
@@ -125,6 +130,22 @@ public class MaterialService {
      */
     public Page<Material> search(String category, List<String> tags, String tagMode, String keyword,
                                  String sourceBook, List<String> excludeBooks, Boolean pinnedOnly, int page, int size) {
+        return search(category, tags, tagMode, keyword, sourceBook, excludeBooks, pinnedOnly, null, null, page, size);
+    }
+
+    /**
+     * @param kind        origin（原素材）/ portable（架空版）/ unported（还没有架空版的原素材）；空 = 全部
+     * @param portability 架空版的可移植度：direct / adapt（只看架空版）；空 = 不限
+     */
+    public Page<Material> search(String category, List<String> tags, String tagMode, String keyword, String sourceBook,
+                                 List<String> excludeBooks, Boolean pinnedOnly, String kind, String portability, int page, int size) {
+        return search(category, tags, tagMode, keyword, sourceBook, excludeBooks, pinnedOnly, kind, portability, null, page, size);
+    }
+
+    /** extra：调用方追加的条件（架空工作区按条目状态筛选，SQL 由调用方用常量 + 参数写） */
+    public Page<Material> search(String category, List<String> tags, String tagMode, String keyword, String sourceBook,
+                                 List<String> excludeBooks, Boolean pinnedOnly, String kind, String portability,
+                                 java.util.function.Consumer<LambdaQueryWrapper<Material>> extra, int page, int size) {
         Page<Material> pg = new Page<>(Math.max(page, 1), Math.min(Math.max(size, 1), 100));
         List<Long> tagIds = idsWithTags(tags, !"any".equalsIgnoreCase(tagMode));
         if (tagIds != null && tagIds.isEmpty()) {
@@ -135,19 +156,58 @@ public class MaterialService {
         if (Boolean.TRUE.equals(pinnedOnly)) {
             q.eq(Material::getPinned, true);
         }
+        applyKind(q, kind, portability);
+        if (extra != null) {
+            extra.accept(q);
+        }
         if (keyword != null && !keyword.isBlank()) {
             for (String word : keyword.trim().split("\\s+")) {
-                q.and(w -> w.like(Material::getTitle, word).or().like(Material::getSummary, word)
-                        .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
-                        .or().like(Material::getTags, word));
+                // 已并入主条目的成员命中关键词时，返回它的主条目（成员本身不单独出现）
+                List<Long> masters = mastersOfMembersMatching(word);
+                q.and(w -> {
+                    w.like(Material::getTitle, word).or().like(Material::getSummary, word)
+                            .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
+                            .or().like(Material::getTags, word);
+                    if (!masters.isEmpty()) {
+                        w.or().in(Material::getId, masters);
+                    }
+                });
             }
         }
         q.orderByDesc(Material::getUpdateTime);
-        return materialMapper.selectPage(pg, q);
+        Page<Material> out = materialMapper.selectPage(pg, q);
+        fillPortableInfo(out.getRecords());
+        return out;
     }
 
+    /** 原素材 / 架空版 / 还没架空的原素材（json_extract，值是常量或白名单，不拼用户输入） */
+    void applyKind(LambdaQueryWrapper<Material> q, String kind, String portability) {
+        String notPortable = "COALESCE(json_extract(source, '$.type'), '') <> 'portable'";
+        if ("direct".equals(portability) || "adapt".equals(portability)) {
+            q.apply("json_extract(source, '$.type') = 'portable'").apply("json_extract(profile, '$.portable.portability') = {0}", portability);
+        } else if ("portable".equals(kind)) {
+            q.apply("json_extract(source, '$.type') = 'portable'");
+        } else if ("origin".equals(kind)) {
+            q.apply(notPortable);
+        } else if ("unported".equals(kind)) {
+            q.apply(notPortable).apply("id NOT IN (SELECT json_extract(source, '$.originId') FROM material"
+                    + " WHERE json_extract(source, '$.type') = 'portable' AND json_extract(source, '$.originId') IS NOT NULL)");
+        }
+    }
+
+    /** 名称 / 概括 / 子类 / 详细 / 标签含 word 的已合并成员 → 它们的主条目 id（参数化 LIKE） */
+    private List<Long> mastersOfMembersMatching(String word) {
+        return materialMapper.selectObjs(new LambdaQueryWrapper<Material>().select(Material::getMergedInto)
+                        .isNotNull(Material::getMergedInto)
+                        .and(w -> w.like(Material::getTitle, word).or().like(Material::getSummary, word)
+                                .or().like(Material::getSubtype, word).or().like(Material::getDetail, word)
+                                .or().like(Material::getTags, word)))
+                .stream().map(o -> ((Number) o).longValue()).distinct().toList();
+    }
+
+    /** 列表 / 检索 / AI 用的基础条件：已并入主条目的成员不出现（只在主条目的「各书写法」里看到） */
     private LambdaQueryWrapper<Material> baseQuery(String category, List<Long> ids) {
-        LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<>();
+        LambdaQueryWrapper<Material> q = new LambdaQueryWrapper<Material>().isNull(Material::getMergedInto);
         if (category != null && !category.isBlank()) {
             q.eq(Material::getCategory, checkCategory(category));
         }
@@ -277,11 +337,264 @@ public class MaterialService {
         return out;
     }
 
+    // ------------------------------------------------------------------ 向量检索（本地 embedding 模型）
+
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags,
+                                            List<String> excludeBooks, String modelId, int limit) {
+        return vectorSearch(query, category, tags, excludeBooks, modelId, limit, "hybrid", true);
+    }
+
+    /**
+     * 本地检索（RAG 的召回 + 精排）：按分类 / 标签 / 屏蔽来源书筛出素材（不做关键词初筛，最多 {@link #VECTOR_POOL} 条），
+     * 交给 Python：向量（bge-small-zh）+ 关键词（BM25，jieba 分词，素材标签作词表）各召回、倒数排名融合，
+     * 再用重排模型（bge-reranker-v2-m3）重排前 30 条。不用大模型、不花 token；还没向量化的素材顺便编码。
+     * score：重排过 = 相关度 × 100（可当阈值，见 {@link #RERANK_MIN_SCORE}），没重排 = 余弦相似度 × 100（只看相对高低）。
+     *
+     * @param modelId python-service 登记的向量模型 id；空 = Python 的默认向量模型
+     * @param mode    vector = 只用向量；hybrid = 向量 + 关键词
+     * @param rerank  有重排模型时重排（没有 / 显存不够时自动跳过，结果 reranked = false）
+     */
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
+                                            String modelId, int limit, String mode, boolean rerank) {
+        return vectorSearch(query, category, tags, excludeBooks, modelId, limit, mode, rerank, null, null);
+    }
+
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
+                                            String modelId, int limit, String mode, boolean rerank,
+                                            java.util.function.Predicate<Material> keep) {
+        return vectorSearch(query, category, tags, excludeBooks, modelId, limit, mode, rerank, keep, null);
+    }
+
+    /**
+     * 同上，另外：keep = 先过滤再检索（灵感墙按故事阶段挡掉超量级的素材；先检索后过滤会把结果筛光），
+     * 被挡掉的条数记在 filtered。kind = origin / portable / unported（同列表筛选；在查询里过滤，否则架空版会被候选池上限挤掉）。
+     */
+    public Map<String, Object> vectorSearch(String query, String category, List<String> tags, List<String> excludeBooks,
+                                            String modelId, int limit, String mode, boolean rerank,
+                                            java.util.function.Predicate<Material> keep, String kind) {
+        if (query == null || query.isBlank()) {
+            throw new BizException(400, "请输入要查找的内容");
+        }
+        List<Long> tagIds = idsWithTags(tags, false);
+        List<Material> pool = List.of();
+        long total = 0;
+        if (tagIds == null || !tagIds.isEmpty()) {
+            LambdaQueryWrapper<Material> q = baseQuery(category, tagIds);
+            applyBooks(q, null, excludeBooks);
+            applyKind(q, kind, null);
+            total = materialMapper.selectCount(q);
+            if (total > 0) {
+                LambdaQueryWrapper<Material> lq = baseQuery(category, tagIds);
+                applyBooks(lq, null, excludeBooks);
+                applyKind(lq, kind, null);
+                lq.orderByDesc(Material::getUseCount).orderByDesc(Material::getUpdateTime).last("LIMIT " + VECTOR_POOL);
+                pool = materialMapper.selectList(lq);
+            }
+        }
+        int filtered = 0;
+        if (keep != null && !pool.isEmpty()) {
+            List<Material> kept = pool.stream().filter(keep).toList();
+            filtered = pool.size() - kept.size();
+            pool = kept;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("total", total);
+        out.put("considered", pool.size());
+        out.put("filtered", filtered);
+        List<Map<String, Object>> results = new ArrayList<>();
+        out.put("results", results);
+        if (pool.isEmpty()) {
+            return out;
+        }
+        String q = query.trim();
+        // 多版本主条目：共性一条 + 每个版本（成员）各一条参与召回，命中任一版本都返回主条目（不把版本拼成一个向量：
+        // 写法差别大时拼出来的向量落在中间，哪个版本都搜不准）
+        List<Map<String, Object>> items = new ArrayList<>(vectorItems(pool));
+        Map<Long, Material> masterOf = new HashMap<>();   // 成员 id → 主条目
+        Map<Long, Material> memberById = new HashMap<>();
+        Map<Long, Material> masters = pool.stream().filter(MaterialService::isMergeMaster)
+                .collect(Collectors.toMap(Material::getId, x -> x));
+        if (!masters.isEmpty()) {
+            for (Material member : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                    .in(Material::getMergedInto, masters.keySet()))) {
+                Material master = masters.get(member.getMergedInto());
+                masterOf.put(member.getId(), master);
+                memberById.put(member.getId(), member);
+                items.add(Map.of("id", member.getId(), "text", variantText(master, member)));
+            }
+        }
+        int want = Math.min(Math.max(limit, 1), 200);
+        String m0 = "vector".equals(mode) ? "vector" : "hybrid";
+        List<String> vocab = "hybrid".equals(m0) ? tagVocabulary() : List.of();
+        JsonNode res = callAi(() -> aiClient.vectorSearchMaterials(modelId, q.substring(0, Math.min(q.length(), 2000)),
+                items, masterOf.isEmpty() ? want : Math.min(want * 2, 200), m0, rerank, vocab), "向量检索失败");
+        Map<Long, Material> byId = pool.stream().collect(Collectors.toMap(Material::getId, m -> m));
+        Set<Long> seen = new java.util.HashSet<>();
+        for (JsonNode r : res.path("results")) {
+            long hit = r.path("id").asLong();
+            Material member = memberById.get(hit);
+            Material m = member != null ? masterOf.get(hit) : byId.get(hit);
+            // 结果已按分数从高到低：同一主条目只留第一次出现（= 各版本里分数最高的）
+            if (m != null && results.size() < want && seen.add(m.getId())) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("material", m);
+                if (member != null) {
+                    row.put("matchedVariant", member.getId());
+                    row.put("matchedLabel", variantLabel(m, member));
+                }
+                row.put("score", (int) Math.round(r.path("score").asDouble() * 100));
+                row.put("similarity", r.path("similarity").asDouble());
+                row.put("vecRank", r.path("vecRank").isNumber() ? r.path("vecRank").asInt() : null);
+                row.put("lexRank", r.path("lexRank").isNumber() ? r.path("lexRank").asInt() : null);
+                results.add(row);
+            }
+        }
+        for (String k : List.of("model", "modelId", "device", "encoded", "cached", "ms", "mode", "reranked", "rerankSkipped",
+                "rerankModel", "rerankDevice", "rerankMs", "queryTokens")) {
+            out.put(k, objectMapper.convertValue(res.path(k), Object.class));
+        }
+        return out;
+    }
+
+    /** 主条目某个版本的检索文本：主条目名称 + 版本名 / 独有设定 + 成员原文（搜「神水」时各版本都能召回） */
+    private static String variantText(Material master, Material member) {
+        Map<String, Object> v = variantOf(master, member.getId());
+        return String.join("\n", master.getTitle(), Objects.toString(v.get("label"), ""),
+                Objects.toString(v.get("note"), ""), vectorText(member)).trim();
+    }
+
+    /** 主条目 source.variants 里这个成员的那一项（没有返回空 Map） */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> variantOf(Material master, Long memberId) {
+        if (master.getSource() != null && master.getSource().get("variants") instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> v && v.get("id") instanceof Number n && n.longValue() == memberId) {
+                    return (Map<String, Object>) v;
+                }
+            }
+        }
+        return Map.of();
+    }
+
+    /** 版本名：合并时写的 label，没有就用成员名称 */
+    static String variantLabel(Material master, Material member) {
+        String label = Objects.toString(variantOf(master, member.getId()).get("label"), "").trim();
+        return label.isEmpty() ? member.getTitle() : label;
+    }
+
+    /**
+     * 工作区的故事阶段（Python 按阶段表 / 已写章数推算）；没有工作区 / Python 不可达 = 不限
+     */
+    public StageFit.Stage novelStage(String novelId) {
+        if (novelId == null || novelId.isBlank()) {
+            return StageFit.of(null);
+        }
+        try {
+            return StageFit.of(objectMapper.convertValue(aiClient.getNovelStage(novelId.trim()).path("data"), Map.class));
+        } catch (Exception e) {
+            log.debug("读取工作区 {} 的故事阶段失败：{}", novelId, e.getMessage());
+            return StageFit.of(null);
+        }
+    }
+
+    /** 检索结果每条加上 tier / fit（和工作区当前阶段合不合适），结果里另附 stage */
+    public Map<String, Object> withStageFit(Map<String, Object> found, String novelId) {
+        if (novelId == null || novelId.isBlank()) {
+            return found;
+        }
+        StageFit.Stage stage = novelStage(novelId);
+        if (found.get("results") instanceof List<?> rs) {
+            for (Object o : rs) {
+                if (o instanceof Map<?, ?> r && r.get("material") instanceof Material m) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> row = (Map<String, Object>) r;
+                    row.put("tier", tierOf(m));
+                    row.put("fit", StageFit.fit(m, stage));
+                }
+            }
+        }
+        Map<String, Object> st = new LinkedHashMap<>();
+        st.put("phase", stage.phase());
+        st.put("tierMax", stage.tierMax());
+        found.put("stage", st);
+        return found;
+    }
+
+    /** 重排后的相关度达到这个分（0–100）才算「相关」：用于 AI 构思的自动匹配、选择弹窗的预勾选 */
+    public static final int RERANK_MIN_SCORE = 30;
+
+    /** 全部素材标签（去重）：作为 jieba 的领域词表，让「退婚」「扮猪吃虎」这类网文用语不被切碎 */
+    private List<String> tagVocabulary() {
+        return tagMapper.selectObjs(new QueryWrapper<MaterialTag>().select("DISTINCT tag")).stream()
+                .map(String::valueOf).filter(t -> t.length() >= 2 && t.length() <= 8).toList();
+    }
+
+    /** 全部素材的向量化情况（encode=false）或把还没向量化的全部编码（encode=true） */
+    public Map<String, Object> vectorIndex(String modelId, boolean encode) {
+        List<Material> all = materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getTitle, Material::getSubtype, Material::getSummary,
+                        Material::getAttributes, Material::getTags));
+        if (all.isEmpty()) {
+            return Map.of("total", 0, "cached", 0, "encoded", 0, "pending", 0);
+        }
+        JsonNode res = callAi(() -> aiClient.vectorIndexMaterials(modelId, vectorItems(all), encode), "素材向量化失败");
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (String k : List.of("total", "cached", "encoded", "pending", "model", "modelId", "device", "ms")) {
+            out.put(k, objectMapper.convertValue(res.path(k), Object.class));
+        }
+        return out;
+    }
+
+    private static List<Map<String, Object>> vectorItems(List<Material> list) {
+        return list.stream().map(m -> Map.<String, Object>of("id", m.getId(), "text", vectorText(m))).toList();
+    }
+
+    /**
+     * 素材 → 向量化文本：只拼有内容的部分（名称 / 子类 / 标签 / 概括 / 属性值）。分类名、属性键名每条都差不多，
+     * 写进去会把向量互相拉近，所以不写（分类用作过滤条件）。素材都在 512 token 以内，不需要切块
+     */
+    static String vectorText(Material m) {
+        List<String> parts = new ArrayList<>();
+        parts.add(m.getTitle());
+        parts.add(m.getSubtype());
+        if (m.getTags() != null && !m.getTags().isEmpty()) {
+            parts.add(String.join("、", m.getTags()));
+        }
+        parts.add(m.getSummary());
+        if (m.getAttributes() != null) {
+            m.getAttributes().values().forEach(v -> parts.add(v instanceof List<?> l
+                    ? l.stream().map(String::valueOf).collect(Collectors.joining("、")) : v == null ? null : String.valueOf(v)));
+        }
+        return parts.stream().filter(s -> s != null && !s.isBlank()).map(String::trim).collect(Collectors.joining("\n"));
+    }
+
+    /** 向量检索后勾选 / 没勾选的素材：转给 Python 记入 feedback.jsonl（失败只记日志，不影响页面） */
+    public void vectorFeedback(Map<String, Object> body) {
+        Map<String, Object> clean = new LinkedHashMap<>();
+        for (String k : List.of("query", "modelId", "shownIds", "pickedIds", "context")) {
+            if (body.get(k) != null) {
+                clean.put(k, body.get(k));
+            }
+        }
+        if (!(clean.get("query") instanceof String q) || q.isBlank()) {
+            throw new BizException(400, "缺少 query");
+        }
+        try {
+            aiClient.vectorFeedback(clean);
+        } catch (RuntimeException e) {
+            log.warn("记录向量检索反馈失败：{}", e.getMessage());
+        }
+    }
+
     private interface AiCall {
         JsonNode run();
     }
 
     private JsonNode callAi(AiCall call) {
+        return callAi(call, "AI 语义检索失败");
+    }
+
+    private JsonNode callAi(AiCall call, String failure) {
         JsonNode res;
         try {
             res = call.run();
@@ -292,7 +605,7 @@ public class MaterialService {
             throw new BizException(502, "AI 服务拒绝请求（HTTP " + e.getStatusCode().value() + "）");
         }
         if (res == null || !res.path("ok").asBoolean(false)) {
-            throw new BizException(502, "AI 语义检索失败：" + (res == null ? "无响应" : res.path("message").asText()));
+            throw new BizException(502, failure + "：" + (res == null ? "无响应" : res.path("message").asText()));
         }
         return res;
     }
@@ -317,9 +630,125 @@ public class MaterialService {
         return m;
     }
 
+    /** 详情：主条目（合并而来）附带成员素材，供「各书写法」展示 */
+    public Material detail(Long id) {
+        Material m = get(id);
+        if (isMergeMaster(m)) {
+            m.setMembers(membersOf(id));
+        }
+        fillPortableInfo(List.of(m));
+        return m;
+    }
+
+    // ------------------------------------------------------------------ 架空版（2026-11-06）
+
+    public static final String PORTABLE_TYPE = "portable";
+
+    public static boolean isPortable(Material m) {
+        return m != null && m.getSource() != null && PORTABLE_TYPE.equals(m.getSource().get("type"));
+    }
+
+    /** 原素材 id → 它的架空版 [{id, title, workspaceId, workspaceTitle}]（每个架空工作区各一条） */
+    public Map<Long, List<Map<String, Object>>> portableIndex() {
+        Map<Long, List<Map<String, Object>>> out = new HashMap<>();
+        for (Material p : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getTitle, Material::getSource)
+                .apply("json_extract(source, '$.type') = 'portable'").orderByAsc(Material::getId))) {
+            Object origin = p.getSource() == null ? null : p.getSource().get("originId");
+            if (origin instanceof Number n) {
+                Map<String, Object> x = new LinkedHashMap<>();
+                x.put("id", p.getId());
+                x.put("title", p.getTitle());
+                x.put("workspaceId", p.getSource().get("workspaceId"));
+                x.put("workspaceTitle", p.getSource().get("workspaceTitle"));
+                out.computeIfAbsent(n.longValue(), k -> new ArrayList<>()).add(x);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 列表 / 详情：原素材填 portables；架空版填 originState = ok / changed（原素材之后改过）/ merged（已并入别的条目）/ deleted
+     */
+    public void fillPortableInfo(List<Material> list) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        Map<Long, List<Map<String, Object>>> index = list.stream().anyMatch(m -> !isPortable(m)) ? portableIndex() : Map.of();
+        for (Material m : list) {
+            if (!isPortable(m)) {
+                m.setPortables(index.getOrDefault(m.getId(), List.of()));
+                continue;
+            }
+            Object origin = m.getSource().get("originId");
+            Material o = origin instanceof Number n ? materialMapper.selectById(n.longValue()) : null;
+            if (o == null) {
+                m.setOriginState("deleted");
+            } else if (o.getMergedInto() != null) {
+                m.setOriginState("merged");
+            } else {
+                String at = Objects.toString(m.getSource().get("originUpdateTime"), "");
+                m.setOriginState(o.getUpdateTime() != null && !at.isEmpty() && o.getUpdateTime().toString().compareTo(at) > 0
+                        ? "changed" : "ok");
+            }
+        }
+    }
+
+    /** 架空版的展示字段由档案拼出（档案是唯一来源；手改档案保存时重新拼） */
+    @SuppressWarnings("unchecked")
+    static void applyPortable(Material req, Map<String, Object> p) {
+        String title = Objects.toString(p.get("title"), "").trim();
+        if (!title.isEmpty()) {
+            req.setTitle(title);
+        }
+        req.setSummary(Objects.toString(p.get("core"), ""));
+        String world = Objects.toString(p.get("exampleWorld"), "").trim();
+        req.setDetail((world.isEmpty() ? "" : "示例世界：" + world + "\n\n") + Objects.toString(p.get("example"), ""));
+        Map<String, Object> attrs = new LinkedHashMap<>();
+        attrs.put("可移植度", "direct".equals(p.get("portability")) ? "直接可用" : "需要适配");
+        attrs.put("叙事用途", joinList(p.get("uses"), x -> String.valueOf(x)));
+        attrs.put("换世界时替换", joinList(p.get("replace"), x -> x instanceof Map<?, ?> r ? r.get("from") + " → " + r.get("to") : String.valueOf(x)));
+        attrs.put("一定保留", joinList(p.get("keep"), x -> String.valueOf(x)));
+        attrs.put("原作绑定", joinList(p.get("bindings"), x -> x instanceof Map<?, ?> b ? b.get("term") + "（" + b.get("kind") + "）" : String.valueOf(x)));
+        attrs.put("节点对应", joinList(p.get("nodeMap"), x -> x instanceof Map<?, ?> n
+                ? n.get("title") + " → " + n.get("role") + (n.get("replaceWith") == null ? "" : " → " + n.get("replaceWith")) : String.valueOf(x)));
+        attrs.put("通用联动", joinList(p.get("rules"), x -> x instanceof Map<?, ?> r ? r.get("if") + " → " + r.get("then") : String.valueOf(x)));
+        attrs.values().removeIf(v -> v == null || String.valueOf(v).isBlank());
+        req.setAttributes(attrs);
+        List<String> tags = new ArrayList<>(req.getTags() == null ? List.of() : req.getTags());
+        if (!tags.contains("架空")) {
+            tags.add(0, "架空");
+        }
+        req.setTags(tags);
+    }
+
+    private static String joinList(Object v, java.util.function.Function<Object, String> fn) {
+        if (!(v instanceof List<?> l)) {
+            return "";
+        }
+        return l.stream().filter(Objects::nonNull).map(fn).filter(s -> !s.isBlank()).collect(Collectors.joining("；"));
+    }
+
+    /** 主条目的成员（各版本），按 id 升序 */
+    public List<Material> membersOf(Long masterId) {
+        return materialMapper.selectList(new LambdaQueryWrapper<Material>().eq(Material::getMergedInto, masterId)
+                .orderByAsc(Material::getId));
+    }
+
+    public static boolean isMergeMaster(Material m) {
+        return m.getSource() != null && "merge".equals(m.getSource().get("type"));
+    }
+
     /** 新增（id 为空）或修改；标签同步写入 material_tag */
     @Transactional
+    @SuppressWarnings("unchecked")
     public Material save(Material req) {
+        if (req.getProfile() != null && req.getProfile().get("portable") instanceof Map<?, ?> pp) {
+            Map<String, Object> src = req.getId() == null ? req.getSource() : get(req.getId()).getSource();
+            if (src != null && PORTABLE_TYPE.equals(src.get("type"))) {
+                applyPortable(req, cleanPortable((Map<String, Object>) pp));
+            }
+        }
         String title = req.getTitle() == null ? "" : req.getTitle().trim();
         if (title.isEmpty()) {
             throw new BizException(400, "素材名称不能为空");
@@ -339,6 +768,9 @@ public class MaterialService {
         }
         if (req.getPinned() != null) {
             m.setPinned(req.getPinned());
+        }
+        if (req.getProfile() != null) {
+            m.setProfile(mergeProfile(req.getId() == null ? null : m.getProfile(), req.getProfile(), req.getId() != null));
         }
         if (req.getId() == null) {
             m.setSource(req.getSource() == null ? Map.of("type", "manual") : req.getSource());
@@ -363,6 +795,89 @@ public class MaterialService {
         }
         syncTags(m.getId(), m.getTags());
         return m;
+    }
+
+    /**
+     * 量级画像的合并：新建时照收（整理卡片给的 tier / bookPos，tierBy = ai）；修改时只看 tier —— 和原来不同 = 作者手改，
+     * 记 tierBy = user（之后 AI 批量标注不再覆盖），bookPos 等代码算的字段保留原值。
+     */
+    static final Set<String> PORTABLE_KEYS = Set.of("title", "core", "bindings", "uses", "replace", "keep", "portability",
+            "exampleWorld", "example", "leaks", "targetWorld", "nodeMap", "rules", "edited");
+
+    /** 架空档案只留已知字段；portability 只认 direct / adapt */
+    public static Map<String, Object> cleanPortable(Map<String, Object> p) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        p.forEach((k, v) -> {
+            if (PORTABLE_KEYS.contains(k) && v != null) {
+                out.put(k, v);
+            }
+        });
+        if (!"direct".equals(out.get("portability")) && !"adapt".equals(out.get("portability"))) {
+            out.put("portability", "adapt");
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> mergeProfile(Map<String, Object> old, Map<String, Object> req, boolean edit) {
+        Map<String, Object> out = new LinkedHashMap<>(old == null ? Map.of() : old);
+        // 架空档案（2026-11-04）：入库时从卡片带来，编辑时整体替换；传 null 删除
+        if (req.containsKey("portable")) {
+            if (req.get("portable") instanceof Map<?, ?> p && !p.isEmpty()) {
+                out.put("portable", cleanPortable((Map<String, Object>) p));
+            } else {
+                out.remove("portable");
+            }
+        }
+        Integer tier = tierValue(req.get("tier"));
+        if (!edit) {
+            if (tier != null) {
+                out.put("tier", tier);
+                out.put("tierBy", "user".equals(req.get("tierBy")) ? "user" : "ai");
+                if (req.get("tierReason") != null) {
+                    out.put("tierReason", trimTo(String.valueOf(req.get("tierReason")), 60));
+                }
+            }
+            if (req.get("bookPos") instanceof Number n) {
+                out.put("bookPos", Math.max(0, Math.min(1, n.doubleValue())));
+            }
+        } else if (req.containsKey("tier") && !Objects.equals(tier, tierValue(out.get("tier")))) {
+            if (tier == null) {
+                out.remove("tier");
+                out.remove("tierReason");
+                out.remove("tierBy");
+            } else {
+                out.put("tier", tier);
+                out.put("tierBy", "user");
+                out.put("tierReason", "作者手改");
+            }
+        }
+        return out;
+    }
+
+    /** 1–5 的量级，其他值 = null */
+    public static Integer tierValue(Object v) {
+        int t;
+        if (v instanceof Number n) {
+            t = n.intValue();
+        } else {
+            try {
+                t = Integer.parseInt(Objects.toString(v, "").trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return t >= 1 && t <= 5 ? t : null;
+    }
+
+    /** 素材的量级（没标 = null） */
+    public static Integer tierOf(Material m) {
+        return m.getProfile() == null ? null : tierValue(m.getProfile().get("tier"));
+    }
+
+    /** 素材首次出现在原书的位置 0–1（没有 = null） */
+    public static Double bookPosOf(Material m) {
+        return m.getProfile() != null && m.getProfile().get("bookPos") instanceof Number n ? n.doubleValue() : null;
     }
 
     /** 保留 / 取消保留 */
@@ -409,6 +924,28 @@ public class MaterialService {
      * 按来源书删除：删除该书所有<b>未保留</b>的素材；withCandidates = true 时同时忽略该书的待确认候选。
      * → {deleted, kept（保留而未删的）, candidatesIgnored}
      */
+    /** 删除提取工作区用：这次提取的素材候选数（不分状态） */
+    public long countCandidatesOfExtract(Long extractId) {
+        return candidateMapper.selectCount(new LambdaQueryWrapper<MaterialCandidate>().eq(MaterialCandidate::getExtractId, extractId));
+    }
+
+    /** 删除提取工作区：删掉这次提取的全部素材候选（已保存进素材库的素材不动），返回删除条数 */
+    @Transactional
+    public int deleteCandidatesOfExtract(Long extractId) {
+        return candidateMapper.delete(new LambdaQueryWrapper<MaterialCandidate>().eq(MaterialCandidate::getExtractId, extractId));
+    }
+
+    /** 某本来源书的素材数 → [全部, 其中标记保留的] */
+    public long[] countBySource(String book) {
+        if (book == null || book.isBlank()) {
+            return new long[]{0, 0};
+        }
+        long total = materialMapper.selectCount(new LambdaQueryWrapper<Material>().eq(Material::getSourceBook, book));
+        long pinned = materialMapper.selectCount(new LambdaQueryWrapper<Material>().eq(Material::getSourceBook, book)
+                .eq(Material::getPinned, true));
+        return new long[]{total, pinned};
+    }
+
     @Transactional
     public Map<String, Object> deleteBySource(String book, boolean withCandidates) {
         String name = book == null ? "" : book.trim();
@@ -444,6 +981,9 @@ public class MaterialService {
     @Transactional
     public void delete(Long id) {
         get(id);
+        // 删除主条目 = 拆分：成员重新出现在素材库
+        materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getMergedInto, id)
+                .set(Material::getMergedInto, null));
         materialMapper.deleteById(id);
         tagMapper.delete(new LambdaQueryWrapper<MaterialTag>().eq(MaterialTag::getMaterialId, id));
         candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>()
@@ -575,6 +1115,18 @@ public class MaterialService {
         return list;
     }
 
+    /** 各提取任务还没确认的候选数 {extractId: n}（没有待确认候选的任务不在里面） */
+    public Map<Long, Long> pendingCountsByExtract() {
+        Map<Long, Long> out = new LinkedHashMap<>();
+        for (Map<String, Object> row : candidateMapper.selectMaps(new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<MaterialCandidate>()
+                .select("extract_id AS eid", "COUNT(*) AS n").eq("status", MaterialCandidate.PENDING).groupBy("extract_id"))) {
+            if (row.get("eid") instanceof Number eid && row.get("n") instanceof Number n) {
+                out.put(eid.longValue(), n.longValue());
+            }
+        }
+        return out;
+    }
+
     public long pendingCount() {
         return candidateMapper.selectCount(new LambdaQueryWrapper<MaterialCandidate>()
                 .eq(MaterialCandidate::getStatus, MaterialCandidate.PENDING));
@@ -609,7 +1161,21 @@ public class MaterialService {
             source.put("fileName", c.getFileName());
             source.put("chapters", p.getOrDefault("chapters", List.of()));
             source.put("excerpt", str(p.get("excerpt")));
+            if (p.get("facts") instanceof List<?> facts && !facts.isEmpty()) {
+                source.put("facts", facts); // 新版提取：每条事实 + 原文依据 + 章节
+            }
             m.setSource(source);
+            Map<String, Object> profile = new LinkedHashMap<>();
+            if (tierValue(p.get("tier")) != null) {
+                profile.put("tier", tierValue(p.get("tier")));
+                profile.put("tierReason", "整理卡片时标注");
+            }
+            if (p.get("bookPos") instanceof Number pos) {
+                profile.put("bookPos", pos.doubleValue());
+            }
+            if (!profile.isEmpty()) {
+                m.setProfile(profile);
+            }
             Material created = save(m);
             candidateMapper.update(null, new LambdaUpdateWrapper<MaterialCandidate>().eq(MaterialCandidate::getId, id)
                     .set(MaterialCandidate::getStatus, MaterialCandidate.SAVED)
@@ -618,6 +1184,200 @@ public class MaterialService {
             saved.add(created);
         }
         return saved;
+    }
+
+    /**
+     * 卡片内容 → 还没保存的素材（来源 = 这次提取；事实、章节、原文摘录进 source，量级 / 书中位置进 profile）。
+     */
+    public Material fromCard(Map<String, Object> p, Long extractId, Long fileId, String fileName) {
+        Material m = new Material();
+        m.setCategory(String.valueOf(p.get("category")));
+        m.setSubtype(str(p.get("subtype")));
+        m.setTitle(str(p.get("title")));
+        m.setSummary(str(p.get("summary")));
+        m.setAttributes(p.get("attributes") instanceof Map<?, ?> a ? objectMapper.convertValue(a, Map.class) : Map.of());
+        m.setDetail(str(p.get("detail")));
+        m.setTags(p.get("tags") instanceof List<?> t ? t.stream().map(String::valueOf).toList() : List.of());
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("type", "extract");
+        source.put("extractId", extractId);
+        source.put("fileId", fileId);
+        source.put("fileName", fileName);
+        source.put("chapters", p.getOrDefault("chapters", List.of()));
+        source.put("excerpt", str(p.get("excerpt")));
+        if (p.get("facts") instanceof List<?> facts && !facts.isEmpty()) {
+            source.put("facts", facts);
+        }
+        m.setSource(source);
+        Map<String, Object> profile = new LinkedHashMap<>();
+        if (tierValue(p.get("tier")) != null) {
+            profile.put("tier", tierValue(p.get("tier")));
+            profile.put("tierReason", "整理卡片时标注");
+        }
+        if (p.get("bookPos") instanceof Number pos) {
+            profile.put("bookPos", pos.doubleValue());
+        }
+        if (!profile.isEmpty()) {
+            m.setProfile(profile);
+        }
+        return m;
+    }
+
+    /**
+     * 「更新已有」：把新卡片并进库里已有的素材 —— 属性只补没有的 / 空的键，概括 / 详细 / 细分类型只在原来为空时填，
+     * 标签取并集（≤12），事实和章节追加没有的（事实按原文依据去重，≤40）。名称、分类、量级不动。
+     */
+    @Transactional
+    @SuppressWarnings("unchecked")
+    public Material mergeInto(Long targetId, Material incoming) {
+        Material t = get(targetId);
+        Map<String, Object> attrs = new LinkedHashMap<>(t.getAttributes() == null ? Map.of() : t.getAttributes());
+        if (incoming.getAttributes() != null) {
+            incoming.getAttributes().forEach((k, v) -> {
+                Object old = attrs.get(k);
+                if (old == null || String.valueOf(old).isBlank()) {
+                    attrs.put(k, v);
+                }
+            });
+        }
+        Material req = new Material();
+        req.setId(t.getId());
+        req.setCategory(t.getCategory());
+        req.setSubtype(isBlank(t.getSubtype()) ? incoming.getSubtype() : t.getSubtype());
+        req.setTitle(t.getTitle());
+        req.setSummary(isBlank(t.getSummary()) ? incoming.getSummary() : t.getSummary());
+        req.setDetail(isBlank(t.getDetail()) ? incoming.getDetail() : t.getDetail());
+        req.setAttributes(attrs);
+        List<String> tags = new ArrayList<>(t.getTags() == null ? List.of() : t.getTags());
+        if (incoming.getTags() != null) {
+            incoming.getTags().stream().filter(x -> !tags.contains(x)).forEach(tags::add);
+        }
+        req.setTags(tags.size() > 12 ? new ArrayList<>(tags.subList(0, 12)) : tags);
+        Material saved = save(req);
+        // 来源：补事实 / 章节（save 不改 source，单独更新）
+        Map<String, Object> src = new LinkedHashMap<>(t.getSource() == null ? Map.of() : t.getSource());
+        Map<String, Object> in = incoming.getSource() == null ? Map.of() : incoming.getSource();
+        List<Object> facts = new ArrayList<>(src.get("facts") instanceof List<?> l ? (List<Object>) l : List.of());
+        Set<String> quotes = new java.util.HashSet<>();
+        facts.forEach(f -> quotes.add(f instanceof Map<?, ?> fm ? String.valueOf(fm.get("quote")) : String.valueOf(f)));
+        if (in.get("facts") instanceof List<?> nf) {
+            for (Object f : nf) {
+                String q = f instanceof Map<?, ?> fm ? String.valueOf(fm.get("quote")) : String.valueOf(f);
+                if (facts.size() < 40 && quotes.add(q)) {
+                    facts.add(f);
+                }
+            }
+        }
+        if (!facts.isEmpty()) {
+            src.put("facts", facts);
+        }
+        List<Object> chapters = new ArrayList<>(src.get("chapters") instanceof List<?> l ? (List<Object>) l : List.of());
+        if (in.get("chapters") instanceof List<?> nc) {
+            nc.stream().filter(ch -> !chapters.contains(ch)).forEach(chapters::add);
+        }
+        src.put("chapters", chapters.size() > 80 ? new ArrayList<>(chapters.subList(0, 80)) : chapters);
+        updateSource(t.getId(), src);
+        return saved;
+    }
+
+    /**
+     * 「作为可选版本」：新卡片存成一条素材，挂到库里已有的那条下面 —— 已有的是合并主条目（或它的成员）就加进主条目的版本；
+     * 否则新建一个同书的主条目（共性 = 已有那条的名称 / 概括），已有的和新的都成为它的可选版本（同精炼合并）。→ 主条目
+     */
+    @Transactional
+    @SuppressWarnings("unchecked")
+    public Material attachVersion(Long targetId, Material incoming) {
+        Material target = get(targetId);
+        if (target.getMergedInto() != null) {
+            target = get(target.getMergedInto());
+        }
+        Material created = save(incoming);
+        if (isMergeMaster(target)) {
+            Map<String, Object> src = new LinkedHashMap<>(target.getSource());
+            List<Object> members = new ArrayList<>(src.get("members") instanceof List<?> l ? (List<Object>) l : List.of());
+            members.add(created.getId());
+            List<Object> variants = new ArrayList<>(src.get("variants") instanceof List<?> l ? (List<Object>) l : List.of());
+            variants.add(variantOf(created));
+            src.put("members", members);
+            src.put("variants", variants);
+            updateSource(target.getId(), src);
+            materialMapper.update(null, new LambdaUpdateWrapper<Material>().eq(Material::getId, created.getId())
+                    .set(Material::getMergedInto, target.getId()));
+            return get(target.getId());
+        }
+        Material master = new Material();
+        master.setCategory(target.getCategory());
+        master.setTitle(target.getTitle());
+        master.setSubtype("");
+        master.setSummary(target.getSummary());
+        master.setDetail("");
+        master.setAttributes(Map.of());
+        List<String> tags = new ArrayList<>(target.getTags() == null ? List.of() : target.getTags());
+        master.setTags(tags.size() > 8 ? new ArrayList<>(tags.subList(0, 8)) : tags);
+        master.setSourceBook(target.getSourceBook() == null ? MANUAL_BOOK : target.getSourceBook());
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("type", "merge");
+        source.put("members", List.of(target.getId(), created.getId()));
+        source.put("books", target.getSourceBook() == null ? List.of() : List.of(target.getSourceBook()));
+        source.put("variants", List.of(variantOf(target), variantOf(created)));
+        master.setSource(source);
+        Material saved = save(master);
+        materialMapper.update(null, new LambdaUpdateWrapper<Material>().in(Material::getId, target.getId(), created.getId())
+                .set(Material::getMergedInto, saved.getId()));
+        return get(saved.getId());
+    }
+
+    /** 架空版重做时刷新它的 source（save 不改已有素材的 source） */
+    public void updateSourceOf(Long id, Map<String, Object> source) {
+        updateSource(id, source);
+    }
+
+    private void updateSource(Long id, Map<String, Object> source) {
+        Material patch = new Material();
+        patch.setId(id);
+        patch.setSource(source);
+        patch.setUpdateTime(LocalDateTime.now());
+        materialMapper.updateById(patch);
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static Map<String, Object> variantOf(Material m) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        v.put("id", m.getId());
+        v.put("book", Objects.toString(m.getSourceBook(), ""));
+        v.put("title", m.getTitle());
+        v.put("label", "");
+        v.put("note", "");
+        return v;
+    }
+
+    /** 这本书（来源书）的全部素材（不含大字段 detail / attributes），书库和入库比对用 */
+    public List<Material> materialsOfBook(String book) {
+        if (book == null) {
+            return List.of();
+        }
+        return materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getCategory, Material::getSubtype, Material::getTitle, Material::getSummary,
+                        Material::getTags, Material::getSource, Material::getPinned, Material::getMergedInto,
+                        Material::getProfile, Material::getUseCount, Material::getUpdateTime)
+                .eq(Material::getSourceBook, book).orderByAsc(Material::getCategory).orderByDesc(Material::getUpdateTime));
+    }
+
+    /** 这本书（来源书）的素材：「分类|归一化标题」→ 那条素材（id / 标题 / mergedInto） */
+    public Map<String, Material> titleIndexOfBook(String book) {
+        Map<String, Material> out = new LinkedHashMap<>();
+        if (book == null) {
+            return out;
+        }
+        for (Material m : materialMapper.selectList(new LambdaQueryWrapper<Material>()
+                .select(Material::getId, Material::getCategory, Material::getTitle, Material::getMergedInto)
+                .eq(Material::getSourceBook, book).orderByAsc(Material::getId))) {
+            out.putIfAbsent(m.getCategory() + "|" + normTitle(m.getTitle()), m);
+        }
+        return out;
     }
 
     public int ignoreCandidates(List<Long> ids) {

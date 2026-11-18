@@ -35,6 +35,10 @@ public class SchemaMigrations {
         boolean addedBook = addColumn("material", "source_book", "TEXT");
         addColumn("material", "pinned", "INTEGER NOT NULL DEFAULT 0");
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_material_source_book ON material (source_book)");
+        // 精炼 / 合并：成员指向主条目
+        addColumn("material", "merged_into", "INTEGER");
+        jdbc.execute("CREATE INDEX IF NOT EXISTS idx_material_merged_into ON material (merged_into)");
+        addColumn("material", "profile", "TEXT");
         if (addedBook) {
             backfillSourceBook();
         }
@@ -48,6 +52,15 @@ public class SchemaMigrations {
         // 解析过程（每次尝试成败）+ 失败记录的原因：解析管理里直接查看
         addColumn("crawl_site_rule", "error", "TEXT");
         addColumn("crawl_site_rule", "attempt_log", "TEXT");
+        // 文件管理显示小说章节数（老文件由 FileService 启动后在后台补数）
+        addColumn("file", "chapter_count", "INTEGER");
+        addColumn("novel_extract", "options", "TEXT");
+        addColumn("novel_extract", "title", "TEXT"); // 同一本书多个提取工作区的名字（2026-11-03）
+        // 模型配置：添加方式 / 提供商 ID / API 协议 / 模型目录（2026-11-02）
+        addColumn("ai_model_config", "provider_type", "TEXT");
+        addColumn("ai_model_config", "provider_id", "TEXT");
+        addColumn("ai_model_config", "protocol", "TEXT");
+        addColumn("ai_model_config", "models", "TEXT");
     }
 
     /** 列不存在时添加，返回是否新加 */

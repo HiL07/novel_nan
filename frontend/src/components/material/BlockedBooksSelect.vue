@@ -60,12 +60,12 @@ onMounted(load)
   float: right;
   margin-left: 12px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .empty {
   padding: 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   text-align: center;
 }
 </style>

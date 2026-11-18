@@ -13,11 +13,11 @@
         >
           <template #prefix><el-icon><MagicStick /></el-icon></template>
         </el-input>
-        <el-button type="primary" :loading="creating" :disabled="!!ai.busy.value && !creating" @click="createFromConcept">
+        <el-button type="primary" :loading="creating" :disabled="newLocked && !creating" @click="createFromConcept">
           AI 创建角色
         </el-button>
-        <el-dropdown trigger="click" :disabled="!!ai.busy.value" @command="genMany">
-          <el-button :disabled="!!ai.busy.value">
+        <el-dropdown trigger="click" :disabled="newLocked" @command="genMany">
+          <el-button :disabled="newLocked">
             批量生成<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
@@ -46,6 +46,7 @@
           <div class="cc-tagline">{{ item.tagline || '（还没有一句话人设）' }}</div>
         </div>
         <div class="cc-ops" @click.stop>
+          <AppearEditor :item="item" />
           <el-button
             v-if="ai?.enabled.value"
             size="small"
@@ -62,8 +63,8 @@
             v-if="ai?.enabled.value"
             size="small"
             :icon="MagicStick"
-            :loading="ai.busy.value === `item:${item._id}`"
-            :disabled="!!ai.busy.value"
+            :loading="ai.loading(`item:${item._id}`)"
+            :disabled="ai.locked(itemPath(item, i))"
             title="AI 补全这个角色还没填的项"
             @click="fillItem(item, i)"
           >
@@ -109,13 +110,15 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, ChatDotRound, CopyDocument, Delete, MagicStick, Plus } from '@element-plus/icons-vue'
 import OptionField from './OptionField.vue'
 import CharacterChat from './CharacterChat.vue'
+import AppearEditor from './AppearEditor.vue'
 import { clone, isFilled, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
+import { NEW_ITEMS } from '@/novel-options/aiFill'
 
 /** 「主要角色」分组的角色卡视图（schema 中 display: 'characterCards'）：value 为角色数组，字段按 section 分页 */
 const props = defineProps({
@@ -134,7 +137,8 @@ const SECTIONS = [
   { key: 'story', label: '经历与能力' },
   { key: 'other', label: '其他' }
 ]
-const AVATAR_COLORS = ['#5b8ff9', '#e8684a', '#5ad8a6', '#f6bd16', '#9270ca', '#ff9d4d', '#269a99', '#e86452']
+// 头像底色：压低饱和度，和墨色主题（styles/ink-theme.css）相配
+const AVATAR_COLORS = ['#b03a2e', '#4f7a52', '#3f5f7a', '#a67c3d', '#6b4f7a', '#8a5a44', '#2f6b6b', '#9b4a3c']
 
 const open = reactive(new Set())
 const tabOf = reactive({})
@@ -172,6 +176,9 @@ function colorOf(item) {
   for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0
   return AVATAR_COLORS[h % AVATAR_COLORS.length]
 }
+
+/** 新建角色（一句话创建 / 批量生成）只往列表里追加：大模型时不影响补全已有角色 */
+const newLocked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label, NEW_ITEMS]))
 
 function itemPath(item, i) {
   return [...props.path, props.field.label, `${props.field.itemLabel || '角色'} ${i + 1}${item.name ? '：' + item.name : ''}`]
@@ -264,13 +271,13 @@ function addGroupField() {
 }
 .cc-card {
   margin-bottom: 10px;
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 10px;
   transition: box-shadow 0.15s, border-color 0.15s;
 }
 .cc-card:hover {
-  border-color: #c6e2ff;
+  border-color: var(--el-color-primary-light-7);
 }
 .cc-card.is-open {
   border-color: var(--el-color-primary-light-5);
@@ -308,17 +315,17 @@ function addGroupField() {
 .cc-name {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .cc-meta {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cc-tagline {
   margin-top: 3px;
   overflow: hidden;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -330,7 +337,7 @@ function addGroupField() {
 }
 .cc-arrow {
   margin-left: 4px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cc-preview {
   padding: 0 14px 12px 70px;
@@ -345,12 +352,12 @@ function addGroupField() {
   margin-top: 6px;
   font-size: 13px;
   line-height: 1.6;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .cc-progress {
   margin-top: 6px;
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .cc-tabs {
   padding: 0 14px 10px;
@@ -358,6 +365,6 @@ function addGroupField() {
 .cc-tab-count {
   margin-left: 4px;
   font-size: 11px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 </style>

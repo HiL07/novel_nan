@@ -59,6 +59,10 @@
     <el-dialog v-model="createDlg.visible" title="新建工作区" width="560px">
       <el-form label-width="96px">
         <el-form-item label="小说标题"><el-input v-model="createDlg.title" maxlength="100" placeholder="可稍后修改" /></el-form-item>
+        <el-form-item label="一句构思">
+          <el-input v-model="createDlg.premise" maxlength="500" placeholder="可选，如：法师喜欢冒险" />
+          <div class="muted hint">填了就直接进入「自动规划」：AI 按素材库选配角色 / 世界观 / 设定，规划前 10 章大纲和伏笔（不写正文，每一步你都能改）</div>
+        </el-form-item>
         <el-form-item label="模型">
           <div class="api-info">
             <el-tag :type="defaultModel.source === 'api' ? 'success' : 'info'" size="small">{{ defaultModel.source === 'api' ? '大模型' : '本地模型' }}</el-tag>
@@ -77,7 +81,7 @@
       </el-form>
       <template #footer>
         <el-button @click="createDlg.visible = false">取消</el-button>
-        <el-button type="primary" @click="onCreate">创建并开始写作</el-button>
+        <el-button type="primary" @click="onCreate">{{ createDlg.premise.trim() ? '创建并开始规划' : '创建并开始写作' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -89,7 +93,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { CONTEXT_WINDOWS, createNovel, deleteNovel, getGenStatus, listNovels } from '@/api/novelGen'
-import { downloadModel, listAdapters, listModels } from '@/api/localModel'
+import { downloadModel, isGenerationModel, listAdapters, listModels } from '@/api/localModel'
 import { listModels as listAiModels } from '@/api/aiModel'
 import { errorMessage } from '@/api/request'
 
@@ -103,7 +107,7 @@ const apiError = ref('')
 const loadError = ref('')
 const downloading = ref(false)
 
-const localModels = computed(() => models.value.filter((m) => m.exists))
+const localModels = computed(() => models.value.filter((m) => m.exists && isGenerationModel(m)))
 /** 新工作区的默认模型：有可用的大模型就用它，否则用默认的本地模型（进入工作区后可随时切换） */
 const defaultModel = computed(() => {
   const baseId = status.value?.defaultModel.model?.id || localModels.value[0]?.id
@@ -117,6 +121,7 @@ const defaultModelLabel = computed(() => {
   return m.apiName || '还没有可用的大模型（可先创建，稍后在「模型配置」中启用，或在工作区里改用本地模型）'
 })
 const modelLabel = (m) => {
+  if (m?.source === 'gguf') return 'GGUF · llama.cpp 页运行中的模型'
   if (m?.source !== 'local') return `大模型 · ${m?.apiName || '当前启用的模型'}`
   const base = models.value.find((x) => x.id === m.baseId)?.name || m.baseId
   return m.adapterId ? `${base} + ${adapters.value.find((a) => a.id === m.adapterId)?.name || m.adapterId}` : base
@@ -172,10 +177,10 @@ async function detectApi() {
   }
 }
 
-const createDlg = reactive({ visible: false, title: '', contextWindow: 8192 })
+const createDlg = reactive({ visible: false, title: '', premise: '', contextWindow: 8192 })
 async function openCreate() {
   await detectApi()
-  Object.assign(createDlg, { visible: true, title: '', contextWindow: 8192 })
+  Object.assign(createDlg, { visible: true, title: '', premise: '', contextWindow: 8192 })
 }
 
 async function onCreate() {
@@ -186,7 +191,9 @@ async function onCreate() {
       contextWindow: createDlg.contextWindow
     }), '创建失败')
     createDlg.visible = false
-    open(n.id)
+    const premise = createDlg.premise.trim()
+    if (premise) router.push({ path: `/novel/workspace/${n.id}`, query: { plan: premise } })
+    else open(n.id)
   } catch (e) {
     ElMessage.error(e.message)
   }
@@ -218,7 +225,7 @@ onActivated(load)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -228,7 +235,7 @@ onActivated(load)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .model-alert {
   margin-bottom: 14px;
@@ -239,7 +246,7 @@ onActivated(load)
 .model-ok {
   margin-bottom: 14px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 code {
   font-family: Consolas, monospace;
@@ -247,7 +254,7 @@ code {
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .api-info {
   display: flex;
@@ -265,7 +272,7 @@ code {
 }
 .novel-card {
   padding: 14px 16px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -277,7 +284,7 @@ code {
 .novel-title {
   font-size: 16px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .novel-meta {
   display: flex;
@@ -285,7 +292,7 @@ code {
   justify-content: space-between;
   margin-top: 6px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .novel-foot {
   display: flex;

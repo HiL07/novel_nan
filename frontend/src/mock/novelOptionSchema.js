@@ -114,7 +114,22 @@ const world = {
       max: 3,
       options: [opt('monarchy', '君主制'), opt('sect_rule', '宗门统治'), opt('family', '世家门阀'), opt('corporate', '财团寡头'), opt('federation', '联邦'), opt('tribal', '部落'), opt('anarchy', '无政府')]
     },
-    { key: 'rules', label: '特殊世界规则', type: 'tags', desc: '这个世界独有的设定', placeholder: '如：灵气复苏、夜晚禁止外出，回车添加' },
+    { key: 'rules', label: '特殊世界规则', type: 'tags', desc: '不能违反的硬性规则，一句话一条；每一章写作都会带上，AI 不会写出和它冲突的内容。如：法师塔必须建在地脉节点上', placeholder: '如：灵气复苏、夜晚禁止外出，回车添加' },
+    { key: 'powerSystem', label: '力量体系', type: 'textarea', desc: '怎么获得力量、怎么变强；境界从低到高和突破的代价',
+      placeholder: '如：魔力来自与元素签订的契约。学徒 → 正式法师 → 大法师 → 传奇（每次晋升要独自完成一次元素试炼）' },
+    {
+      // 世界背景卡：这个世界最有画面感的地方 / 体系 / 历史（浮空城、法师塔…），提到时才进写作上下文
+      key: 'lore',
+      label: '世界背景卡',
+      type: 'group',
+      itemLabel: '背景卡',
+      fields: [
+        { key: 'name', label: '标题', type: 'text', placeholder: '如：浮空城' },
+        { key: 'detail', label: '内容', type: 'textarea', placeholder: '具体到能写进正文：它是什么、为什么特别、和主角有什么关系' }
+      ]
+    },
+    { key: 'mechanics', label: '世界机制', type: 'textarea', desc: '这个世界怎么运转：制度、交易、周期性现象的具体做法和数字；每一章写作也都会带上。如：塔税按副本收益的 30% 征收。和世界规则写的是同一件事时只留一处', placeholder: '这个世界怎么运转：交易、律法、禁忌、魔力潮汐…' },
+    { key: 'resources', label: '关键资源', type: 'textarea', placeholder: '大家争的东西：谁控制、为什么值得争' },
     { key: 'worldNote', label: '世界观补充', type: 'textarea', placeholder: '任何想补充的世界设定' }
   ],
   suggestions: [
@@ -216,7 +231,7 @@ const characterFields = [
 ]
 
 /** 设定结构版本：保存的工作区设定低于此版本时，在加载时补上新增的内置字段（见 novel-options/schema.js#upgradeConfig） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 4
 
 const characters = {
   key: 'characters',
@@ -306,6 +321,32 @@ const plot = {
         { key: 'name', label: '节点名称', type: 'text', placeholder: '如：宗门大比' },
         { key: 'stage', label: '所处阶段', type: 'single', options: [opt('begin', '开篇'), opt('rising', '发展'), opt('climax', '高潮'), opt('end', '结局')] },
         { key: 'detail', label: '情节描述', type: 'textarea' }
+      ]
+    },
+    {
+      // 阶段表：第几章主角是什么实力、能正面面对多强的对手。写正文时进核心设定【当前阶段】，
+      // 灵感墙 / AI 构思按当前章数查它，挡掉超出量级的素材（Python spec.stage_at）
+      key: 'stages',
+      label: '阶段表',
+      type: 'group',
+      itemLabel: '阶段',
+      desc: '按章节划分主角的成长阶段。写正文、灵感墙、AI 构思会按当前章数查这张表：主角能面对的对手不超过「对手上限」，更强的只当传说 / 伏笔',
+      fields: [
+        { key: 'range', label: '章节范围', type: 'text', placeholder: '如：1-50（只写一个数 = 从这章起到以后）' },
+        { key: 'power', label: '主角实力', type: 'text', placeholder: '如：炼气期，村里的少年' },
+        {
+          key: 'tierMax',
+          label: '对手上限',
+          type: 'single',
+          options: [
+            opt('1', '1 级 · 个人 / 街头', '一个人、一伙山匪、一头野兽'),
+            opt('2', '2 级 · 地方', '村镇、小门派、一片山林的妖王'),
+            opt('3', '3 级 · 一国 / 大宗门', '王朝、大宗门、一方霸主'),
+            opt('4', '4 级 · 大陆 / 天下', '魔族大军、天下第一宗'),
+            opt('5', '5 级 · 神明 / 世界之外', '神、天道、上古存在')
+          ]
+        },
+        { key: 'note', label: '备注', type: 'text', placeholder: '如：这个阶段只在青石镇一带活动' }
       ]
     }
   ],

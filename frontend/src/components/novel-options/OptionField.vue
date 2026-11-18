@@ -5,19 +5,20 @@
       <el-tag v-if="editMode" size="small" type="info" effect="plain">{{ typeLabel }}</el-tag>
       <el-tag v-if="field.custom" size="small" type="warning" effect="plain">自定义</el-tag>
       <span v-if="field.desc" class="field-desc">{{ field.desc }}</span>
-      <el-button
-        v-if="ai?.enabled.value && aiFillable(field)"
-        class="ai-btn"
-        link
-        type="primary"
-        size="small"
-        :icon="MagicStick"
-        :loading="ai.busy.value === ai.busyKeyOf(path, field)"
-        :disabled="!!ai.busy.value"
-        @click="ai.fillField(field, container, siblings || [], path)"
-      >
-        AI 生成
-      </el-button>
+      <template v-if="ai?.enabled.value && aiFillable(field) && !choice">
+        <!-- 文本 / 标签：一个「AI 重新生成」，四种方式 = 给不给方向 × 参考不参考已有内容（参考已有 = 在框内内容上扩写 / 补充）；
+             单选 / 多选的 AI 在「自定义」里（只从已有选项里挑一个没有实际用处） -->
+        <span class="ai-btn" :title="serialTip">
+          <AiRegenButton
+            :label="field.label"
+            :has-existing="hasContent"
+            :loading="ai.loading(`${ai.busyKeyOf(path, field)}|ai`)"
+            :disabled="locked"
+            :text="hasContent ? 'AI 重新生成' : 'AI 生成'"
+            @run="(o) => ai.fillField(field, container, siblings || [], path, o)"
+          />
+        </span>
+      </template>
       <el-button
         v-if="editMode && siblings"
         class="field-remove"
@@ -33,7 +34,7 @@
 
     <!-- 选择类：选项 + 选中项的细分选项 -->
     <template v-if="choice">
-      <ChoiceWidget :field="field" :value="value" />
+      <ChoiceWidget :field="field" :value="value" :path="path" :container="container" :siblings="siblings" />
       <div v-for="o in expandedOptions" :key="o.value" class="sub-block">
         <div class="sub-title">「{{ o.label }}」的细分选项</div>
         <OptionField
@@ -63,6 +64,7 @@
             <el-tag v-if="item._fromMaterial" size="small" type="success" effect="plain" class="from-material">来自素材库</el-tag>
           </span>
           <div>
+            <AppearEditor v-if="field.key !== 'stages'" :item="item" />
             <el-button link size="small" :icon="CopyDocument" @click="duplicateItem(i)">复制</el-button>
             <el-button link type="danger" size="small" :icon="Delete" @click="value.splice(i, 1)">删除</el-button>
           </div>
@@ -86,11 +88,11 @@
           split-button
           size="small"
           type="primary"
-          :disabled="!!ai.busy.value"
+          :disabled="ai.locked([...path, field.label, NEW_ITEMS])"
           @click="ai.genItems(field, value, path, 3)"
           @command="(n) => ai.genItems(field, value, path, n)"
         >
-          <el-icon v-if="ai.busy.value !== ai.busyKeyOf(path, field)"><MagicStick /></el-icon>
+          <el-icon v-if="!ai.loading(ai.busyKeyOf(path, field))"><MagicStick /></el-icon>
           <el-icon v-else class="is-loading"><Loading /></el-icon>
           AI 生成 3 个{{ field.itemLabel || '项' }}
           <template #dropdown>
@@ -113,13 +115,15 @@
 <script setup>
 import { computed } from 'vue'
 import { CopyDocument, Delete, Loading, MagicStick, Plus } from '@element-plus/icons-vue'
+import AiRegenButton from '@/components/ai/AiRegenButton.vue'
 import ChoiceWidget from './ChoiceWidget.vue'
 import InputWidget from './InputWidget.vue'
 import CharacterCards from './CharacterCards.vue'
+import AppearEditor from './AppearEditor.vue'
 import { FIELD_TYPES, isChoice } from '@/novel-options/fieldTypes'
 import { clone, ensureValue, newGroupItem, uid } from '@/novel-options/schema'
 import { useOptionEditor } from '@/novel-options/editor'
-import { aiFillable } from '@/novel-options/aiFill'
+import { NEW_ITEMS, aiFillable } from '@/novel-options/aiFill'
 
 /**
  * 递归渲染一个选项项。
@@ -141,6 +145,14 @@ ensureValue(props.container, props.field)
 const value = computed(() => ensureValue(props.container, props.field))
 const choice = computed(() => isChoice(props.field))
 const typeLabel = computed(() => FIELD_TYPES[props.field.type]?.label || props.field.type)
+
+/* ---- AI 按钮：大模型时可同时生成别处，只锁会写到同一处的；本地模型一次一个 ---- */
+const locked = computed(() => !!ai?.enabled.value && ai.locked([...props.path, props.field.label]))
+const hasContent = computed(() => {
+  const v = props.container[props.field.key]
+  return Array.isArray(v) ? v.length > 0 : String(v ?? '').trim() !== ''
+})
+const serialTip = computed(() => (['local', 'gguf'].includes(ai?.cfg?.source) && locked.value ? '本地模型 / GGUF 一次只能处理一个 AI 请求' : ''))
 
 /** 选中的、且有细分选项（或处于编辑模式可添加细分）的选项 */
 const expandedOptions = computed(() =>
@@ -182,7 +194,7 @@ function duplicateItem(i) {
   padding: 12px 0;
 }
 .option-field + .option-field {
-  border-top: 1px dashed #ebeef5;
+  border-top: 1px dashed var(--el-border-color-lighter);
 }
 .field-head {
   display: flex;
@@ -194,7 +206,7 @@ function duplicateItem(i) {
 .field-label {
   font-size: 14px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .depth-1 .field-label,
 .depth-2 .field-label,
@@ -203,18 +215,26 @@ function duplicateItem(i) {
 }
 .field-desc {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .field-remove {
   margin-left: auto;
 }
 .ai-btn {
   margin-left: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+/* AI 按钮平时藏起来，鼠标移到字段上或在里面输入时才出现（正在运行的保持显示） */
+.option-field:hover > .field-head .ai-btn,
+.option-field:focus-within > .field-head .ai-btn,
+.ai-btn:has(.is-loading) {
+  opacity: 1;
 }
 .sub-block {
   margin-top: 12px;
   padding: 4px 14px 8px;
-  background: #f8faff;
+  background: var(--el-color-primary-light-9);
   border-left: 3px solid var(--el-color-primary-light-5);
   border-radius: 0 6px 6px 0;
 }
@@ -226,8 +246,8 @@ function duplicateItem(i) {
 .group-item {
   margin-bottom: 12px;
   padding: 0 14px 4px;
-  background: #fafafa;
-  border: 1px solid #ebeef5;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
 }
 .group-item-head {
@@ -237,8 +257,8 @@ function duplicateItem(i) {
   padding: 8px 0;
   font-size: 13px;
   font-weight: 600;
-  color: #606266;
-  border-bottom: 1px solid #ebeef5;
+  color: var(--el-text-color-regular);
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 .from-material {
   margin-left: 6px;

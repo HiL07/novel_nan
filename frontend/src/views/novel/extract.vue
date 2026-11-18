@@ -3,167 +3,72 @@
     <el-card class="box-card" shadow="never">
       <template #header>
         <div class="card-header">
-          <span class="card-title">小说提取</span>
+          <span class="card-title">小说提取 · 工作区</span>
           <div>
             <el-button @click="router.push('/ai/model')">模型配置</el-button>
-            <el-button @click="router.push('/file/manage')">去选择文件</el-button>
             <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
+            <el-button type="primary" :icon="Plus" @click="router.push('/file/manage')">去选择小说</el-button>
           </div>
         </div>
       </template>
 
-      <el-empty v-if="!tasks.length" description="暂无提取任务，请在「文件管理」中选择小说文件后点击「小说提取」" />
+      <el-empty v-if="!tasks.length" description="还没有提取工作区：在「文件管理」里选小说文件，点「小说提取」" />
 
-      <el-table v-else :data="tasks" stripe>
-        <el-table-column prop="fileName" label="文件" min-width="200" show-overflow-tooltip />
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="STATUS[row.status]?.type" size="small">{{ STATUS[row.status]?.label || row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="进度" width="180">
-          <template #default="{ row }">
-            <el-progress
-              :percentage="row.progress || 0"
-              :status="row.status === 'SUCCEEDED' ? 'success' : row.status === 'FAILED' ? 'exception' : ''"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column prop="message" label="说明" min-width="220" show-overflow-tooltip />
-        <el-table-column prop="createTime" label="创建时间" width="170" />
-        <el-table-column label="操作" width="90" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" :disabled="row.status !== 'SUCCEEDED'" @click="openDetail(row.id)">
-              查看
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <!-- 结果详情 -->
-    <el-drawer v-model="drawerVisible" :title="detail?.fileName" size="60%" destroy-on-close>
-      <el-tabs v-if="result" v-model="drawerTab">
-        <el-tab-pane label="提取结果" name="result">
-      <div class="result">
-        <div class="result-actions">
-          <el-button type="primary" :icon="Download" :disabled="!!draft" @click="downloadJson">下载 JSON</el-button>
-          <template v-if="!draft">
-            <el-button :icon="EditPen" @click="startEdit">修改结果</el-button>
-            <span v-if="result.editedAt" class="chapter-meta">已手动修改 · {{ result.editedAt }}</span>
-          </template>
-          <template v-else>
-            <el-button type="success" :icon="Check" :loading="saving" @click="saveEdit">保存修改</el-button>
-            <el-button @click="draft = null">取消</el-button>
-            <span class="chapter-meta">AI 提取的摘要、人物、事件、伏笔、文风都可以改；展开章节即可编辑</span>
-          </template>
+      <template v-else>
+        <div class="toolbar">
+          <el-radio-group v-model="filter" size="small">
+            <el-radio-button v-for="(f, k) in FILTERS" :key="k" :value="k">{{ f.label }}（{{ counts[k] || 0 }}）</el-radio-button>
+          </el-radio-group>
+          <el-input v-model="keyword" size="small" clearable placeholder="按书名 / 工作区名搜索" class="search" />
         </div>
-
-        <el-descriptions :column="3" border size="small">
-          <el-descriptions-item label="总字数">{{ result.wordCount }}</el-descriptions-item>
-          <el-descriptions-item label="章节数">{{ result.chapterCount }}</el-descriptions-item>
-          <el-descriptions-item label="对话占比">{{ percent(result.style?.dialogRatio) }}</el-descriptions-item>
-          <el-descriptions-item label="节奏">
-            <el-input v-if="draft" v-model="draft.style.pace" size="small" />
-            <template v-else>{{ result.style?.pace || '-' }}</template>
-          </el-descriptions-item>
-          <el-descriptions-item label="基调">
-            <el-input-tag v-if="draft" v-model="draft.style.tones" size="small" />
-            <template v-else>{{ (result.style?.tones || []).join('、') || '-' }}</template>
-          </el-descriptions-item>
-          <el-descriptions-item label="解析失败分块">{{ result.failedChunks }}</el-descriptions-item>
-          <el-descriptions-item label="使用模型">{{ result.model || '-' }}</el-descriptions-item>
-        </el-descriptions>
-
-        <h4>
-          人物（{{ view.characters?.length || 0 }}）
-          <el-button v-if="draft" link type="primary" :icon="Plus" @click="draft.characters.unshift({ name: '', role: '', firstAppear: '', chapterCount: 0 })">添加人物</el-button>
-        </h4>
-        <el-table v-if="draft" :data="draft.characters" size="small" max-height="360">
-          <el-table-column label="姓名" width="140">
-            <template #default="{ row }"><el-input v-model="row.name" size="small" /></template>
-          </el-table-column>
-          <el-table-column label="身份 / 首次动作" min-width="220">
-            <template #default="{ row }"><el-input v-model="row.role" size="small" /></template>
-          </el-table-column>
-          <el-table-column label="首次出场" width="160">
-            <template #default="{ row }"><el-input v-model="row.firstAppear" size="small" /></template>
-          </el-table-column>
-          <el-table-column label="" width="60">
-            <template #default="{ $index }"><el-button link type="danger" :icon="Delete" @click="draft.characters.splice($index, 1)" /></template>
-          </el-table-column>
-        </el-table>
-        <el-table v-else :data="result.characters" size="small" max-height="300">
-          <el-table-column prop="name" label="姓名" width="120" />
-          <el-table-column prop="role" label="身份 / 首次动作" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="firstAppear" label="首次出场" width="160" show-overflow-tooltip />
-          <el-table-column prop="chapterCount" label="出场章数" width="90" />
-        </el-table>
-
-        <h4>章节（{{ view.chapters?.length || 0 }}）</h4>
-        <!-- 分页 + 只渲染展开的章节内容：长篇有数百章、上千条事件，全部渲染会卡 -->
-        <el-collapse v-model="openChapters">
-          <el-collapse-item v-for="(ch, i) in pagedChapters" :key="chapterOffset + i" :name="chapterOffset + i">
-            <template #title>
-              <span class="chapter-title">{{ ch.title }}</span>
-              <span class="chapter-meta">{{ ch.wordCount }} 字</span>
-            </template>
-            <el-form v-if="draft && openChapters.includes(chapterOffset + i)" label-width="72px" size="small" class="chapter-edit">
-              <el-form-item label="标题"><el-input v-model="ch.title" /></el-form-item>
-              <el-form-item label="摘要"><el-input v-model="ch.summary" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" /></el-form-item>
-              <el-form-item label="出场人物"><el-input-tag v-model="ch.characters" placeholder="回车添加" /></el-form-item>
-              <el-form-item label="关键事件">
-                <div class="events-edit">
-                  <div v-for="(ev, j) in ch.events" :key="j" class="event-row">
-                    <el-input v-model="ev.summary" placeholder="事件" class="ev-summary" />
-                    <el-input v-model="ev.location" placeholder="地点" class="ev-meta" />
-                    <el-input v-model="ev.time" placeholder="时间" class="ev-meta" />
-                    <el-button link type="danger" :icon="Delete" @click="ch.events.splice(j, 1)" />
-                  </div>
-                  <el-button link type="primary" :icon="Plus" @click="ch.events.push({ summary: '', location: '', time: '' })">添加事件</el-button>
-                </div>
-              </el-form-item>
-              <el-form-item label="伏笔"><el-input-tag v-model="ch.foreshadowing" placeholder="回车添加" /></el-form-item>
-            </el-form>
-            <template v-else-if="openChapters.includes(chapterOffset + i)">
-            <p><b>摘要：</b>{{ ch.summary || '-' }}</p>
-            <p><b>出场人物：</b>{{ ch.characters?.join('、') || '-' }}</p>
-            <div v-if="ch.events?.length">
-              <b>关键事件：</b>
-              <ul>
-                <li v-for="(ev, j) in ch.events" :key="j">
-                  {{ ev.summary }}
-                  <span v-if="ev.location || ev.time" class="chapter-meta">（{{ [ev.location, ev.time].filter(Boolean).join('，') }}）</span>
-                </li>
-              </ul>
+        <el-empty v-if="!groups.length" description="没有符合条件的工作区" />
+        <!-- 按书分组：同一本书可以有多个工作区 -->
+        <section v-for="g in groups" :key="g.book" class="book-group">
+          <div class="group-head">
+            <span class="group-title">《{{ g.book }}》</span>
+            <span class="muted">{{ g.items.length }} 个工作区</span>
+            <el-button link type="primary" size="small" :icon="Plus" @click="newFor(g.items[0])">新建工作区</el-button>
+          </div>
+          <div class="novel-grid">
+            <div v-for="t in g.items" :key="t.id" class="novel-card" @click="open(t)">
+              <div class="card-top">
+                <div class="novel-title" :title="t.fileName">{{ wsTitle(t) }}</div>
+                <el-dropdown trigger="click" @command="(c) => onCommand(c, t)">
+                  <el-button link :icon="MoreFilled" @click.stop />
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="rename" :icon="EditPen">改名</el-dropdown-item>
+                      <el-dropdown-item command="delete" :icon="Delete" divided>删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
+              <div class="novel-sub">{{ wsSubtitle(t) }}</div>
+              <div class="novel-meta">
+                <span>
+                  <el-tag :type="WS_STATUS[t.status]?.type" size="small">{{ WS_STATUS[t.status]?.label || t.status }}</el-tag>
+                  <span v-if="['QUEUED', 'RUNNING', 'INTERRUPTED'].includes(t.status)" class="pct">{{ t.progress || 0 }}%</span>
+                </span>
+                <el-tag v-if="cardText(t)" :type="cardText(t).type" size="small" effect="plain">{{ cardText(t).label }}</el-tag>
+              </div>
+              <el-progress
+                v-if="['QUEUED', 'RUNNING', 'INTERRUPTED'].includes(t.status)"
+                class="bar"
+                :percentage="t.progress || 0"
+                :show-text="false"
+                :stroke-width="4"
+                :status="t.status === 'INTERRUPTED' ? 'warning' : ''"
+              />
+              <div class="novel-msg" :title="t.message">{{ t.message || '' }}</div>
+              <div class="novel-foot">
+                <span class="muted">更新于 {{ String(t.updateTime || '').slice(0, 16) }}</span>
+                <span class="muted">{{ wan(t.wordCount) }}</span>
+              </div>
             </div>
-            <p v-if="ch.foreshadowing?.length"><b>伏笔：</b>{{ ch.foreshadowing.join('；') }}</p>
-            </template>
-          </el-collapse-item>
-        </el-collapse>
-        <el-pagination
-          v-if="(view.chapters?.length || 0) > CHAPTER_PAGE"
-          v-model:current-page="chapterPage"
-          class="pager"
-          small
-          layout="prev, pager, next, total"
-          :total="view.chapters.length"
-          :page-size="CHAPTER_PAGE"
-        />
-      </div>
-        </el-tab-pane>
-        <el-tab-pane :label="`素材候选${result.materials ? '（' + result.materials.length + '）' : ''}`" name="materials" lazy>
-          <el-alert
-            v-if="!result.materials"
-            type="info"
-            :closable="false"
-            show-icon
-            title="这次提取没有开启素材提取。可在「文件管理」中重新提取并勾选「提取创作素材」。"
-          />
-          <CandidateReview v-else :extract-id="detail.id" />
-        </el-tab-pane>
-      </el-tabs>
-    </el-drawer>
+          </div>
+        </section>
+      </template>
+    </el-card>
   </div>
 </template>
 
@@ -171,90 +76,99 @@
 import { computed, onActivated, onDeactivated, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Check, Delete, Download, EditPen, Plus, Refresh } from '@element-plus/icons-vue'
-import { getExtract, listExtracts, updateExtractResult } from '@/api/novel'
-import CandidateReview from '@/components/material/CandidateReview.vue'
+import { Delete, EditPen, MoreFilled, Plus, Refresh } from '@element-plus/icons-vue'
+import { bookOf, createExtractDraft, listExtracts } from '@/api/novel'
 import { errorMessage } from '@/api/request'
+import { WS_STATUS, deleteWorkspace, optionsOf, renameWorkspace, wsSubtitle, wsTitle } from '@/components/material/extractWorkspaces'
 
-const STATUS = {
-  QUEUED: { label: '排队中', type: 'info' },
-  RUNNING: { label: '提取中', type: 'warning' },
-  SUCCEEDED: { label: '已完成', type: 'success' },
-  FAILED: { label: '失败', type: 'danger' }
+/**
+ * 小说提取 = 工作区列表（同「小说创作」），按书分组，同一本书可以有多个工作区（比如快速档读全书 + 深拆读前 10 章）。
+ * 点进去是全屏的提取工作区，顶部切换 提取工作区 / 卡片整理 / 素材选择（views/novel/extractWorkspace.vue）。
+ */
+const FILTERS = {
+  all: { label: '全部', test: () => true },
+  active: { label: '提取中', test: (t) => ['DRAFT', 'QUEUED', 'RUNNING', 'INTERRUPTED'].includes(t.status) },
+  done: { label: '提取完成', test: (t) => t.status === 'SUCCEEDED' },
+  failed: { label: '失败', test: (t) => t.status === 'FAILED' }
 }
 const POLL_MS = 3000
-const CHAPTER_PAGE = 30
 
 const route = useRoute()
 const router = useRouter()
-
 const loading = ref(false)
 const tasks = ref([])
-const drawerVisible = ref(false)
-const detail = ref(null)
-const drawerTab = ref('result')
-const chapterPage = ref(1)
-const openChapters = ref([])
+const filter = ref('all')
+const keyword = ref('')
 let timer = null
 
-const result = computed(() => {
-  if (!detail.value?.result) return null
-  try {
-    return JSON.parse(detail.value.result)
-  } catch {
-    return null
+const counts = computed(() => {
+  const c = {}
+  for (const k in FILTERS) c[k] = tasks.value.filter(FILTERS[k].test).length
+  return c
+})
+/* 筛选后按书名分组；组按最近更新排序，组内也是 */
+const groups = computed(() => {
+  const kw = keyword.value.trim()
+  const byBook = new Map()
+  for (const t of tasks.value) {
+    if (!FILTERS[filter.value].test(t)) continue
+    const book = bookOf(t.fileName) || t.fileName || '未命名'
+    if (kw && !book.includes(kw) && !(t.title || '').includes(kw)) continue
+    if (!byBook.has(book)) byBook.set(book, [])
+    byBook.get(book).push(t)
   }
+  const time = (t) => String(t.updateTime || '')
+  return [...byBook.entries()]
+    .map(([book, items]) => ({ book, items: items.sort((a, b) => time(b).localeCompare(time(a))) }))
+    .sort((a, b) => time(b.items[0]).localeCompare(time(a.items[0])))
 })
 
-const chapterOffset = computed(() => (chapterPage.value - 1) * CHAPTER_PAGE)
-/* 修改结果：draft 为可编辑副本（深层响应式），保存时整体提交；查看时用只读的 result */
-const draft = ref(null)
-const saving = ref(false)
-const view = computed(() => draft.value || result.value)
-const pagedChapters = computed(() => view.value?.chapters?.slice(chapterOffset.value, chapterOffset.value + CHAPTER_PAGE) || [])
+function cardText(t) {
+  const st = t.latestCompile?.status
+  if (['QUEUED', 'RUNNING'].includes(st)) return { label: `卡片整理中 ${t.latestCompile.progress || 0}%`, type: 'warning' }
+  if (st === 'INTERRUPTED') return { label: '卡片整理已暂停', type: 'warning' }
+  if (t.pendingCount > 0) return { label: `${t.pendingCount} 条素材待选择`, type: 'warning' }
+  if (st === 'SUCCEEDED' || t.candidateCount > 0) return { label: '素材已处理', type: 'success' }
+  if (t.status === 'SUCCEEDED' && optionsOf(t).materials?.enabled) return { label: '未整理卡片', type: 'info' }
+  return null
+}
+const wan = (n) => (n ? (n >= 10000 ? `${(n / 10000).toFixed(1)} 万字` : `${n} 字`) : '')
 
-function startEdit() {
-  const d = JSON.parse(JSON.stringify(result.value))
-  d.style = d.style || {}
-  d.style.tones = d.style.tones || []
-  d.characters = d.characters || []
-  d.chapters.forEach((ch) => {
-    ch.characters = ch.characters || []
-    ch.events = ch.events || []
-    ch.foreshadowing = ch.foreshadowing || []
-  })
-  draft.value = d
+function open(t) {
+  router.push(`/novel/extract/${t.id}`)
 }
 
-async function saveEdit() {
-  saving.value = true
+/** 同一本书再建一个工作区（用这一组里某个工作区的文件；这个文件已有未开始的就打开它） */
+async function newFor(t) {
   try {
-    const d = draft.value
-    d.characters = d.characters.filter((c) => c.name?.trim())
-    d.chapters.forEach((ch) => (ch.events = ch.events.filter((ev) => ev.summary?.trim())))
-    const res = await updateExtractResult(detail.value.id, d)
-    if (res.code !== 0) throw new Error(res.message || '保存失败')
-    detail.value = Object.freeze(res.data)
-    draft.value = null
-    ElMessage.success('提取结果已保存')
+    const res = await createExtractDraft(t.fileId)
+    if (res.code !== 0) throw new Error(res.message)
+    router.push(`/novel/extract/${res.data.id}`)
   } catch (e) {
-    ElMessage.error(errorMessage(e, '保存提取结果失败'))
-  } finally {
-    saving.value = false
+    ElMessage.error(errorMessage(e, '新建提取工作区失败'))
   }
 }
 
-const hasActive = () => tasks.value.some((t) => t.status === 'QUEUED' || t.status === 'RUNNING')
+async function onCommand(cmd, t) {
+  if (cmd === 'rename') {
+    const title = await renameWorkspace(t)
+    if (title !== null) t.title = title
+  } else if (cmd === 'delete' && (await deleteWorkspace(t))) {
+    await loadTasks()
+  }
+}
+
+const hasActive = () =>
+  tasks.value.some(
+    (t) => ['QUEUED', 'RUNNING'].includes(t.status) || ['QUEUED', 'RUNNING'].includes(t.latestCompile?.status)
+  )
 
 async function loadTasks() {
   loading.value = true
   try {
     const res = await listExtracts()
-    if (res.code === 0) {
-      tasks.value = res.data || []
-    } else {
-      ElMessage.error(res.message || '加载失败')
-    }
+    if (res.code === 0) tasks.value = res.data || []
+    else ElMessage.error(res.message || '加载失败')
   } catch (e) {
     ElMessage.error(errorMessage(e, '加载提取任务失败'))
   } finally {
@@ -270,51 +184,20 @@ function schedulePoll() {
     if (hasActive()) schedulePoll()
   }, POLL_MS)
 }
-
 function stopPoll() {
   if (timer) clearTimeout(timer)
   timer = null
 }
 
-async function openDetail(id) {
-  try {
-    const res = await getExtract(id)
-    if (res.code !== 0) {
-      ElMessage.error(res.message || '加载失败')
-      return
-    }
-    detail.value = Object.freeze(res.data) // 只读展示：大结果不做深层响应式
-    draft.value = null
-    chapterPage.value = 1
-    openChapters.value = []
-    // 有待确认的素材候选时直接打开「素材候选」
-    drawerTab.value = res.data.message?.includes("素材候选") ? "materials" : "result"
-    drawerVisible.value = true
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '加载提取结果失败'))
-  }
-}
-
-function downloadJson() {
-  const blob = new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `${(detail.value.fileName || 'novel').replace(/\.[^.]+$/, '')}_提取结果.json`
-  a.click()
-  URL.revokeObjectURL(a.href)
-}
-
-function percent(v) {
-  return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '-'
-}
-
-// 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止轮询
+// 页面被 keep-alive 缓存：进入时拉取并按需轮询，离开时停止轮询；旧链接 ?id= 直接进那个工作区
 onActivated(async () => {
+  const id = Number(route.query.id)
+  if (id) {
+    router.replace(`/novel/extract/${id}`)
+    return
+  }
   await loadTasks()
   if (hasActive()) schedulePoll()
-  const id = Number(route.query.id)
-  const task = tasks.value.find((t) => t.id === id)
-  if (task?.status === 'SUCCEEDED') openDetail(id)
 })
 onDeactivated(stopPoll)
 </script>
@@ -323,7 +206,7 @@ onDeactivated(stopPoll)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -333,47 +216,101 @@ onDeactivated(stopPoll)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
-.pager {
-  margin-top: 10px;
-  justify-content: center;
-}
-.chapter-edit {
-  padding-top: 6px;
-}
-.events-edit {
-  width: 100%;
-}
-.event-row {
+.toolbar {
   display: flex;
-  gap: 6px;
-  margin-bottom: 4px;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
 }
-.ev-summary {
-  flex: 1;
+.search {
+  width: 200px;
+  margin-left: auto;
 }
-.ev-meta {
-  width: 110px;
-}
-.result-actions {
-  margin-bottom: 12px;
-}
-.result h4 {
-  margin: 18px 0 8px;
-  color: #303133;
-}
-.chapter-title {
-  font-weight: 600;
-}
-.chapter-meta {
-  margin-left: 8px;
-  color: #909399;
+.muted {
   font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
-.result p,
-.result ul {
-  margin: 4px 0;
-  line-height: 1.7;
+.novel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+.novel-card {
+  padding: 14px 16px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.novel-card:hover {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+}
+.book-group {
+  margin-bottom: 20px;
+}
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.group-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.card-top .novel-title {
+  flex: 1;
+  min-width: 0;
+}
+.novel-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.novel-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.novel-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.pct {
+  margin-left: 6px;
+}
+.bar {
+  margin-top: 6px;
+}
+.novel-msg {
+  margin-top: 6px;
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.novel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
 }
 </style>

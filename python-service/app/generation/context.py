@@ -6,13 +6,15 @@
   L3 最近正文（本章此前内容的末尾；本章第一段时为上一章末尾）  先保留最少 RECENT_MIN，最后再用剩余预算扩展
   L2 前情（各章摘要 + 合并后的前情概要）  最近一章优先，越早越先被裁
   L1 按需设定卡片（按与本章目标 / 最近正文的相关度检索）  不相关的不放；预算不足时相关度低的先裁
+  L1b 故事账本（未回收伏笔 / 本章相关角色状态 / 最近时间线）+ 下一章预告（只在本章最后一段带）
+      优先级在相关卡片之后、早期摘要之前
 
 输入预算 = 上下文窗口 − 本次最大输出 − 余量；最终用聊天模板精确计数校验。
 """
 import re
 from dataclasses import dataclass, field
 
-from . import prompts
+from . import facts as facts_mod, prompts
 from .backends import GenerationError, TextGenerator
 from .spec import Card, Constraints
 
@@ -31,6 +33,7 @@ class ChapterState:
     segment_chars: int
     is_last: bool
     prev_chapter_tail: str    # 上一章正文（本章第一段时用于衔接）
+    plan: dict | None = None  # 本章规划 {beats, foreshadow, hook}（chapter._plan）
 
 
 @dataclass
@@ -61,18 +64,24 @@ def score_card(card: Card, haystack: str) -> int:
 
 
 def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries: list[dict], arc_summary: str,
-          window: int, max_new_tokens: int, recent_max: int) -> BuiltContext:
+          window: int, max_new_tokens: int, recent_max: int, facts: dict | None = None,
+          next_outline: str = "") -> BuiltContext:
     window = min(window, gen.context_limit)
     budget = window - max_new_tokens - MARGIN
     system = prompts.system(cons.core, cons.open, cons.roster)
     task = prompts.task(chapter_index=ch.index, title=ch.title, goal=ch.goal, target_chars=ch.target_chars,
                         written_chars=len(ch.written), segment_chars=ch.segment_chars,
-                        is_first=not ch.written, is_last=ch.is_last)
+                        is_first=not ch.written, is_last=ch.is_last, plan=ch.plan)
 
-    def messages(cards: list[Card], sums: list[dict], arc: bool, recent: str) -> list[dict]:
+    def messages(cards: list[Card], sums: list[dict], arc: bool, recent: str, ledger: str = "",
+                 preview: str = "") -> list[dict]:
         parts = []
         if cards:
             parts.append("【相关设定】\n" + "\n\n".join(c.text for c in cards))
+        if ledger:
+            parts.append("【故事账本】\n" + ledger)
+        if preview:
+            parts.append("【下一章预告】" + preview + "\n（只用于本章结尾的铺垫，不要提前写下一章的内容）")
         story = []
         if arc and arc_summary:
             story.append(f"（更早章节）{arc_summary}")
@@ -91,8 +100,22 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
                               f"（窗口 {window} − 输出 {max_new_tokens}）。请精简核心设定、改用 32768 窗口或减小每段生成长度")
 
     source_text = ch.written or ch.prev_chapter_tail
-    haystack = " ".join([ch.title, ch.goal, source_text[-3000:]] + [s["summary"] for s in summaries[-2:]])
-    scored = sorted(((score_card(c, haystack), c) for c in cons.cards), key=lambda x: -x[0])
+    beats = (ch.plan or {}).get("beats") or []
+    haystack = " ".join([ch.title, ch.goal, source_text[-3000:]] + beats + [s["summary"] for s in summaries[-2:]])
+    # 出场条件（世界书的「持续 / 排除词」）：登场后 span 章内即使本章没提到也带上；检索文本里有排除词的不带
+    def card_score(c: Card) -> int:
+        if any(w in haystack for w in c.appear.get("exclude", [])):
+            return 0
+        s = score_card(c, haystack)
+        span = c.appear.get("span", 0)
+        if not s and span and any(k and k in x["summary"] for x in summaries if x["index"] >= ch.index - span
+                                  for k in c.keywords):
+            s = 1
+        return s
+
+    # 人物内核卡（id 以 persona. 开头）在相关卡片里排最前：预算紧张时比普通设定卡后裁
+    scored = sorted(((card_score(c), c) for c in cons.cards),
+                    key=lambda x: (-(x[0] > 0 and x[1].id.startswith("persona.")), -x[0]))
     relevant = [c for s, c in scored if s > 0]
     irrelevant = [c for s, c in scored if s <= 0]
     recent_sums = sorted(summaries, key=lambda s: -s["index"])
@@ -121,6 +144,13 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
         dropped_sums.append(recent_sums[0]["index"])
     for c in relevant:
         (chosen_cards.append(c) if try_add(c.text) else dropped_cards.append(c.title))
+    ledger = facts_mod.context_text(facts, haystack) if facts else ""
+    if ledger and not try_add(ledger):
+        ledger = ""
+    preview = next_outline if ch.is_last else ""
+    if preview and not try_add(preview):
+        preview = ""
+    has_ledger, has_preview = bool(ledger), bool(preview)
     if arc_summary:
         use_arc = try_add(arc_summary)
     for s in recent_sums[1:]:
@@ -133,14 +163,18 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
         if extra > RECENT_MIN:
             recent = _clip_to_sentence(gen.tail_tokens(source_text, extra))
 
-    # 精确校验：超出则按「扩展的正文 → 早期摘要 → 低相关卡片 → 前情概要」顺序回退
-    msgs = messages(chosen_cards, chosen_sums, use_arc, recent)
+    # 精确校验：超出则按「扩展的正文 → 早期摘要 → 下一章预告 → 故事账本 → 低相关卡片 → 前情概要」顺序回退
+    msgs = messages(chosen_cards, chosen_sums, use_arc, recent, ledger, preview)
     total = gen.count_messages(msgs)
     while total > budget:
         if recent != recent_min:
             recent = recent_min
         elif len(chosen_sums) > 1:
             dropped_sums.append(chosen_sums.pop()["index"])
+        elif preview:
+            preview = ""
+        elif ledger:
+            ledger = ""
         elif chosen_cards:
             dropped_cards.append(chosen_cards.pop().title)
         elif use_arc:
@@ -151,12 +185,13 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
             recent = ""
         else:
             break
-        msgs = messages(chosen_cards, chosen_sums, use_arc, recent)
+        msgs = messages(chosen_cards, chosen_sums, use_arc, recent, ledger, preview)
         total = gen.count_messages(msgs)
 
     layers = {
         "L0_core": gen.count_text(system),
         "L1_cards": gen.count_text("\n\n".join(c.text for c in chosen_cards)),
+        "L1b_facts": gen.count_text(ledger + preview),
         "L2_story": gen.count_text("\n".join(([arc_summary] if use_arc else []) + [s["summary"] for s in chosen_sums])),
         "L3_recent": gen.count_text(recent),
         "L4_task": gen.count_text(task),
@@ -165,6 +200,9 @@ def build(gen: TextGenerator, cons: Constraints, ch: ChapterState, *, summaries:
         messages=msgs, prompt_tokens=total, input_budget=budget, window=window, max_new_tokens=max_new_tokens,
         layers=layers,
         included={"cards": [c.title for c in chosen_cards], "summaries": sorted(s["index"] for s in chosen_sums),
-                  "arcSummary": use_arc, "recentChars": len(recent)},
-        dropped={"cards": dropped_cards, "summaries": sorted(dropped_sums)},
+                  "arcSummary": use_arc, "recentChars": len(recent), "facts": bool(ledger),
+                  "nextPreview": bool(preview)},
+        dropped={"cards": dropped_cards, "summaries": sorted(dropped_sums),
+                 "facts": has_ledger and not ledger, "nextPreview": has_preview and not preview,
+                 "notYet": [c.title for c in cons.not_yet]},
     )

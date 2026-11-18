@@ -391,7 +391,7 @@ onMounted(async () => {
   margin-bottom: 16px;
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -401,7 +401,7 @@ onMounted(async () => {
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .current {
   display: flex;
@@ -409,11 +409,11 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 12px;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .current-type {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 code,
 .path {
@@ -423,7 +423,7 @@ code,
 }
 .muted {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .danger {
   font-size: 12px;
@@ -435,7 +435,7 @@ code,
 .step-title {
   margin: 18px 0 10px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .step-title:first-child {
   margin-top: 0;
@@ -484,12 +484,12 @@ code,
   align-items: center;
   gap: 6px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .problem-detail {
   margin: 4px 0;
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .problem-fix {
   display: flex;
@@ -505,14 +505,14 @@ code,
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 4px;
 }
 .req-title {
   margin: 16px 0 6px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .req-table {
   max-width: 640px;
@@ -522,7 +522,7 @@ code,
   padding-left: 20px;
   line-height: 2;
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .guide pre {
   margin: 4px 0;
@@ -536,7 +536,7 @@ code,
 .browser-list {
   height: 360px;
   overflow: auto;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
 }
 .browser-item {
@@ -548,7 +548,7 @@ code,
   cursor: pointer;
 }
 .browser-item:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 .py-file {
   font-weight: 600;

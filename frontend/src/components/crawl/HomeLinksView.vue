@@ -48,7 +48,7 @@ const ROLE_TYPE = { category: 'success', book: 'primary', chapter: 'warning', li
   margin-bottom: 8px;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .mono {
@@ -67,11 +67,11 @@ const ROLE_TYPE = { category: 'success', book: 'primary', chapter: 'warning', li
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 4px;
   font-size: 12px;
   line-height: 20px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   text-decoration: none;
 }
 a.chip:hover {

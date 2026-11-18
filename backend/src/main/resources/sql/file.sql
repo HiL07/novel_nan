@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS file (
     file_size    INTEGER NOT NULL DEFAULT 0,       -- 字节
     content_type TEXT,                             -- MIME 类型
     file_ext     TEXT,                             -- 扩展名（不含点）
+    chapter_count INTEGER,                         -- txt/md 数出的章节数；0 = 未识别到章节，-1 = 读不了，NULL = 未统计
     create_time  TEXT    NOT NULL                  -- yyyy-MM-dd HH:mm:ss
 );
 CREATE INDEX IF NOT EXISTS idx_file_create_time ON file (create_time);

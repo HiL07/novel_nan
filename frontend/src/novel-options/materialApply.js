@@ -39,6 +39,36 @@ function findTargetCategory(categories, target) {
     : categories.find((c) => c.custom && c.templateKey === target.template)
 }
 
+const MARKS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫'
+
+/**
+ * 多版本素材（合并而来的主条目）复制进设定前，按选的用法展开成一条普通素材：
+ * 只用某一版 = 共性 + 那一版的概括 / 属性 / 详细；让 AI 选 / 融合 = 共性 + 「可选版本」逐条写进详细（落到备注里，作者自己挑）。
+ * members：主条目详情里的成员素材。
+ */
+export function resolveVersions(master, members = []) {
+  const variants = master.source?.variants || []
+  if (master.source?.type !== 'merge' || variants.length < 2) return master
+  const memberOf = (id) => members.find((m) => m.id === id)
+  const chosen = variants.find((v) => String(v.id) === String(master.variant))
+  if (chosen) {
+    const mem = memberOf(chosen.id) || {}
+    return {
+      ...master,
+      summary: mem.summary || chosen.note || master.summary,
+      attributes: { ...(master.attributes || {}), ...(mem.attributes || {}) },
+      detail: [chosen.note, mem.detail].filter(Boolean).join('\n')
+    }
+  }
+  const lines = variants.map((v, i) => {
+    const mem = memberOf(v.id) || {}
+    const book = v.book ? `《${v.book}》` : ''
+    return `${MARKS[i] || i + 1}${v.label || v.title}${book}：${v.note || mem.summary || ''}`
+  })
+  const head = master.variant === 'blend' ? '可选版本（打算融合使用）：' : '可选版本（选一种用）：'
+  return { ...master, detail: [master.detail, head, ...lines].filter(Boolean).join('\n') }
+}
+
 /** 应用前的预览文字，如「自定义元素·怪物 → 典型怪物（新增一项）」 */
 export function describeTarget(material, categories) {
   const target = APPLY_TARGETS[material.category]
@@ -114,5 +144,100 @@ export function applyMaterial(material, ctx) {
     item[note.key] = rest
   }
   ensureValue(container, group).push(item)
+  return { categoryKey: cat.key, label: `${cat.label} → ${group.label}` }
+}
+
+/* ---------------- 自动规划（components/novel/PlanWizard.vue）：设定草案 → 设定编辑器 ---------------- */
+
+const PLAN_TARGETS = {
+  character: { builtin: 'characters', group: 'cast' },
+  stage: { builtin: 'plot', group: 'stages' },
+  faction: APPLY_TARGETS.faction,
+  location: APPLY_TARGETS.location,
+  item: APPLY_TARGETS.item,
+  monster: APPLY_TARGETS.monster
+}
+
+function setPlanField(f, item, raw) {
+  if (raw == null || raw === '' || (Array.isArray(raw) && !raw.length)) return
+  if (f.key === 'tierMax' && f.type === 'single') {
+    const v = String(raw).match(/[1-5]/)?.[0]
+    if (v) ensureValue(item, f).selected = [v]
+    return
+  }
+  if (f.type === 'tags') item[f.key] = asList(raw)
+  else if (f.type === 'single' || f.type === 'multi') setChoice(f, item, raw)
+  else item[f.key] = asText(raw)
+}
+
+/**
+ * 写入一条规划条目（直接按设定字段 key 写，不经素材属性映射）：
+ *   {kind: character|stage|faction|location|item|monster, fields: {字段 key: 值}, appearFrom?, sources?[素材 id]}
+ *   {kind: world, rules: [], note: ''} → 世界观的「特殊世界规则」（追加去重）+「世界观补充」（追加）
+ *     故事优先另有 power / mechanics / resources（文本，追加进同名文本框）和 lore [{name, detail}]（世界背景卡）
+ * appearFrom > 1 → 条目的出场条件（第几章起才进写作上下文）；sources 第一个 → 「来自素材库」标记。
+ */
+export function applyPlanItem(p, ctx) {
+  if (p.kind === 'world') {
+    const cat = ctx.categories.find((c) => c.key === 'world')
+    if (!cat) throw new Error('找不到「世界观」分类')
+    const container = ctx.values[cat.key]
+    const rules = cat.fields.find((f) => f.key === 'rules')
+    if (rules && p.rules?.length) {
+      const prev = asList(ensureValue(container, rules))
+      container[rules.key] = [...prev, ...p.rules.filter((r) => !prev.includes(r))]
+    }
+    // 故事优先的世界观槽位：力量体系 / 世界机制 / 关键资源 → 对应文本框（追加）；字段被删掉了就并进「世界观补充」
+    const overflow = []
+    const appendText = (key, text) => {
+      if (!text) return
+      const f = cat.fields.find((x) => x.key === key)
+      if (f) container[f.key] = [asText(ensureValue(container, f)), text].filter(Boolean).join('\n\n')
+      else overflow.push(text)
+    }
+    appendText('powerSystem', p.power)
+    appendText('mechanics', p.mechanics)
+    appendText('resources', p.resources)
+    if (p.lore?.length) {
+      const lore = cat.fields.find((f) => f.key === 'lore' && f.type === 'group')
+      if (lore) {
+        for (const c of p.lore) {
+          const item = newGroupItem(lore)
+          item.name = c.name
+          item.detail = c.detail
+          ensureValue(container, lore).push(item)
+        }
+      } else overflow.push(p.lore.map((c) => `【${c.name}】${c.detail}`).join('\n'))
+    }
+    const note = cat.fields.find((f) => f.key === 'worldNote')
+    const noteText = [p.note, ...overflow].filter(Boolean).join('\n\n')
+    if (note && noteText) container[note.key] = [asText(ensureValue(container, note)), noteText].filter(Boolean).join('\n\n')
+    return { categoryKey: cat.key, label: `${cat.label} → 世界规则 / 力量体系 / 背景卡 / 机制 / 资源 / 补充` }
+  }
+  const target = PLAN_TARGETS[p.kind]
+  if (!target) throw new Error(`不支持的规划条目：${p.kind}`)
+  let cat = findTargetCategory(ctx.categories, target)
+  if (!cat && target.template) cat = ctx.createFromTemplate(target.template)
+  if (!cat) throw new Error('找不到对应的设定分类')
+  const group = cat.fields.find((f) => f.key === target.group && f.type === 'group')
+  if (!group) throw new Error(`「${cat.label}」中没有「${target.group}」列表`)
+  const item = newGroupItem(group)
+  const extra = []
+  for (const [k, v] of Object.entries(p.fields || {})) {
+    const f = (group.fields || []).find((x) => x.key === k)
+    if (f) setPlanField(f, item, v)
+    else if (asText(v)) extra.push(`${k}：${asText(v)}`)
+  }
+  if (extra.length) {   // 列表里没有的字段：放进「备注」
+    let note = group.fields.find((f) => f.key === 'materialNote')
+    if (!note) {
+      note = { key: 'materialNote', label: '备注', type: 'textarea', custom: true }
+      group.fields.push(note)
+    }
+    item[note.key] = extra.join('\n')
+  }
+  if (p.appearFrom > 1) item._appear = { from: p.appearFrom }
+  if (p.sources?.length) item._fromMaterial = p.sources[0]
+  ensureValue(ctx.values[cat.key], group).push(item)
   return { categoryKey: cat.key, label: `${cat.label} → ${group.label}` }
 }

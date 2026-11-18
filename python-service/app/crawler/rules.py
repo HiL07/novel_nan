@@ -4,9 +4,9 @@
 - 单本（book）：只用到 bookName / author / intro / chapterLinks / tocNext / content / contentNext；
 - 全自动（catalog.py + Java 逐本抓取）：先按 categoryLinks / bookLinks / listNext 发现「分类 → 列表页 → 书籍」，
   再用 tocLink 从书籍详情页跳到目录页，之后与单本完全相同的流程抓正文。
-  对应 copybook/bookspider/spiders/quanshuwang.py 的 4 段跳转（首页 → 分类 → 列表翻页 → 书籍 → 章节）。
+  对应 copyBook 项目（https://github.com/hahaha108/copyBook）bookspider/spiders/quanshuwang.py 的 4 段跳转（首页 → 分类 → 列表翻页 → 书籍 → 章节）。
 
-预设 quanshuwang 即 copybook/bookspider/spiders/quanshuwang.py 中的 XPath（该站已下线，仅作写规则的参考样例）。
+预设 quanshuwang 即 copyBook 项目 bookspider/spiders/quanshuwang.py 中的 XPath（该站已下线，仅作写规则的参考样例）。
 """
 from typing import Optional
 

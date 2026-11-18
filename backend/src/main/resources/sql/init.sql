@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS file (
     file_size    INTEGER NOT NULL DEFAULT 0,       -- 字节
     content_type TEXT,                             -- MIME 类型
     file_ext     TEXT,                             -- 扩展名（不含点）
+    chapter_count INTEGER,                         -- txt/md 数出的章节数；0 = 未识别到章节，-1 = 读不了，NULL = 未统计
     create_time  TEXT    NOT NULL                  -- yyyy-MM-dd HH:mm:ss
 );
 CREATE INDEX IF NOT EXISTS idx_file_create_time ON file (create_time);
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS novel_extract (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id         INTEGER NOT NULL,              -- 源文件 id（file 表，逻辑关联）
     file_name       TEXT,
-    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/SUCCEEDED/FAILED
+    title           TEXT,                          -- 工作区名（可空；同一本书可有多个提取工作区，用它区分）
+    status          TEXT    NOT NULL,              -- DRAFT（未开始）/QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
     progress        INTEGER NOT NULL DEFAULT 0,    -- 0~100
     message         TEXT,                          -- 进度说明 / 失败原因（≤1000 字）
     job_id          TEXT,                          -- Python 服务任务 id
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS novel_extract (
     word_count      INTEGER,                       -- 统计：总字数
     chapter_count   INTEGER,                       -- 统计：章节数
     candidate_count INTEGER,                       -- 统计：素材候选数
+    options         TEXT,                          -- 提交参数 JSON {model, materials}，「继续提取」时复用
     create_time     TEXT    NOT NULL,
     update_time     TEXT    NOT NULL
 );
@@ -93,7 +96,11 @@ CREATE INDEX IF NOT EXISTS idx_novel_crawl_book_crawl ON novel_crawl_book (crawl
 CREATE TABLE IF NOT EXISTS ai_model_config (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT    NOT NULL,               -- 显示名称
-    base_url       TEXT    NOT NULL,               -- OpenAI 兼容根地址
+    provider_type  TEXT,                           -- preset（第三方模型提供商）/ custom（自定义模型 API）
+    provider_id    TEXT,                           -- 预设键或自定义 Provider ID
+    protocol       TEXT,                           -- openai / anthropic（null = openai）
+    models         TEXT,                           -- 模型目录 JSON 数组
+    base_url       TEXT    NOT NULL,               -- API 根地址
     model          TEXT    NOT NULL,               -- 模型名
     api_key        TEXT,                           -- API Key（接口不回显明文）
     concurrency    INTEGER NOT NULL DEFAULT 1,     -- 任务内并发请求数
@@ -136,6 +143,8 @@ CREATE TABLE IF NOT EXISTS material (
     source      TEXT,                              -- JSON：{type, extractId, fileId, fileName, chapters, excerpt}
     source_book TEXT,                              -- 来源书名（文件名去扩展名；手动添加可自填），按书筛选 / 屏蔽 / 删除
     pinned      INTEGER NOT NULL DEFAULT 0,        -- 1 = 保留：按书删除、屏蔽来源书都不影响它
+    merged_into INTEGER,                           -- 已并入哪个主条目（精炼 / 合并）；非空的素材不出现在列表 / 检索 / AI 里，拆分时清空
+    profile     TEXT,                              -- JSON：{tier 1–5 量级, tierReason, tierBy ai|user, bookPos 原书位置 0–1}
     use_count   INTEGER NOT NULL DEFAULT 0,
     create_time TEXT    NOT NULL,
     update_time TEXT    NOT NULL
@@ -168,6 +177,65 @@ CREATE TABLE IF NOT EXISTS material_candidate (
     UNIQUE (extract_id, candidate_key)
 );
 CREATE INDEX IF NOT EXISTS idx_material_candidate_status ON material_candidate (status);
+
+-- 整理卡片任务（SQLite）：对一次小说提取（novel_extract）的实体档案单独发起，产出的素材卡 / 剧情段进入待确认候选。
+-- 一次提取可以整理多次（换模型 / 换范围）。断点在 Python 的 data/extract-cache/k<id>/
+CREATE TABLE IF NOT EXISTS material_compile (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    extract_id      INTEGER NOT NULL,              -- 来源提取任务（novel_extract，逻辑关联）
+    status          TEXT    NOT NULL,              -- QUEUED/RUNNING/INTERRUPTED（中断，可继续）/SUCCEEDED/FAILED
+    progress        INTEGER NOT NULL DEFAULT 0,    -- 0~100
+    message         TEXT,                          -- 进度说明 / 失败原因（≤1000 字）
+    job_id          TEXT,                          -- Python 服务任务 id
+    options         TEXT,                          -- 参数 JSON {model, entityKeys?, categories?, topN?, plot}，继续时复用
+    entity_count    INTEGER,                       -- 交给模型整理的实体数
+    card_count      INTEGER,                       -- 统计：素材卡（含体系卡）
+    arc_count       INTEGER,                       -- 统计：剧情段
+    candidate_count INTEGER,                       -- 统计：实际进入待确认的条数（同书重复的不算）
+    create_time     TEXT    NOT NULL,
+    update_time     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_material_compile_extract ON material_compile (extract_id);
+
+-- 卡片（卡片整理工作区，2026-11-03）：对一个提取工作区的提取结果的总结，属于这个工作区、不是素材；
+-- 在「素材选择」里挑过才写进 material。实体卡 / 体系卡 / 剧情段来自整理任务（material_compile），以后加写法卡、世界观卡。
+CREATE TABLE IF NOT EXISTS extract_card (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    extract_id     INTEGER NOT NULL,              -- 所属提取工作区（novel_extract，逻辑关联）
+    card_key       TEXT    NOT NULL,              -- 工作区内唯一：实体卡 = 实体键的哈希，重新整理时对上同一张
+    kind           TEXT    NOT NULL,              -- entity（实体卡）/ system（体系卡）/ arc（剧情段）/ craft（写法卡）/ world（世界观卡）
+    category       TEXT    NOT NULL,              -- 素材分类码（存进素材库时用）
+    title          TEXT    NOT NULL,
+    data           TEXT    NOT NULL,              -- 卡片内容 JSON（同素材候选的结构：summary / detail / attributes / tags / facts / tier …）
+    history        TEXT,                          -- 旧版本 JSON [{version, by: ai|user, time, data}]，最多 5 个
+    version        INTEGER NOT NULL DEFAULT 1,
+    edited         INTEGER NOT NULL DEFAULT 0,    -- 1 = 手改过（重新整理不覆盖，AI 新版本放进 history）
+    status         TEXT    NOT NULL,              -- NEW（未处理）/ SAVED（已存进素材库）/ SKIPPED（跳过）
+    material_id    INTEGER,                       -- 最近一次存进 / 更新到的素材
+    saved_version  INTEGER,                       -- 存进素材库时卡片的版本（卡片之后又改过 = 可以再同步）
+    compile_id     INTEGER,                       -- 最近一次产出它的整理任务
+    create_time    TEXT    NOT NULL,
+    update_time    TEXT    NOT NULL,
+    UNIQUE (extract_id, card_key)
+);
+CREATE INDEX IF NOT EXISTS idx_extract_card_extract ON extract_card (extract_id);
+
+-- 精炼 / 合并建议：本地向量模型找出的相似素材组（同分类，跨书或同书），可让 AI 写合并稿，用户确认后才合并
+-- （主条目 = 新素材，source = {type: merge, members, variants}；成员的 material.merged_into 指向它，可拆分还原）
+CREATE TABLE IF NOT EXISTS material_merge (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT    NOT NULL,
+    member_ids  TEXT    NOT NULL,                  -- JSON 数组：组内素材 id（按 id 升序，同一组成员 = 同一建议）
+    score       REAL,                              -- 组内平均相似度（余弦）
+    cross_book  INTEGER NOT NULL DEFAULT 0,        -- 1 = 成员来自不同的书
+    status      TEXT    NOT NULL,                  -- FOUND（待处理）/DRAFTING/DRAFTED（AI 合并稿已写好）/APPLIED（已合并）/IGNORED
+    draft       TEXT,                              -- AI 合并稿 JSON {same, title, subtype, summary, detail, attributes, tags, variants, model}
+    message     TEXT,                              -- 写合并稿失败的原因等
+    material_id INTEGER,                           -- 合并后的主条目 id
+    create_time TEXT    NOT NULL,
+    update_time TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_material_merge_status ON material_merge (status);
 
 -- AI 解析地址学到的站点抓取规则（每个域名一行）
 CREATE TABLE IF NOT EXISTS crawl_site_rule (
@@ -276,3 +344,136 @@ CREATE TABLE IF NOT EXISTS crawl_catalog_book (
     update_time    TEXT    NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_crawl_catalog_book_url ON crawl_catalog_book (catalog_id, book_url);
+
+-- 灵感墙（SQLite）：多面墙，可关联一个写作工作区；墙上放收藏的思路和钉的素材；每次构思存一条构思记录
+CREATE TABLE IF NOT EXISTS inspiration_wall (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL,
+    note          TEXT,
+    novel_id      TEXT,                            -- 关联的工作区（Python novel id，可空）
+    exclude_books TEXT,                            -- JSON 数组：构思时屏蔽的来源书
+    create_time   TEXT    NOT NULL,
+    update_time   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS inspiration_item (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wall_id     INTEGER NOT NULL,                  -- 所属墙（逻辑关联）
+    type        TEXT    NOT NULL,                  -- idea（收藏的思路）/ material（钉的素材）
+    material_id INTEGER,                           -- type=material：钉的素材 id
+    title       TEXT    NOT NULL,
+    content     TEXT,                              -- JSON：思路 {pitch, sections, elements, twist, questions, detail, history, target}
+    sources     TEXT,                              -- JSON：[{materialId, title, book, variant?}]
+    note        TEXT,
+    sort        INTEGER NOT NULL DEFAULT 0,
+    create_time TEXT    NOT NULL,
+    update_time TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inspiration_item_wall ON inspiration_item (wall_id);
+
+CREATE TABLE IF NOT EXISTS inspiration_run (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    wall_id     INTEGER NOT NULL,
+    request     TEXT,                              -- JSON：{request, target, conditions, count, model}
+    plan        TEXT,                              -- JSON：{summary, needs, explore}
+    materials   TEXT,                              -- JSON：[{materialId, title, book, category, variant, need}]
+    ideas       TEXT,                              -- JSON：生成的思路（细化 / 修改后可更新）
+    usage       TEXT,                              -- JSON：token 用量
+    create_time TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inspiration_run_wall ON inspiration_run (wall_id);
+
+-- 跨世界观角色卡（SQLite）：原型卡、原型版本（只追加）、适配版本、试聊会话。内容都是 JSON 文本，单条几十 KB 以内
+CREATE TABLE IF NOT EXISTS persona_card (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    aliases         TEXT,                          -- JSON 数组
+    source          TEXT,                          -- JSON：{type: text|file|extract, fileIds?, extractId?, entityKey?, whole, textChars}
+    tags            TEXT,                          -- JSON 数组
+    kind            TEXT,                          -- 分类，如 学者 / 战士
+    summary         TEXT,
+    current_version INTEGER,                       -- 当前版本号（persona_card_version.version_no）
+    status          TEXT    NOT NULL,              -- EXTRACTING / INTERRUPTED / READY / FAILED
+    progress        INTEGER NOT NULL DEFAULT 0,
+    message         TEXT,
+    job_id          TEXT,
+    options         TEXT,                          -- 提取参数 JSON（继续时复用，不含密钥）
+    create_time     TEXT    NOT NULL,
+    update_time     TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS persona_card_version (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id     INTEGER NOT NULL,
+    version_no  INTEGER NOT NULL,
+    content     TEXT    NOT NULL,                  -- 原型卡 JSON（traits / rules / expertise / voice / arc / signature / memories / lines / uncertain / holdout）
+    author      TEXT    NOT NULL,                  -- ai / user
+    note        TEXT,
+    create_time TEXT    NOT NULL,
+    UNIQUE (card_id, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS persona_adaptation (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id       INTEGER NOT NULL,
+    base_version  INTEGER NOT NULL,                -- 基于原型的哪个版本
+    name          TEXT    NOT NULL,
+    novel_id      TEXT,                            -- 目标世界观来自的工作区（可空 = 手写的世界观）
+    content       TEXT    NOT NULL,                -- 适配版本 JSON（core / rules / voice / forbidden / unknowns / examples / card / checks / brief / history）
+    status        TEXT    NOT NULL,                -- DRAFT / CONFIRMED
+    applied       TEXT,                            -- JSON：[{novelId, version, at}] 用于了哪些工作区
+    tests         TEXT,                            -- JSON：辨识度测试报告（最近 10 次）
+    test_status   TEXT,                            -- RUNNING / SUCCEEDED / FAILED / null
+    test_progress INTEGER,
+    test_message  TEXT,
+    test_job_id   TEXT,
+    create_time   TEXT    NOT NULL,
+    update_time   TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_persona_adaptation_card ON persona_adaptation (card_id);
+
+CREATE TABLE IF NOT EXISTS persona_chat (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id         INTEGER,                       -- 和原型试聊
+    adaptation_id   INTEGER,                       -- 和适配版本试聊
+    novel_id        TEXT,                          -- 工作区里的角色
+    character_name  TEXT    NOT NULL,
+    character       TEXT,                          -- JSON：工作区角色卡字段 / 对方身份
+    mode            TEXT    NOT NULL,              -- free / scene / interview
+    scene           TEXT,                          -- JSON：{description, others[{name, motive}], narrator}
+    inner_on        INTEGER NOT NULL DEFAULT 1,    -- 显示内心
+    messages        TEXT    NOT NULL,              -- JSON：[{role, content, inner?, at, rating?, reason?}]
+    summary         TEXT,                          -- 更早对话的摘要
+    summarized_upto INTEGER NOT NULL DEFAULT 0,
+    drift           TEXT,                          -- JSON：最近一次走偏检查 {drift, issues, at}
+    create_time     TEXT    NOT NULL,
+    update_time     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_persona_chat_owner ON persona_chat (adaptation_id, card_id, novel_id);
+
+-- 架空工作区（2026-11-06）：每次架空是一个独立的工作区；勾选素材库里的原素材加入待加工，逐条生成架空版（material，source.type = portable）
+CREATE TABLE IF NOT EXISTS portable_workspace (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT    NOT NULL,
+    target_world  TEXT,                          -- 示例世界（空 = 每条由 AI 选一个和原作类型差别大的世界）
+    model         TEXT,                          -- JSON {source: api|gguf}
+    filter        TEXT,                          -- JSON 上次用的筛选条件 {category, sourceBook, keyword, tags}（页面显示「筛选标准」）
+    status        TEXT    NOT NULL,              -- IDLE / RUNNING / PAUSED（服务重启时 RUNNING → PAUSED）
+    message       TEXT,
+    create_time   TEXT    NOT NULL,
+    update_time   TEXT    NOT NULL
+);
+
+-- 架空工作区的条目：一条原素材在一个工作区里最多一条（不同工作区互相独立）
+CREATE TABLE IF NOT EXISTS portable_item (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id  INTEGER NOT NULL,              -- portable_workspace（逻辑关联）
+    origin_id     INTEGER NOT NULL,              -- 原素材 material.id
+    status        TEXT    NOT NULL,              -- QUEUED / RUNNING / DONE / FAILED
+    portable_id   INTEGER,                       -- 生成的架空版 material.id
+    leaks         INTEGER NOT NULL DEFAULT 0,    -- 示例 / 通用名里还漏着的原作专名个数
+    error         TEXT,
+    update_time   TEXT    NOT NULL,
+    UNIQUE (workspace_id, origin_id)
+);
+CREATE INDEX IF NOT EXISTS idx_portable_item_ws ON portable_item (workspace_id, status);

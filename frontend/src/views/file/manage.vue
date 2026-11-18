@@ -37,11 +37,22 @@
               :alt="item.fileName"
             />
             <el-icon v-else class="file-icon"><component :is="iconOf(item)" /></el-icon>
+            <span
+              v-if="isExtractable(item.fileExt) && extractInfo(item)"
+              class="extract-badge"
+              :class="`is-${extractInfo(item).state}`"
+              :title="extractInfo(item).tip"
+            >
+              {{ extractInfo(item).label }}
+            </span>
           </div>
 
           <div class="file-card-info">
             <span class="file-name">{{ item.fileName }}</span>
-            <span class="file-size">{{ formatSize(item.fileSize) }}</span>
+            <span class="file-size">
+              {{ formatSize(item.fileSize) }}
+              <template v-if="chapterText(item)"> · <span :title="chapterTip(item)">{{ chapterText(item) }}</span></template>
+            </span>
           </div>
 
           <el-icon
@@ -55,7 +66,7 @@
           <el-icon
             v-if="isExtractable(item.fileExt)"
             class="file-extract"
-            title="小说提取"
+            :title="extractInfo(item) ? `打开提取工作区（${extractInfo(item).tip}）` : '小说提取'"
             @click.stop="startExtract(item)"
           >
             <MagicStick />
@@ -63,8 +74,6 @@
         </div>
       </div>
     </el-card>
-
-    <ExtractOptionsDialog v-model="extractDlg.visible" :file-name="extractDlg.item?.fileName" @confirm="doExtract" />
 
     <!-- 预览弹窗 -->
     <el-dialog
@@ -104,8 +113,11 @@
               {{ previewType === 'pdf' ? '复制地址' : '复制全文' }}
             </el-button>
             <el-button v-if="isExtractable(current.fileExt)" type="success" @click="startExtract(current)">
-              小说提取
+              {{ extractInfo(current) ? '打开提取工作区' : '小说提取' }}
             </el-button>
+            <span v-if="isExtractable(current.fileExt) && extractInfo(current)" class="extract-hint">
+              {{ extractInfo(current).tip }}
+            </span>
           </div>
         </div>
       </template>
@@ -114,6 +126,7 @@
         <el-button type="primary" @click="downloadFile(current.id)">下载</el-button>
       </template>
     </el-dialog>
+    <ExtractPickDialog ref="pickRef" />
   </div>
 </template>
 
@@ -123,8 +136,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { classify, downloadFile, downloadUrl, fetchText, fetchTextPage, listFiles, previewUrl } from '@/api/file'
-import { isExtractable, submitExtract } from '@/api/novel'
-import ExtractOptionsDialog from '@/components/material/ExtractOptionsDialog.vue'
+import { bookOf, isExtractable, listExtracts } from '@/api/novel'
+import ExtractPickDialog from '@/components/material/ExtractPickDialog.vue'
 import { errorMessage } from '@/api/request'
 
 const router = useRouter()
@@ -163,8 +176,46 @@ function countOf(name) {
     : files.value.filter((f) => classify(f.fileExt) === name).length
 }
 
+/**
+ * 已提取的小说：按书名（bookOf，去扩展名 / 站点标记 / 副本后缀）比对提取任务。
+ * 只做提示，不禁止再次提取（可能是同名的另一本书，或之前提取不完整）
+ */
+const extractsByBook = ref(new Map())
+async function loadExtracts() {
+  try {
+    const res = await listExtracts()
+    if (res.code !== 0) return
+    const map = new Map()
+    for (const t of res.data || []) {
+      const book = bookOf(t.fileName)
+      if (!book) continue
+      const e = map.get(book) || { done: 0, running: 0, last: null }
+      if (t.status === 'SUCCEEDED') {
+        e.done++
+        if (!e.last || (t.createTime || '') > (e.last.createTime || '')) e.last = t
+      } else if (t.status === 'QUEUED' || t.status === 'RUNNING' || t.status === 'INTERRUPTED') {
+        e.running++
+      }
+      map.set(book, e)
+    }
+    extractsByBook.value = map
+  } catch (e) {
+    // 只影响「已提取」标记，不打扰文件列表
+  }
+}
+
+function extractInfo(item) {
+  const e = extractsByBook.value.get(bookOf(item?.fileName))
+  if (!e) return null
+  if (e.running) return { state: 'running', label: '提取中', tip: `同名小说有 ${e.running} 个提取任务进行中` }
+  if (!e.done) return null
+  const time = e.last?.createTime ? `，最近 ${String(e.last.createTime).slice(0, 16)}` : ''
+  return { state: 'done', label: '已提取', tip: `同名小说已提取 ${e.done} 次${time}` }
+}
+
 async function loadFiles() {
   loading.value = true
+  loadExtracts()
   try {
     const res = await listFiles()
     if (res.code === 0) {
@@ -263,26 +314,26 @@ async function copyPreview() {
   }
 }
 
-/** 选中小说文件 → 选择提取范围（含素材）→ 提交提取任务 → 跳转到提取结果页查看进度 */
-const extractDlg = reactive({ visible: false, item: null })
+/**
+ * 选中小说文件 → 提取工作区：这本书（同书名）已有工作区就弹出来选一个打开或新建，没有就直接新建（ExtractPickDialog）
+ */
+const pickRef = ref(null)
 function startExtract(item) {
-  Object.assign(extractDlg, { visible: true, item })
+  dialogVisible.value = false
+  pickRef.value?.open({ id: item.id, fileName: item.fileName })
 }
 
-async function doExtract(options) {
-  const item = extractDlg.item
-  try {
-    const res = await submitExtract(item.id, options)
-    if (res.code !== 0) {
-      ElMessage.error(res.message || '提交失败')
-      return
-    }
-    ElMessage.success('已提交提取任务')
-    dialogVisible.value = false
-    router.push({ path: '/novel/extract', query: { id: res.data.id } })
-  } catch (e) {
-    ElMessage.error(errorMessage(e, '提交提取任务失败'))
-  }
+/** 章节数：后端逐个数章节标题行得出（不看最后一章写的序号）；null = 非 txt/md 或尚未统计 */
+function chapterText(item) {
+  const n = item.chapterCount
+  if (n == null || n < 0) return ''
+  return n > 0 ? `${n} 章` : '未识别章节'
+}
+
+function chapterTip(item) {
+  return item.chapterCount > 0
+    ? '按「第X章 / Chapter N」等标题行逐个数出的章节数，与小说提取切分的章节一致'
+    : '没有找到「第X章」之类的章节标题，提取时会整篇当作一章'
 }
 
 function formatSize(bytes) {
@@ -300,7 +351,7 @@ onActivated(loadFiles)
 .box-card {
   border: none;
   border-radius: 8px;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  box-shadow: 0 1px 4px rgba(60, 40, 20, 0.06);
 }
 .card-header {
   display: flex;
@@ -310,7 +361,7 @@ onActivated(loadFiles)
 .card-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 /* 文件卡片网格 */
@@ -326,8 +377,8 @@ onActivated(loadFiles)
   height: 180px;
   display: flex;
   flex-direction: column;
-  background: #ffffff;
-  border: 1px solid #dcdfe6;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color);
   border-radius: 8px;
   overflow: hidden;
   transition: box-shadow 0.2s, border-color 0.2s;
@@ -345,7 +396,7 @@ onActivated(loadFiles)
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
 }
 .file-thumb {
   display: block;
@@ -355,7 +406,7 @@ onActivated(loadFiles)
 }
 .file-icon {
   font-size: 40px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 .file-card-info {
   padding: 6px 8px;
@@ -364,16 +415,16 @@ onActivated(loadFiles)
   gap: 2px;
   text-align: center;
   font-size: 12px;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 .file-name {
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .file-size {
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .file-download {
   position: absolute;
@@ -404,6 +455,30 @@ onActivated(loadFiles)
 .file-extract:hover {
   opacity: 1;
 }
+.file-card-preview {
+  position: relative;
+}
+.extract-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 8px;
+  color: #ffffff;
+}
+.extract-badge.is-done {
+  background: var(--el-color-success);
+}
+.extract-badge.is-running {
+  background: var(--el-color-warning);
+}
+.extract-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
 
 /* 预览弹窗 */
 .preview-body {
@@ -425,7 +500,7 @@ onActivated(loadFiles)
 .preview-iframe {
   width: 100%;
   height: 66vh;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
 }
 .preview-text {
@@ -433,19 +508,19 @@ onActivated(loadFiles)
   padding: 12px;
   max-height: 66vh;
   overflow: auto;
-  background: #f7f8fa;
-  border: 1px solid #e4e7ed;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   font-size: 13px;
   line-height: 1.6;
-  color: #303133;
+  color: var(--el-text-color-primary);
   white-space: pre-wrap;
   word-break: break-all;
 }
 .preview-more {
   margin-top: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .preview-actions {
   flex: 0 0 auto;

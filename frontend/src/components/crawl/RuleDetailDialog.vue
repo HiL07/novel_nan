@@ -219,7 +219,7 @@ function act(name) {
 .dlg-title {
   font-size: 17px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .banner {
   margin-bottom: 14px;
@@ -238,25 +238,25 @@ function act(name) {
 }
 .stat {
   padding: 12px 14px;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 8px;
   min-width: 0;
 }
 .stat-label {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
   margin-bottom: 6px;
 }
 .stat-value {
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .stat-sub {
   margin-left: 6px;
   font-size: 12px;
   font-weight: normal;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .stat .stat-sub.ellipsis {
   margin: 4px 0 0;
@@ -273,7 +273,7 @@ function act(name) {
 .sub-title {
   margin: 12px 0 8px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -291,7 +291,7 @@ function act(name) {
   overflow: auto;
   margin: 0;
   padding: 10px 12px;
-  background: #f7f8fa;
+  background: var(--el-fill-color-lighter);
   border-radius: 4px;
   white-space: pre-wrap;
   font-family: inherit;
@@ -307,17 +307,17 @@ function act(name) {
   word-break: break-all;
 }
 .meta {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .ok {
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 .warn {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .err {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 .ml6 {
   margin-left: 6px;

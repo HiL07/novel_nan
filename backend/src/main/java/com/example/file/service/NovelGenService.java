@@ -34,11 +34,19 @@ public class NovelGenService {
     private static final Pattern NOVEL_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
     private static final List<String> CHAPTER_FIELDS = List.of("goal", "title", "targetChars");
     private static final List<String> POLISH_FIELDS = List.of("enabled", "baseId", "adapterId");
-    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "chat");
+    /** story_direction = 走向引擎（基于世界书）；situation = 按已写章节整理人物局面（写进故事账本） */
+    private static final List<String> IDEA_KINDS = List.of("title", "outline", "chapter", "fill", "direction", "hint_polish", "chat",
+            "story_direction", "situation");
     private static final int MAX_MATERIALS = 20;
     private static final int AUTO_MATERIALS = 8;
-    private static final int AUTO_MIN_SCORE = 50;
+    /** 没有重排模型时，自动匹配只取最相关的几条（余弦相似度没有可比的阈值） */
+    private static final int AUTO_UNRANKED = 3;
     private static final int DETAIL_CHARS = 300;
+    private static final int TONE_CHARS = 200;
+    private static final int MAX_REJECTED = 30;
+    private static final int MAX_CHOSEN = 10;
+    private static final int DIRECTION_CHARS = 300;
+    private static final int QUERY_CHARS = 500;
 
     private final AiModelConfigService modelService;
     private final MaterialService materialService;
@@ -75,13 +83,30 @@ public class NovelGenService {
         return callPython(() -> aiClient.startGenChapter(novelId, body, cfg), "章节生成");
     }
 
+    /** 大模型工作区：已完成章节重新提取故事事实（digest）/ 重新检查一致性（review）。返回 Python 的任务对象。 */
+    public JsonNode recheckChapter(String novelId, int index, Map<String, Object> req) {
+        checkNovelId(novelId);
+        if (index < 1) {
+            throw new BizException(400, "章节序号无效");
+        }
+        AiModelConfig cfg = modelService.requireActive();
+        Map<String, Object> body = new HashMap<>();
+        body.put("digest", Boolean.TRUE.equals(req.get("digest")));
+        body.put("review", Boolean.TRUE.equals(req.get("review")));
+        return callPython(() -> aiClient.recheckGenChapter(novelId, index, body, cfg), "重新提取");
+    }
+
     /**
      * AI 构思 / AI 填写设定 / 构思方向建议 / 角色试聊。
-     * req: {kind: title|outline|chapter|fill|direction|chat, source?: api|local, baseId?, adapterId?, hint?, count?, purpose?,
+     * req: {kind: title|outline|chapter|fill|direction|hint_polish|chat|story_direction|situation, source?: api|local, baseId?, adapterId?, hint?, tone?,
+     *       rejected?[], chosenDirections?[], chapterContext?{current, past}, count?, purpose?,
      *       materialIds?[], autoMaterials?, query?, excludeBooks?[], fill?{mode, path, fields, current, itemLabel, count, existing},
      *       chat?{character:{name, card}, messages[], scene?, userRole?}, spec?}
-     * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）。
+     * source=api（默认）用「模型配置」中启用的大模型；local 用本地基础模型 + 可选适配器（Python 按需加载）；
+     * gguf 用 Python「llama.cpp」页正在运行的 GGUF 模型（本机、无 Key，Python 自己取地址）。
      * autoMaterials：用 query（为空时用 hint）在素材库做 AI 语义检索（总是用大模型），取相关度 ≥ 50 的前 8 条，与选中的合并。
+     * tone：作者定下的基调（≤200 字，所有构思都围绕它）；rejected：已给过 / 被拒绝的走向（≤30 条，生成走向时避开）；
+     * chosenDirections：作者选定的后续走向（≤10 条，书名 / 大纲 / 章节沿着它们展开）；hint_polish：只按 hint 扩写构思。
      * excludeBooks：屏蔽这些来源书的素材（选中的和自动匹配的都去掉；「保留」的素材不受影响）。
      * 返回 Python 的结果 + usedMaterials（实际提供给模型的素材）+ blockedMaterials（因屏蔽被去掉的选中素材数）。
      */
@@ -96,11 +121,12 @@ public class NovelGenService {
             throw new BizException(400, "远程模型（远程 GPU 上的模型 + 适配器）暂未接入");
         }
         boolean local = "local".equals(source);
+        boolean gguf = "gguf".equals(source);
         String baseId = Objects.toString(req.get("baseId"), "");
         if (local && baseId.isBlank()) {
             throw new BizException(400, "请选择本地基础模型");
         }
-        AiModelConfig cfg = local ? null : modelService.requireActive();
+        AiModelConfig cfg = local || gguf ? null : modelService.requireActive();
         String hint = Objects.toString(req.get("hint"), "").trim();
 
         List<String> excludeBooks = new ArrayList<>();
@@ -125,39 +151,44 @@ public class NovelGenService {
         for (Material m : allowed) {
             used.put(m.getId(), usedEntry(m, null, "", false));
         }
+        // 多版本素材（合并而来的主条目）怎么用：auto = 让 AI 选一个版本（默认）、blend = 融合、成员 id = 只用这个版本
+        Map<Long, String> variantChoice = parseVariants(req.get("materialVariants"));
         if (Boolean.TRUE.equals(req.get("autoMaterials"))) {
             String query = Objects.toString(req.get("query"), "").trim();
             if (query.isEmpty()) {
                 query = hint;
             }
+            if (query.length() > QUERY_CHARS) {  // 构思方向可能很长，语义检索只取开头
+                query = query.substring(0, QUERY_CHARS);
+            }
             if (query.isEmpty()) {
                 throw new BizException(400, "自动匹配素材需要填写构思方向（用它在素材库中检索）");
             }
-            Object results = materialService.semanticSearch(query, null, null, excludeBooks, AUTO_MATERIALS).get("results");
-            if (results instanceof List<?> list) {
+            // 本地检索（向量 + 关键词融合 + 重排），不用大模型。重排过：相关度 ≥ RERANK_MIN_SCORE 的才用；
+            // 没有重排模型时分数没有可比的阈值，只取最相关的 AUTO_UNRANKED 条
+            // 按工作区的故事阶段先过滤：超出主角量级上限两级以上的（开篇的神明之类）不自动带上，作者可以手动选
+            StageFit.Stage stage = materialService.novelStage(novelId);
+            Map<String, Object> found = materialService.vectorSearch(query, null, null, excludeBooks, null, AUTO_MATERIALS,
+                    "hybrid", true, stage.limited() ? m -> !StageFit.FAR.equals(StageFit.fit(m, stage)) : null);
+            boolean reranked = Boolean.TRUE.equals(found.get("reranked"));
+            String how = reranked ? "本地检索 · 重排相关度 " : "本地检索 · 未重排，按排名取前 " + AUTO_UNRANKED + " 条，相似度 ";
+            int taken = 0;
+            if (found.get("results") instanceof List<?> list) {
                 for (Object o : list) {
                     if (o instanceof Map<?, ?> r && r.get("material") instanceof Material m && used.size() < MAX_MATERIALS
-                            && r.get("score") instanceof Integer score && score >= AUTO_MIN_SCORE) {
-                        used.putIfAbsent(m.getId(), usedEntry(m, score, Objects.toString(r.get("reason"), ""), true));
+                            && r.get("score") instanceof Integer score
+                            && (reranked ? score >= MaterialService.RERANK_MIN_SCORE : taken < AUTO_UNRANKED)) {
+                        taken++;
+                        if (used.putIfAbsent(m.getId(), usedEntry(m, score, how + score, true)) == null
+                                && r.get("matchedVariant") instanceof Number variant) {
+                            variantChoice.putIfAbsent(m.getId(), String.valueOf(variant.longValue()));
+                            used.get(m.getId()).put("variant", r.get("matchedLabel"));
+                        }
                     }
                 }
             }
         }
-        List<Map<String, Object>> materials = new ArrayList<>();
-        for (Material m : materialService.listByIds(new ArrayList<>(used.keySet()))) {
-            Map<String, Object> item = new LinkedHashMap<>();
-            item.put("id", m.getId());
-            item.put("category", m.getCategory());
-            item.put("subtype", Objects.requireNonNullElse(m.getSubtype(), ""));
-            item.put("title", m.getTitle());
-            String summary = Objects.requireNonNullElse(m.getSummary(), "");
-            String detail = Objects.requireNonNullElse(m.getDetail(), "");
-            item.put("summary", detail.isBlank() ? summary
-                    : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
-            item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
-            item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
-            materials.add(item);
-        }
+        List<Map<String, Object>> materials = materialItems(new ArrayList<>(used.keySet()), variantChoice);
 
         Map<String, Object> body = new HashMap<>();
         body.put("kind", kind);
@@ -166,6 +197,23 @@ public class NovelGenService {
             body.put("count", n.intValue());
         }
         body.put("materials", materials);
+        if (req.get("tone") instanceof String tone && !tone.isBlank()) {
+            String t = tone.trim();
+            body.put("tone", t.length() > TONE_CHARS ? t.substring(0, TONE_CHARS) : t);
+        }
+        List<String> rejected = strings(req.get("rejected"), MAX_REJECTED, TONE_CHARS);
+        if (!rejected.isEmpty()) {
+            body.put("rejected", rejected);
+        }
+        List<String> chosen = strings(req.get("chosenDirections"), MAX_CHOSEN, DIRECTION_CHARS);
+        if (!chosen.isEmpty()) {
+            body.put("chosenDirections", chosen);
+        }
+        // 构思时带哪些已写章节：{current: 最近一章, past: 更早章节 + 前情概要}；不传则 Python 默认都带
+        if (req.get("chapterContext") instanceof Map<?, ?> ctx) {
+            body.put("chapterContext", Map.of("current", Boolean.TRUE.equals(ctx.get("current")),
+                    "past", Boolean.TRUE.equals(ctx.get("past"))));
+        }
         if (req.get("purpose") instanceof String purpose && !purpose.isBlank()) {
             body.put("purpose", purpose.length() > 60 ? purpose.substring(0, 60) : purpose);
         }
@@ -186,6 +234,9 @@ public class NovelGenService {
             }
             body.put("chat", chat);
         }
+        if (gguf) {
+            body.put("gguf", true);
+        }
         if (local) {
             Map<String, Object> localModel = new HashMap<>();
             localModel.put("baseId", baseId);
@@ -200,6 +251,95 @@ public class NovelGenService {
         return out;
     }
 
+    /** 请求里的 materialVariants {素材 id: auto | blend | 成员 id} → Map（不是数字的键忽略） */
+    public static Map<Long, String> parseVariants(Object raw) {
+        Map<Long, String> out = new HashMap<>();
+        if (raw instanceof Map<?, ?> mv) {
+            mv.forEach((k, v) -> {
+                try {
+                    out.put(Long.parseLong(String.valueOf(k)), String.valueOf(v));
+                } catch (NumberFormatException ignored) {
+                    // 不是素材 id：忽略
+                }
+            });
+        }
+        return out;
+    }
+
+    /**
+     * 素材 → 交给 Python 的条目 {id, category, subtype, title, summary（含截断的详细）, attributes, tags}，按 ids 的顺序；
+     * 多版本主条目按 variantChoice 附上 variants / variantMode。AI 构思、AI 填写、灵感墙共用。
+     */
+    public List<Map<String, Object>> materialItems(List<Long> ids, Map<Long, String> variantChoice) {
+        Map<Long, Material> byId = new HashMap<>();
+        materialService.listByIds(ids).forEach(m -> byId.put(m.getId(), m));
+        List<Map<String, Object>> materials = new ArrayList<>();
+        for (Long id : ids) {
+            Material m = byId.get(id);
+            if (m == null) {
+                continue;
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", m.getId());
+            item.put("category", m.getCategory());
+            item.put("subtype", Objects.requireNonNullElse(m.getSubtype(), ""));
+            item.put("title", m.getTitle());
+            String summary = Objects.requireNonNullElse(m.getSummary(), "");
+            String detail = Objects.requireNonNullElse(m.getDetail(), "");
+            item.put("summary", detail.isBlank() ? summary
+                    : summary + "。" + (detail.length() > DETAIL_CHARS ? detail.substring(0, DETAIL_CHARS) : detail));
+            item.put("attributes", Objects.requireNonNullElse(m.getAttributes(), Map.of()));
+            item.put("tags", Objects.requireNonNullElse(m.getTags(), List.of()));
+            item.put("book", Objects.requireNonNullElse(m.getSourceBook(), ""));
+            if (MaterialService.isPortable(m) && m.getProfile() != null && m.getProfile().get("portable") instanceof Map<?, ?> p) {
+                // 架空版的结构化档案（不带 bindings / example：原作词不进提示词），自动规划按字段使用
+                Map<String, Object> portable = new LinkedHashMap<>();
+                for (String k : List.of("core", "uses", "replace", "keep", "portability", "nodeMap", "rules")) {
+                    if (p.get(k) != null) {
+                        portable.put(k, p.get(k));
+                    }
+                }
+                item.put("portable", portable);
+            }
+            if (MaterialService.isMergeMaster(m)) {
+                addVariants(item, m, variantChoice.getOrDefault(m.getId(), "auto"));
+            }
+            materials.add(item);
+        }
+        return materials;
+    }
+
+    /**
+     * 多版本素材：附上各版本 {label, book, note, summary, attributes}（来自成员素材）和 variantMode：
+     * auto（全部版本，让模型选一个）/ blend（全部版本，融合成新设定）/ fixed（只给选定的那一个版本）。
+     */
+    private void addVariants(Map<String, Object> item, Material master, String choice) {
+        List<Material> members = materialService.membersOf(master.getId());
+        String mode = "blend".equals(choice) ? "blend" : "auto";
+        if (choice.matches("\\d+")) {
+            long id = Long.parseLong(choice);
+            List<Material> one = members.stream().filter(x -> x.getId() == id).toList();
+            if (!one.isEmpty()) {
+                members = one;
+                mode = "fixed";
+            }
+        }
+        List<Map<String, Object>> variants = new ArrayList<>();
+        for (Material member : members) {
+            Map<String, Object> v = new LinkedHashMap<>();
+            v.put("label", MaterialService.variantLabel(master, member));
+            v.put("book", Objects.requireNonNullElse(member.getSourceBook(), ""));
+            v.put("note", Objects.toString(MaterialService.variantOf(master, member.getId()).get("note"), ""));
+            v.put("summary", Objects.requireNonNullElse(member.getSummary(), ""));
+            v.put("attributes", Objects.requireNonNullElse(member.getAttributes(), Map.of()));
+            variants.add(v);
+        }
+        if (!variants.isEmpty()) {
+            item.put("variants", variants);
+            item.put("variantMode", mode);
+        }
+    }
+
     private static Map<String, Object> usedEntry(Material m, Integer score, String reason, boolean auto) {
         Map<String, Object> e = new LinkedHashMap<>();
         e.put("id", m.getId());
@@ -211,7 +351,7 @@ public class NovelGenService {
         return e;
     }
 
-    private static void checkNovelId(String novelId) {
+    static void checkNovelId(String novelId) {
         if (novelId == null || !NOVEL_ID.matcher(novelId).matches()) {
             throw new BizException(400, "非法的工作区 id");
         }
@@ -248,5 +388,19 @@ public class NovelGenService {
             }
         }
         return "AI 服务拒绝请求（HTTP " + e.getStatusCode().value() + "）";
+    }
+
+    /** 请求里的字符串列表：去空白，最多 max 条，每条截到 chars 字 */
+    private static List<String> strings(Object value, int max, int chars) {
+        List<String> out = new ArrayList<>();
+        if (value instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof String str && !str.isBlank() && out.size() < max) {
+                    String t = str.trim();
+                    out.add(t.length() > chars ? t.substring(0, chars) : t);
+                }
+            }
+        }
+        return out;
     }
 }

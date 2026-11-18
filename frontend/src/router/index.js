@@ -27,10 +27,51 @@ const routes = [
     component: () => import('@/views/novel/workspace.vue')
   },
   {
+    // 侧边栏「素材库」：子菜单 素材库 / 架空工作区（2026-11-06）
+    path: '/material-menu',
+    redirect: '/material',
+    meta: {
+      title: '素材库',
+      icon: 'Collection',
+      children: [
+        { path: '/material', title: '素材库', icon: 'Collection' },
+        { path: '/material/portable', title: '架空工作区', icon: 'MagicStick' }
+      ]
+    }
+  },
+  {
     path: '/material',
     name: 'material',
-    component: () => import('@/views/material/index.vue'),
-    meta: { title: '素材库', icon: 'Collection' }
+    component: () => import('@/views/material/index.vue')
+  },
+  {
+    // 架空工作区列表：每次架空一个工作区
+    path: '/material/portable',
+    name: 'portableList',
+    component: () => import('@/views/material/portableList.vue')
+  },
+  {
+    path: '/material/portable/:id(\\d+)',
+    name: 'portableWorkspace',
+    component: () => import('@/views/material/portableWorkspace.vue')
+  },
+  {
+    // 书库（2026-11-04 加、11-06 删掉：和素材库重复）留下的旧链接回到素材库
+    path: '/material/:rest(all|books|book)',
+    redirect: (to) => ({ path: '/material', query: to.query })
+  },
+  {
+    path: '/inspire',
+    name: 'inspire',
+    component: () => import('@/views/inspire/index.vue'),
+    meta: { title: '灵感墙', icon: 'Opportunity' }
+  },
+  {
+    // 跨世界观角色卡：原型卡 / 版本 / 适配版本 / 辨识度测试 / 试聊
+    path: '/persona',
+    name: 'persona',
+    component: () => import('@/views/persona/index.vue'),
+    meta: { title: '角色卡', icon: 'Avatar' }
   },
   {
     // 侧边栏「小说抓取」：带子菜单，点父项进入第一个子页面
@@ -55,6 +96,12 @@ const routes = [
     component: () => import('@/views/novel/crawl.vue')
   },
   {
+    // 提取工作区（不在侧边栏显示）：new?fileId=&name= = 开始前；数字 = 某次提取任务
+    path: '/novel/extract/:id',
+    name: 'extractWorkspace',
+    component: () => import('@/views/novel/extractWorkspace.vue')
+  },
+  {
     path: '/novel/extract',
     name: 'novelExtract',
     component: () => import('@/views/novel/extract.vue'),
@@ -77,6 +124,12 @@ const routes = [
     name: 'aiLocal',
     component: () => import('@/views/ai/local.vue'),
     meta: { title: '本地模型', icon: 'Monitor' }
+  },
+  {
+    path: '/ai/llama',
+    name: 'aiLlama',
+    component: () => import('@/views/ai/llama.vue'),
+    meta: { title: 'llama.cpp', icon: 'VideoPlay' }
   }
 ]
 

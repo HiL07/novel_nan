@@ -15,6 +15,8 @@ from pathlib import Path
 from . import settings
 
 WEIGHT_GLOBS = ("*.safetensors", "*.bin")
+# 向量（embedding）模型的 model_type：只用于素材向量检索，不能生成 / 训练 LoRA（带 ForSequenceClassification 头的是重排模型）
+EMBEDDING_TYPES = {"bert", "xlm-roberta", "roberta", "nomic_bert", "new"}
 ARCH_KEYS = ("hidden_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
              "vocab_size", "max_position_embeddings", "torch_dtype")
 
@@ -72,14 +74,12 @@ def inspect_model_dir(path: str) -> dict:
         raise RegistryError(f"目录不存在：{path}")
     cfg = _read_json(p / "config.json")
     if cfg is None:
-        raise RegistryError("目录中没有 config.json，不是 Hugging Face 模型目录（GGUF 文件只能用于 llama.cpp）")
+        raise RegistryError("目录中没有 config.json，不是 Hugging Face 模型目录")
     weights = [f for g in WEIGHT_GLOBS for f in p.glob(g)]
     if not weights:
-        if list(p.glob("*.gguf")):
-            raise RegistryError("只找到 .gguf 文件：GGUF 无法用于 Transformers 训练，请使用 Hugging Face 格式（safetensors）")
         raise RegistryError("目录中没有 .safetensors / .bin 权重文件（下载可能不完整）")
-    if not ((p / "tokenizer.json").exists() or (p / "tokenizer.model").exists() or (p / "vocab.json").exists()):
-        raise RegistryError("目录中没有分词器文件（tokenizer.json / tokenizer.model / vocab.json）")
+    if not any((p / f).exists() for f in ("tokenizer.json", "tokenizer.model", "vocab.json", "vocab.txt")):
+        raise RegistryError("目录中没有分词器文件（tokenizer.json / tokenizer.model / vocab.json / vocab.txt）")
     sizes = [f.stat().st_size for f in weights]
     dtype = cfg.get("torch_dtype") or "bfloat16"
     bytes_per = {"float32": 4, "float16": 2, "bfloat16": 2}.get(dtype, 2)
@@ -94,7 +94,181 @@ def inspect_model_dir(path: str) -> dict:
         "numParams": int(sum(sizes) / bytes_per),
         "hasChatTemplate": bool(tok_cfg.get("chat_template")) or (p / "chat_template.jinja").exists(),
         "configHash": config_hash(p),
+        "task": model_task(cfg.get("model_type"), (cfg.get("architectures") or [""])[0]),
+        "quantMethod": _quant_method(cfg),
     }
+
+
+def _quant_method(cfg: dict) -> str | None:
+    """预量化的 HF 模型（GPTQ / AWQ / bitsandbytes / fp8 …）：config.json 的 quantization_config.quant_method。"""
+    q = cfg.get("quantization_config")
+    return str(q.get("quant_method") or "unknown") if isinstance(q, dict) else None
+
+
+# ---------------------------------------------------------------- GGUF（llama.cpp 格式，只登记展示）
+
+_GGUF_SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.I)
+# llama.cpp 的 llama_ftype（general.file_type）
+_GGUF_FTYPES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1", 10: "Q2_K",
+                11: "Q3_K_S", 12: "Q3_K_M", 13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M",
+                18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS", 21: "Q2_K_S", 22: "IQ3_XS", 23: "IQ3_XXS", 24: "IQ1_S",
+                25: "IQ4_NL", 26: "IQ3_S", 27: "IQ3_M", 28: "IQ2_S", 29: "IQ2_M", 30: "IQ4_XS", 31: "IQ1_M",
+                32: "BF16"}
+_GGUF_QUANT_NAME = re.compile(r"(?<![A-Za-z0-9])(I?Q\d(?:_[A-Z0-9]+)*|BF16|F16|F32)(?![A-Za-z0-9])", re.I)
+# GGUF 值类型 → struct 格式（8 = 字符串、9 = 数组单独处理）
+_GGUF_SCALARS = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+
+
+def is_gguf_path(path: str) -> bool:
+    """路径是 .gguf 文件，或是没有 config.json、但有 .gguf 文件的目录。"""
+    p = Path(path).expanduser()
+    if p.is_file():
+        return p.suffix.lower() == ".gguf"
+    return p.is_dir() and not (p / "config.json").exists() and any(p.glob("*.gguf"))
+
+
+def _gguf_main_file(path: str) -> Path:
+    p = Path(path).expanduser()
+    if p.is_dir():
+        files = [f for f in p.glob("*.gguf") if not f.name.lower().startswith("mmproj")]
+        main = sorted({f for f in files if not _GGUF_SHARD.search(f.name)}
+                      | {f for f in files if (m := _GGUF_SHARD.search(f.name)) and int(m.group(1)) == 1})
+        if not main:
+            raise RegistryError("目录中没有可用的 .gguf 模型文件（mmproj 是视觉投影文件，不是模型）")
+        if len(main) > 1:
+            raise RegistryError("目录中有多个 GGUF 模型，请填写具体的 .gguf 文件路径：" + "、".join(f.name for f in main[:8]))
+        p = main[0]
+    m = _GGUF_SHARD.search(p.name)
+    if m and int(m.group(1)) != 1:  # 填的是第 N 个分片：换成第 1 个
+        p = p.with_name(_GGUF_SHARD.sub(f"-00001-of-{m.group(2)}.gguf", p.name))
+        if not p.is_file():
+            raise RegistryError(f"找不到第 1 个分片：{p.name}")
+    return p
+
+
+def _gguf_metadata(f, wanted_prefixes: tuple[str, ...] = ("general.",)) -> dict:
+    """读 GGUF 文件头的 KV 元数据（只读开头，遇到 tokenizer.* 就停：后面是几十万个词表项）。"""
+    import struct
+
+    def read(fmt: str):
+        size = struct.calcsize(fmt)
+        data = f.read(size)
+        if len(data) < size:
+            raise RegistryError("GGUF 文件头不完整（文件可能还没下载完）")
+        return struct.unpack(fmt, data)[0]
+
+    def read_str() -> str:
+        n = read("<Q")
+        if n > 1 << 20:
+            raise RegistryError("GGUF 文件头损坏（字符串长度异常）")
+        return f.read(n).decode("utf-8", "replace")
+
+    def read_value(t: int):
+        if t in _GGUF_SCALARS:
+            return read(_GGUF_SCALARS[t])
+        if t == 8:
+            return read_str()
+        if t == 9:
+            item_type, n = read("<I"), read("<Q")
+            if item_type in _GGUF_SCALARS:
+                f.seek(struct.calcsize(_GGUF_SCALARS[item_type]) * n, 1)
+            else:
+                for _ in range(n):
+                    read_value(item_type)
+            return None
+        raise RegistryError(f"GGUF 文件头损坏（未知值类型 {t}）")
+
+    if f.read(4) != b"GGUF":
+        raise RegistryError("不是 GGUF 文件（文件头没有 GGUF 标记）")
+    version = read("<I")
+    if version < 2:
+        raise RegistryError(f"GGUF 版本 {version} 太旧，请用新版 llama.cpp 重新转换")
+    read("<Q")  # tensor_count
+    kv_count = read("<Q")
+    meta: dict = {"version": version}
+    for _ in range(kv_count):
+        key = read_str()
+        if key.startswith("tokenizer."):
+            break
+        value = read_value(read("<I"))
+        if value is not None and (key.startswith(wanted_prefixes) or key.endswith(".context_length")):
+            meta[key] = value
+    return meta
+
+
+def _size_label_params(label: str | None) -> int:
+    """general.size_label（如 7B、1.5B、8x7B、500M）→ 参数量；认不出返回 0。"""
+    m = re.fullmatch(r"(?:(\d+)x)?(\d+(?:\.\d+)?)([KMBT])", (label or "").strip(), re.I)
+    if not m:
+        return 0
+    scale = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[m.group(3).upper()]
+    return int(float(m.group(2)) * scale * int(m.group(1) or 1))
+
+
+def inspect_gguf(path: str) -> dict:
+    """读取 GGUF 模型（llama.cpp 格式）的元数据：架构、量化级别、上下文长度、大小。只用于登记展示，不能在本服务推理 / 训练。"""
+    p = _gguf_main_file(path)
+    try:
+        with p.open("rb") as f:
+            meta = _gguf_metadata(f)
+    except OSError as e:
+        raise RegistryError(f"无法读取 GGUF 文件：{e}") from e
+    m = _GGUF_SHARD.search(p.name)
+    shards = [p.with_name(_GGUF_SHARD.sub(f"-{i:05d}-of-{m.group(2)}.gguf", p.name))
+              for i in range(1, int(m.group(2)) + 1)] if m else [p]
+    sizes = [s.stat().st_size for s in shards if s.is_file()]
+    arch = str(meta.get("general.architecture") or "unknown")
+    quant = _GGUF_FTYPES.get(meta.get("general.file_type"))
+    if not quant:
+        q = _GGUF_QUANT_NAME.search(p.stem)
+        quant = q.group(1).upper() if q else None
+    return {
+        "path": str(p.resolve()),
+        "modelType": arch,
+        "architecture": "GGUF",
+        "task": "gguf",
+        "ggufName": meta.get("general.name"),
+        "quant": quant,
+        "contextLength": meta.get(f"{arch}.context_length"),
+        "sizeBytes": sum(sizes),
+        "numParams": _size_label_params(meta.get("general.size_label")),
+        "shards": len(shards),
+        "shardsMissing": len(shards) - len(sizes),
+        "ggufVersion": meta["version"],
+    }
+
+
+def task_label(task: str) -> str:
+    return {"embedding": "向量模型", "reranker": "重排模型", "gguf": "GGUF 模型"}.get(task, "生成模型")
+
+
+def not_generation_reason(rec: dict, action: str) -> str:
+    """非生成模型被拿去推理 / 训练 / 提取时的提示。"""
+    if rec.get("task") == "gguf":
+        return (f"「{rec['name']}」是 GGUF 模型，只能用 llama.cpp 运行，不能{action}：到「llama.cpp」页启动它后，"
+                "各处选模型时选「GGUF」即可用于提取 / 构思 / 写作")
+    return f"「{rec['name']}」是{task_label(rec.get('task', ''))}，只能用于素材检索，不能{action}"
+
+
+def model_task(model_type: str | None, architecture: str | None) -> str:
+    """causal-lm = 生成模型（推理 / 训练 / 小说生成）；embedding = 向量模型（素材向量检索）；
+    reranker = 重排模型（交叉编码器，如 bge-reranker-v2-m3，给「查询 + 候选」打相关度分）。"""
+    if re.search(r"(ForCausalLM|LMHeadModel|ForConditionalGeneration)$", architecture or ""):
+        return "causal-lm"
+    if (architecture or "").endswith("ForSequenceClassification"):
+        return "reranker"
+    return "embedding" if (model_type or "").lower() in EMBEDDING_TYPES else "causal-lm"
+
+
+def _with_task(rec: dict) -> dict:
+    """旧登记没有 task / quantMethod 字段：按已记录的 modelType / architecture、config.json 补出。"""
+    rec.setdefault("task", model_task(rec.get("modelType"), rec.get("architecture")))
+    if rec["task"] == "gguf":
+        rec["exists"] = Path(rec["path"]).is_file()
+    elif "quantMethod" not in rec:
+        cfg = _read_json(Path(rec["path"]) / "config.json") if rec.get("exists") else None
+        rec["quantMethod"] = _quant_method(cfg) if cfg else None
+    return rec
 
 
 # ---------------------------------------------------------------- 基础模型
@@ -105,8 +279,9 @@ def _base_record_path(model_id: str) -> Path:
 
 def register_base(name: str, path: str, *, source: str = "local", origin: str | None = None,
                   model_id: str | None = None, owns_files: bool = False) -> dict:
-    """owns_files：权重是本服务下载到外部目录的（删除登记时一并删除）；手动登记的目录永远不删。"""
-    info = inspect_model_dir(path)
+    """owns_files：权重是本服务下载到外部目录的（删除登记时一并删除）；手动登记的目录永远不删。
+    path 是 .gguf 文件（或只有 .gguf 的目录）时登记为 GGUF 模型（task = gguf，只展示，用 llama.cpp 运行）。"""
+    info = inspect_gguf(path) if is_gguf_path(path) else inspect_model_dir(path)
     for m in list_base():
         if m["path"] == info["path"]:
             raise RegistryError(f"该目录已登记为「{m['name']}」")
@@ -125,7 +300,7 @@ def get_base(model_id: str) -> dict:
     if rec is None:
         raise RegistryError(f"基础模型不存在：{model_id}")
     rec["exists"] = Path(rec["path"]).is_dir()
-    return rec
+    return _with_task(rec)
 
 
 def list_base() -> list[dict]:
@@ -134,7 +309,7 @@ def list_base() -> list[dict]:
         rec = _read_json(f)
         if rec:
             rec["exists"] = Path(rec["path"]).is_dir()
-            out.append(rec)
+            out.append(_with_task(rec))
     return sorted(out, key=lambda r: r.get("createdAt", ""), reverse=True)
 
 
@@ -211,6 +386,11 @@ def verify_base_weights(model_id: str) -> dict:
     return get_base(model_id)
 
 
+def _causal_bases() -> list[dict]:
+    """可挂 LoRA 适配器的基础模型：存在的 HF 生成模型（向量 / 重排 / GGUF 都不算）。"""
+    return [b for b in list_base() if b["exists"] and b["task"] == "causal-lm"]
+
+
 def _with_compat(meta: dict) -> dict:
     """附加与本地基础模型的匹配状态与可加载的本地基础模型 matchedBaseId。
 
@@ -222,7 +402,7 @@ def _with_compat(meta: dict) -> dict:
     base = meta.get("baseModel") or {}
     meta["matchedBaseId"] = None
     if base.get("source") == "remote":
-        same_cfg = [b for b in list_base() if b["exists"] and _same_config(b, base)]
+        same_cfg = [b for b in _causal_bases() if _same_config(b, base)]
         verified = [b for b in same_cfg if b.get("weightsFingerprint")
                     and b["weightsFingerprint"] == base.get("weightsFingerprint")]
         if verified:
@@ -245,7 +425,7 @@ def _with_compat(meta: dict) -> dict:
         meta["compat"] = "missing"
     if meta["compat"] == "missing":
         # 训练时的登记已删除（如重新登记 / 重新下载同一模型）：同一目录或 config.json 字节相同的本地模型仍可加载
-        same = [b for b in list_base() if b["exists"] and (b["path"] == base.get("path") or _same_config(b, base))]
+        same = [b for b in _causal_bases() if b["path"] == base.get("path") or _same_config(b, base)]
         if same:
             meta["compat"], meta["matchedBaseId"] = "ok", same[0]["id"]
     return meta

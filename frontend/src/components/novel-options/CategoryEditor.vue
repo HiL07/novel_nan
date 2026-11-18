@@ -118,7 +118,7 @@ async function submit() {
 .section-title {
   margin-bottom: 10px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .template-grid {
   display: grid;
@@ -128,7 +128,7 @@ async function submit() {
 .template-card {
   padding: 12px 10px;
   text-align: center;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s;
@@ -147,17 +147,17 @@ async function submit() {
 .template-label {
   margin-top: 4px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .template-desc {
   margin-top: 2px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .template-fields {
   margin: 10px 0 0;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .cat-form {
   margin-top: 18px;
@@ -174,8 +174,8 @@ async function submit() {
   width: 32px;
   height: 32px;
   font-size: 16px;
-  color: #606266;
-  border: 1px solid #e4e7ed;
+  color: var(--el-text-color-regular);
+  border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   cursor: pointer;
 }

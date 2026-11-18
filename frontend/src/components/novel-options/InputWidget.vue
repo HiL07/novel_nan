@@ -74,7 +74,7 @@ defineProps({
 }
 .slider-default {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   white-space: nowrap;
 }
 .slider-value {

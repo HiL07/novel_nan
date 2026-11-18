@@ -5,13 +5,17 @@ import request from './request'
  * 分类代码与 Java MaterialService.CATEGORIES、python-service/app/materials.py 一致。
  */
 export const MATERIAL_CATEGORIES = [
-  { code: 'world', label: '世界观', icon: 'MapLocation', attrs: ['规则', '影响', '适用题材'] },
-  { code: 'faction', label: '势力', icon: 'OfficeBuilding', attrs: ['类型', '立场', '实力', '特点'] },
-  { code: 'character', label: '角色', icon: 'User', attrs: ['身份', '性格', '能力', '经历'] },
-  { code: 'monster', label: '怪物', icon: 'Warning', attrs: ['外形', '能力', '弱点', '栖息地', '习性'] },
-  { code: 'location', label: '地点', icon: 'Location', attrs: ['类型', '特点'] },
-  { code: 'item', label: '物品功法', icon: 'Present', attrs: ['类别', '作用', '代价'] },
-  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['套路', '冲突', '转折', '可借鉴之处'] }
+  { code: 'world', label: '世界观', icon: 'MapLocation', attrs: ['规则内容', '代价', '限制', '谁能打破', '对社会的影响'] },
+  { code: 'faction', label: '势力', icon: 'OfficeBuilding', attrs: ['结构', '目标', '资源', '内部矛盾'] },
+  { code: 'character', label: '角色', icon: 'User', attrs: ['人设核心', '反差', '能力', '动机', '关系', '名场面'] },
+  { code: 'monster', label: '怪物', icon: 'Warning', attrs: ['外形', '能力', '弱点及原因', '习性', '社会结构', '来源', '与人类的关系'] },
+  { code: 'location', label: '地点', icon: 'Location', attrs: ['特征', '危险', '特殊规则', '产出'] },
+  { code: 'item', label: '物品功法', icon: 'Present', attrs: ['作用', '代价', '获取方式', '限制'] },
+  { code: 'plot', label: '情节', icon: 'Guide', attrs: ['起因', '冲突', '转折', '结果', '功能'] },
+  // 写法卡（卡片整理从写法统计总结出的规律）：不是设定实体，提取时不读这一类
+  { code: 'craft', label: '写法', icon: 'EditPen', attrs: ['规律', '适用场景', '示例章节', '数据'] },
+  // 共鸣素材：同一主题的卡片关联成整体（节点 / 关系 / 联动规则 / 融入指南）
+  { code: 'resonance', label: '共鸣', icon: 'Share', attrs: ['节点', '联动规则', '融入指南', '缺口'] }
 ]
 export const categoryOf = (code) => MATERIAL_CATEGORIES.find((c) => c.code === code)
 
@@ -43,6 +47,29 @@ export const deleteMaterialSource = (book, withCandidates = false) => post('/api
 export const pinMaterial = (id, pinned) => post(`/api/material/${id}/pin`, { pinned })
 /** AI 语义检索（使用「模型配置」中启用的模型）：{query, category?, tags?, excludeBooks?, limit?} → {expansion, considered, results: [{material, score, reason}]} */
 export const semanticSearch = (body) => post('/api/material/semantic-search', body, { timeout: 150000 })
+/* ---------- 向量检索（本地 embedding 模型，如 bge-small-zh；不用大模型） ---------- */
+/** 选用的向量模型 id（素材库页与素材选择弹窗共用）；空 = 服务端默认 */
+const VECTOR_MODEL_KEY = 'nan_novel.material.vectorModel'
+export function getVectorModelId() {
+  try {
+    return localStorage.getItem(VECTOR_MODEL_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+export function setVectorModelId(id) {
+  try {
+    localStorage.setItem(VECTOR_MODEL_KEY, id || '')
+  } catch {
+    /* 隐私模式等：不记住也能用 */
+  }
+}
+/** {query, modelId?, category?, tags?, excludeBooks?, limit?} → {results[{material, score(0–100), similarity}], total, considered, model, modelId, device, encoded, cached, ms} */
+export const vectorSearch = (body) => post('/api/material/vector-search', { modelId: getVectorModelId() || undefined, ...body }, { timeout: 200000 })
+/** 全部素材的向量化情况（encode=false）/ 一键全部向量化 → {total, cached, encoded, pending, model, device, ms} */
+export const vectorIndex = (encode = false) => post('/api/material/vector-index', { modelId: getVectorModelId() || undefined, encode }, { timeout: 600000 })
+/** 向量检索后勾选 / 没勾选的素材 {query, modelId, shownIds, pickedIds, context}（以后微调向量模型用）；失败不打扰 */
+export const vectorFeedback = (body) => post('/api/material/vector-feedback', body).catch(() => null)
 export const getMaterial = (id) => get(`/api/material/${id}`)
 /** 新增（无 id）或修改 */
 export const saveMaterial = (m) => post('/api/material/save', m)
@@ -56,3 +83,80 @@ export const pendingCandidateCount = () => get('/api/material/candidates/count')
 /** items: [{id, category?, subtype?, title?, summary?, attributes?, tags?, detail?}]（带修改后的内容） */
 export const saveCandidates = (items) => post('/api/material/candidates/save', { items })
 export const ignoreCandidates = (ids) => post('/api/material/candidates/ignore', { ids })
+
+// ------------------------------------------------------------------ 精炼 / 合并
+
+/** 查找相似素材组（本地向量模型，不花 token）{categories?, books?, crossBookOnly?, threshold?, maxGroup?, modelId?} → {found, skipped, …} */
+export const findMerges = (body) =>
+  post('/api/material/merge/find', { modelId: getVectorModelId() || undefined, ...body }, { timeout: 15 * 60 * 1000 })
+/** 合并建议（分页）status: open | APPLIED | IGNORED */
+export const listMerges = (params) => get('/api/material/merge/list', params)
+/** {open, drafted, cross, APPLIED, IGNORED} */
+export const mergeCounts = () => get('/api/material/merge/counts')
+/** AI 写合并稿（后台逐组）{ids, model} */
+export const draftMerges = (ids, model) => post('/api/material/merge/draft', { ids, model })
+export const mergeDraftStatus = () => get('/api/material/merge/draft/status')
+export const stopMergeDraft = () => post('/api/material/merge/draft/stop')
+/** 确认合并 {memberIds, title, subtype, summary, detail, attributes, tags, variants} → 主条目 */
+export const applyMerge = (id, body) => post(`/api/material/merge/${id}/apply`, body)
+export const ignoreMerges = (ids) => post('/api/material/merge/ignore', { ids })
+export const restoreMerges = (ids) => post('/api/material/merge/restore', { ids })
+/** 拆分主条目：成员回到素材库 */
+export const unmergeMaterial = (materialId) => post(`/api/material/merge/unmerge/${materialId}`)
+
+/** 合并而来、有多个可选版本的素材 */
+export const isMultiVersion = (m) => m?.source?.type === 'merge' && (m.source.variants?.length || 0) > 1
+
+/** 选中素材里多版本素材的用法 → 请求里的 materialVariants {素材 id: 'blend' | 成员 id}（'auto' = 让 AI 选，默认，不用发） */
+export function materialVariants(list) {
+  const out = {}
+  for (const m of list || []) {
+    if (isMultiVersion(m) && m.variant && m.variant !== 'auto') out[m.id] = String(m.variant)
+  }
+  return out
+}
+
+/** 素材量级（profile.tier，影响范围，跨书通用）：灵感墙 / AI 构思按故事阶段挡掉超出主角量级的素材 */
+export const TIERS = [
+  { value: 1, label: '1 级 · 个人 / 街头', short: '个人', desc: '一个人、一伙山匪、一头野兽、一件随身物品' },
+  { value: 2, label: '2 级 · 地方', short: '地方', desc: '村镇、小门派、一片山林的妖王' },
+  { value: 3, label: '3 级 · 一国 / 大宗门', short: '一国', desc: '王朝、大宗门、一方霸主' },
+  { value: 4, label: '4 级 · 大陆 / 天下', short: '大陆', desc: '魔族大军、天下第一宗、灭世级灾兽' },
+  { value: 5, label: '5 级 · 神明 / 世界之外', short: '神明', desc: '神、天道、上古存在、世界规则本身' }
+]
+export const tierOf = (m) => {
+  const t = Number(m?.profile?.tier)
+  return t >= 1 && t <= 5 ? t : null
+}
+export const tierLabel = (t) => TIERS.find((x) => x.value === Number(t))?.label || '未标量级'
+/** 补全量级（AI 批量标注，作者手改过的不动）{total, labeled, missing, byUser, running, batchTotal, done, failed, positions, lastError} */
+export const profileStatus = () => get('/api/material/profile/status')
+/** {model: {source: api, configId?} | {source: gguf}, onlyMissing?} */
+export const startProfile = (body) => post('/api/material/profile/start', body)
+export const stopProfile = () => post('/api/material/profile/stop')
+
+/* ---------- 架空工作区（2026-11-06）：每次架空一个工作区，勾选原素材加入待加工，后台逐条生成架空版（原素材不动） ---------- */
+const WS = '/api/material/portable-ws'
+/** 工作区列表 [{id, title, targetWorld, model, filter, status IDLE|RUNNING|PAUSED, message, counts {QUEUED, RUNNING, DONE, FAILED}, current[]}] */
+export const listPortableWs = () => get(`${WS}/list`)
+export const getPortableWs = (id) => get(`${WS}/${id}`)
+/** {title?, targetWorld?, model?: {source: api|gguf}} */
+export const createPortableWs = (body) => post(`${WS}/create`, body)
+/** {title?, targetWorld?, model?, filter?} */
+export const updatePortableWs = (id, body) => post(`${WS}/${id}/update`, body)
+/** → {portables, blocked} */
+export const portableWsDeletePreview = (id) => get(`${WS}/${id}/delete-preview`)
+/** {withMaterials} → {deletedMaterials} */
+export const deletePortableWs = (id, withMaterials) => post(`${WS}/${id}/delete`, { withMaterials })
+/** {category?, sourceBook?, keyword?, tags?: [], tagMode?, state: all|none|QUEUED|RUNNING|DONE|FAILED, page, size} → {total, records} */
+export const portableWsMaterials = (id, { tags = [], ...rest } = {}) =>
+  get(`${WS}/${id}/materials`, { ...rest, tags: tags.length ? tags.join(',') : undefined })
+/** {ids} | {all: true, filter}，redo? → {added, requeued, skipped} */
+export const portableWsEnqueue = (id, body) => post(`${WS}/${id}/enqueue`, body)
+/** {ids} → {removed} */
+export const portableWsDequeue = (id, ids) => post(`${WS}/${id}/dequeue`, { ids })
+export const startPortableWs = (id) => post(`${WS}/${id}/start`)
+export const pausePortableWs = (id) => post(`${WS}/${id}/pause`)
+
+/** 待确认：有待入库卡片的工作区 [{extractId, title, book, count}] */
+export const pendingWorkspaces = () => get('/api/material/pending-workspaces')

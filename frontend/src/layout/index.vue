@@ -1,13 +1,19 @@
 <template>
   <div class="app-wrapper">
-    <Sidebar />
-    <AppMain />
+    <!-- 工作区（书房）和提取工作区是全屏的：自带顶栏 / 左栏 / 右侧图标栏，不显示应用侧栏 -->
+    <Sidebar v-if="!inStudy" />
+    <AppMain :study="inStudy" />
   </div>
 </template>
 
 <script setup>
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import Sidebar from './Sidebar.vue'
 import AppMain from './AppMain.vue'
+
+const route = useRoute()
+const inStudy = computed(() => ['novelWorkspace', 'extractWorkspace'].includes(route.name))
 </script>
 
 <style scoped>
