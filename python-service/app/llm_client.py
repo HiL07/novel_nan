@@ -6,6 +6,7 @@
 import json
 import threading
 import time
+import uuid
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -30,8 +31,22 @@ USER_TEMPLATE = """阅读下面的小说片段，严格按以下 JSON 结构输�
 {content}"""
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# OpenCode Go / Console 要求每个请求带 x-opencode-session（路由 + 提示词缓存），缺了会 400 MissingSessionID；
+# 同时要求客户端用自己的 User-Agent，而不是 httpx 默认值。
+_OPENCODE_HOST = "opencode.ai"
+_OPENCODE_USER_AGENT = "novel-nan/1.0"
 # 验证须在 Java 端读超时（60s）内返回
 VERIFY_TIMEOUT = 30.0
+
+
+def _new_session_id() -> str:
+    """x-opencode-session 的值：官方客户端的形如 ses_ + 32 位小写十六进制。"""
+    return "ses_" + uuid.uuid4().hex
+
+
+def _is_opencode(base_url: str) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    return host == _OPENCODE_HOST or host.endswith("." + _OPENCODE_HOST)
 
 
 class ModelConfig(BaseModel):
@@ -43,6 +58,8 @@ class ModelConfig(BaseModel):
     model: str = Field(min_length=1)
     concurrency: int = Field(default=1, ge=1, le=8)
     protocol: Literal["openai", "anthropic"] = "openai"
+    # 一次任务 / 会话内稳定：OpenCode 用它把同一会话的请求路由到同一节点并复用提示词缓存
+    sessionId: str = Field(default_factory=_new_session_id, repr=False)
 
     def __repr__(self) -> str:  # 日志/异常里不出现密钥
         return f"ModelConfig(baseUrl={self.baseUrl!r}, model={self.model!r})"
@@ -72,13 +89,17 @@ def _endpoint(cfg: ModelConfig) -> str:
     return cfg.baseUrl.rstrip("/") + "/chat/completions"
 
 
-def _headers(protocol: str, api_key: str) -> dict:
+def _headers(protocol: str, api_key: str, base_url: str = "", session_id: str = "") -> dict:
     if protocol == "anthropic":
         h = {"anthropic-version": ANTHROPIC_VERSION}
         if api_key:
             h["x-api-key"] = api_key
-        return h
-    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    else:
+        h = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    if _is_opencode(base_url):
+        h["x-opencode-session"] = session_id or _new_session_id()
+        h["User-Agent"] = _OPENCODE_USER_AGENT
+    return h
 
 
 def _trust_env(cfg) -> bool:
@@ -187,7 +208,7 @@ def _post_chat(cfg: ModelConfig, payload: dict, retries: int, timeout: float | N
     """POST /chat/completions（或 Anthropic /v1/messages，转换后返回 OpenAI 形状），返回响应 JSON。
     429/5xx/超时自动重试；不支持 json_object 的服务自动降级；不认 thinking 参数的服务去掉后重发。
     cancel = 后台任务的取消标记：等待中途也能取消（见 _send）。"""
-    headers = _headers(cfg.protocol, cfg.apiKey)
+    headers = _headers(cfg.protocol, cfg.apiKey, cfg.baseUrl, cfg.sessionId)
     timeout = timeout or config.LLM_TIMEOUT
     anthropic = cfg.protocol == "anthropic"
     if anthropic:
@@ -324,6 +345,7 @@ class ListModelsRequest(BaseModel):
     baseUrl: str = Field(min_length=8)
     apiKey: str = ""
     protocol: Literal["openai", "anthropic"] = "openai"
+    sessionId: str = Field(default_factory=_new_session_id, repr=False)
 
     def __repr__(self) -> str:
         return f"ListModelsRequest(baseUrl={self.baseUrl!r}, protocol={self.protocol!r})"
@@ -339,8 +361,8 @@ def list_models(req: ListModelsRequest) -> dict:
     else:
         url = req.baseUrl.rstrip("/") + "/models"
     try:
-        resp = httpx.get(url, headers=_headers(req.protocol, req.apiKey), timeout=VERIFY_TIMEOUT,
-                         trust_env=_trust_env(req.baseUrl))
+        resp = httpx.get(url, headers=_headers(req.protocol, req.apiKey, req.baseUrl, req.sessionId),
+                         timeout=VERIFY_TIMEOUT, trust_env=_trust_env(req.baseUrl))
         if resp.status_code == 404:
             return {"ok": False, "models": [], "message": "这个服务没有提供模型列表接口（404），请手动添加模型名"}
         _raise_for_status(resp)

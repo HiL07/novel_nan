@@ -11,6 +11,7 @@ export const PROVIDER_PRESETS = [
   { key: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai', models: ['glm-4-plus', 'glm-4-flash'], concurrency: 4 },
   { key: 'siliconflow', label: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', protocol: 'openai', models: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-72B-Instruct'], concurrency: 4 },
   { key: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', protocol: 'openai', models: [], concurrency: 4 },
+  { key: 'opencode-go', label: 'OpenCode Go', baseUrl: 'https://opencode.ai/inference/go/openai/v1', protocol: 'openai', models: ['deepseek-v4.1-flash', 'deepseek-v4-pro', 'kimi-k3', 'glm-5.3', 'minimax-m3', 'qwen3.8-max'], concurrency: 4 },
   { key: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', protocol: 'openai', models: ['gpt-4o-mini', 'gpt-4o'], concurrency: 4 },
   { key: 'anthropic', label: 'Anthropic（Claude）', baseUrl: 'https://api.anthropic.com', protocol: 'anthropic', models: ['claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-5-5'], concurrency: 4 },
   { key: 'llamacpp', label: '本地 llama.cpp', baseUrl: 'http://127.0.0.1:8001/v1', protocol: 'openai', models: ['qwen2.5-7b-instruct'], concurrency: 1, noKey: true }
